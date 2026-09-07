@@ -7,8 +7,6 @@
 //!
 //! Run with: `just offline`
 
-#[path = "shared/todo.rs"]
-mod todo;
 #[path = "shared/tui.rs"]
 mod tui;
 

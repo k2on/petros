@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/exo"]
+members = ["crates/exo", "crates/todo", "crates/ffi"]
 
 [workspace.package]
 edition = "2021"
@@ -12,6 +12,8 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 ciborium = "0.2"
+exo = { path = "crates/exo" }
+todo = { path = "crates/todo" }
 # `fira-sans` embeds a default font. Without it iced asks the system for
 # one, which works on a desktop and gets you nothing at all in a browser:
 # wasm has no font access, so every glyph silently fails to draw.
@@ -25,6 +27,10 @@ sqlite-wasm-rs = "0.5"
 web-time = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+# Pinned exactly: `uniffi-bindgen-react-native` pins `uniffi = "=0.31"`, and the
+# generator and the runtime must agree on the metadata format or the bindings
+# it emits will not match the library it read them from.
+uniffi = "=0.31"
 uuid = { version = "1", features = ["serde"] }
 
 [profile.test]

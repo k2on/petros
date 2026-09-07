@@ -91,5 +91,62 @@ web: web-build
     @echo "serving on http://localhost:8080"
     cd crates/exo/examples/web && python3 -m http.server 8080
 
+# ---------------------------------------------------------------- the Expo peer
+#
+# The domain is defined once, in `crates/todo`. `crates/ffi` wraps it for
+# foreign callers with uniffi, and everything TypeScript sees is generated from
+# that — so there is no second `apply` to keep in step. See docs/decisions.md.
+
+expo-dir := "clients/expo"
+# bun hoists a workspace's binaries to the app, not to the library itself.
+ubrn := justfile_directory() / "clients/expo/node_modules/.bin/ubrn"
+ffi-lib := if os() == "macos" { "libexo_todo_ffi.dylib" } else { "libexo_todo_ffi.so" }
+
+# Install the JS side. Run once, and again after changing a dependency.
+expo-install:
+    cd {{expo-dir}} && bun install
+
+# Reads the UniFFI metadata straight back out of a host build of the crate, so
+# it needs no NDK and no Xcode. That is what makes "did my change to the Rust
+# reach the client?" a question you can answer in a couple of seconds — and the
+# `tsc` at the end is what turns "the app still calls the old API" into a
+# compile error rather than a crash on a device.
+#
+# `generate bindings` reads the crate name from `cargo metadata` so it runs at
+# the workspace root; `generate turbo-module` reads the library's package.json
+# so it runs there. Hence the two directories.
+
+# Regenerate the client's TypeScript and C++ from `crates/ffi`.
+ffi-bindings: expo-install
+    cargo build -p exo-todo-ffi
+    {{ubrn}} generate jsi bindings target/debug/{{ffi-lib}} --library --no-format \
+        --ts-dir {{expo-dir}}/modules/exo-todo/src/generated \
+        --cpp-dir {{expo-dir}}/modules/exo-todo/cpp/generated
+    cd {{expo-dir}}/modules/exo-todo && {{ubrn}} generate jsi turbo-module \
+        --config ubrn.config.yaml --native-bindings exo_todo_ffi
+    cd {{expo-dir}} && ./node_modules/.bin/tsc --noEmit
+
+# Needs the SDK and the NDK, which the default shell deliberately does not
+# carry: `nix develop .#android -c just expo-android`. Expo's native projects
+# are generated rather than committed, so `prebuild` runs first and `android/`
+# never enters the tree.
+
+# Build the Rust for Android, regenerate, and run the app.
+expo-android: expo-install
+    cd {{expo-dir}}/modules/exo-todo && {{ubrn}} build android \
+        --config ubrn.config.yaml --and-generate --release
+    cd {{expo-dir}} && bunx expo prebuild --platform android --clean
+    cd {{expo-dir}} && bunx expo run:android
+
+# Needs Xcode, so it only runs on a Mac — in CI that is a macOS runner, see
+# `.github/workflows/expo-ios.yml`.
+
+# The same for iOS.
+expo-ios: expo-install
+    cd {{expo-dir}}/modules/exo-todo && {{ubrn}} build ios \
+        --config ubrn.config.yaml --and-generate --release
+    cd {{expo-dir}} && bunx expo prebuild --platform ios --clean
+    cd {{expo-dir}} && bunx expo run:ios
+
 doc:
     cargo doc -p exo --no-deps --all-features --open

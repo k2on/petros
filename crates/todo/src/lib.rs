@@ -1,5 +1,14 @@
-//! A shared to-do list. Nothing clever, and deliberately dull: the point is
+//! The demo to-do list: nothing clever, and deliberately dull. The point is
 //! that Exo has never heard of any of it.
+//!
+//! This is the *one* definition of the domain. The mutations and the queries
+//! below are what the terminal examples run, what the iced window runs, what
+//! the server applies before it appends — and, through `crates/ffi`, what the
+//! Expo client runs too. A second implementation in another language would be
+//! a second `apply`, and two `apply`s that disagree make replicas diverge
+//! silently, which is the one failure this design exists to rule out. So the
+//! foreign bindings are generated from this file rather than written against
+//! it.
 
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;

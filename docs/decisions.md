@@ -363,3 +363,92 @@ the first thing a client says is its `Hello`, so early frames are held and
 flushed on open. And a sans-io client has to be pumped by someone — in iced that
 is a 50ms subscription, which is also what makes incoming entries appear without
 the user touching anything.
+
+## The demo domain is a crate, because it now has more than one caller
+
+`examples/shared/todo.rs` was a file three examples included with `#[path]`.
+That worked while every caller was an example in the same crate. It stopped
+working the moment the Expo client needed the same mutations, because an
+example cannot be depended on. So the to-do domain is `crates/todo`: the same
+code, in a place `crates/ffi` can reach. `crates/exo` takes it as a
+dev-dependency, which is a cycle — `todo` depends on `exo` — and one cargo
+resolves without complaint.
+
+The move is the whole point rather than tidying. There is exactly one `apply`
+in this repository, and the terminal peers, the iced window, the server and the
+phone all run it.
+
+## The Expo client calls Rust; it does not reimplement it
+
+The obvious way to put a to-do list on a phone is to write one in TypeScript and
+teach it the wire format. It was tried here first, and it was wrong: two
+`apply`s in two languages is two definitions of what a mutation *means*, and the
+first time they disagree — about `MAX(pos) + 1`, about whether a trimmed empty
+string is refused, about what happens to an edit whose row a confirmed entry
+removed — the replicas diverge silently and neither side is obviously at fault.
+Every invariant at the top of `CLAUDE.md` is a property of one implementation,
+not of two that intend to match.
+
+So `crates/ffi` exports the client over UniFFI and
+`uniffi-bindgen-react-native` generates the TypeScript. The generated files are
+gitignored rather than committed, so nobody can hand-edit them and wonder why
+the next build reverts it, and `just ffi-bindings` regenerates and then runs
+`tsc` — which turns "the app still calls the API the Rust used to have" into a
+compile error instead of a crash on a device.
+
+There is no UDL file. `#[uniffi::export]` on the Rust *is* the interface
+definition; the generator reads the metadata back out of the compiled library.
+One place to change, and it is the place that already had to be right.
+
+## The socket stayed in JavaScript
+
+`crates/ffi` exposes the sans-io client and nothing else: `take_outgoing()`
+hands back encoded frames, `recv()` takes them, and the caller owns the
+transport. React Native then does what a browser does in `transport/web.rs`,
+for the same reason it did there — the platform already has a WebSocket.
+
+The alternative was to run `exo::transport::ws` on a thread inside the FFI and
+hand JavaScript nothing but a `connect(url)`. It would have been thinner at the
+call site and worse everywhere else: a `tungstenite` and a TLS stack in the
+mobile binary, a uniffi callback interface to push changes back up, a thread to
+manage across backgrounding, and `wss://` reimplemented next to the platform
+trust store that already does it. Frames here are tens of bytes a few times a
+second; React Native base64s binary frames across its bridge, and at this volume
+that is not where the time goes. If it ever is — a media sync, say — the
+transport is a page of code and moving it is a local change, which is what
+sans-io bought in the first place.
+
+## Native projects are generated, not committed
+
+The Expo app uses Continuous Native Generation: there is no `ios/` or
+`android/` in the tree, `expo prebuild` makes them, and the turbo module is a
+workspace package React Native autolinks. This is why the client cannot run in
+Expo Go — Expo Go ships a fixed set of native modules and ours is not one of
+them — and a development build is not a limitation to work around but the
+consequence of calling into Rust at all.
+
+## Where each platform can be built, and where it cannot
+
+Google publishes the NDK as prebuilt binaries for `linux-x86_64` and nothing
+else. On an ARM Linux machine `nix develop .#android` resolves perfectly and
+then its `clang` will not execute — binfmt routes it to qemu, which has no
+x86-64 loader to give it. Apple's linker only exists inside Xcode. So neither
+mobile build runs on an ARM Linux workstation, and both run in CI instead:
+`.github/workflows/expo.yml` builds Android on an x86_64 runner and iOS on a
+macOS one, with nix supplying the identical toolchain in both. Nothing in the
+flake changes; the machine does.
+
+`just ffi-bindings` deliberately needs neither. It reads the UniFFI metadata out
+of a *host* build of the crate, so the loop that actually matters day to day —
+change the Rust, regenerate, see whether the app still compiles — is a couple of
+seconds on any machine.
+
+## The Android SDK is its own devshell
+
+`nix develop .#android` rather than the default shell. direnv loads the default
+shell on every `cd` into this tree, and the SDK is several gigabytes that
+nothing else here needs. The Rust targets are not in that shell, though: they
+are in `rust-toolchain.toml` with every other target, because that file is the
+one place a target is named and splitting it would put `wasm32` and
+`aarch64-linux-android` in different places for no reason. The Android shell
+adds an NDK, not a second toolchain.

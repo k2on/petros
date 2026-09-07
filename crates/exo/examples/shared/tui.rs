@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Terminal;
 
-use crate::todo::Item;
+use todo::Item;
 
 /// What the user is doing. Modal, so single letters can stay commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

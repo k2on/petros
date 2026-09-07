@@ -8,5 +8,20 @@
 [toolchain]
 channel = "1.90.0"
 components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
-# The browser build. `rust-overlay` reads this too, so the devshell gets it.
-targets = ["wasm32-unknown-unknown"]
+# Every target any client is built for, named in one place, because that is
+# what this file is for: `rust-overlay` reads it for the devshell and rustup
+# reads it outside, so a target cannot be present in one and missing in the
+# other. `nix develop .#android` adds the NDK — the compiler backends are
+# already here.
+#
+# The Apple entries cost a Linux machine two `rust-std` tarballs it will never
+# link. That is the price of the toolchain being described once rather than
+# branched on the host, and it is cheaper than a CI job that has to reach for
+# `rustup target add` inside a pure shell where there is no rustup.
+targets = [
+  "wasm32-unknown-unknown",
+  "aarch64-linux-android",
+  "x86_64-linux-android",
+  "aarch64-apple-ios",
+  "aarch64-apple-ios-sim",
+]

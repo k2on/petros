@@ -1,0 +1,12 @@
+[package]
+name = "todo"
+version = "0.1.0"
+description = "The demo to-do domain: one definition of the mutations and the queries, shared by the Rust examples and the FFI bindings."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+diesel.workspace = true
+exo.workspace = true
+serde.workspace = true

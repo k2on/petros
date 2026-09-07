@@ -14,9 +14,6 @@
 //! is two lines: where the database lives, and which transport carries the
 //! bytes.
 
-#[path = "shared/todo.rs"]
-mod todo;
-
 use std::time::Duration;
 
 use exo::{AutoCtx, Client, Id};

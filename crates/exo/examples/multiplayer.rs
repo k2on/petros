@@ -12,8 +12,6 @@
 //! Each peer keeps its own database in the temp directory, so state survives
 //! quitting and starting again.
 
-#[path = "shared/todo.rs"]
-mod todo;
 #[path = "shared/tui.rs"]
 mod tui;
 
