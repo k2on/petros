@@ -313,3 +313,18 @@ from the binary. So the devshell passes `-resource-dir` too, located with
 `lib.getLib` rather than a literal path so it survives that output split. Outside
 nix the recipe asks `clang -print-resource-dir` itself, and a normally-installed
 clang answers correctly.
+
+## The wasm-bindgen CLI has to match the crate exactly, so the recipe fetches it
+
+The JS glue and the wasm module carry a bindgen schema version, and the two must
+be identical — a CLI one release out refuses to run, which is the right call and
+a clear message. That makes "install wasm-bindgen-cli" an unusually sharp
+dependency: the version is whatever `Cargo.lock` resolved, not whatever a distro
+or nixpkgs happens to ship. nixpkgs 25.05 ships 0.2.100, and this tree cannot
+even go that low, because `sqlite-wasm-rs` requires `wasm-bindgen ^0.2.104`.
+
+So `just web` does not trust the one on `PATH`. It reads the version out of
+`Cargo.lock`, uses the `PATH` binary only if it matches exactly, and otherwise
+fetches that version into `target/` and uses it from there. The devshell still
+carries nixpkgs' copy for the case where it does match, and nothing breaks when
+it does not.

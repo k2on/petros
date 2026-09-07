@@ -48,11 +48,31 @@ desktop:
 web-build:
     #!/usr/bin/env bash
     set -euo pipefail
+
     cc="${WASM_CC:-clang}"
     # clang needs its own builtin headers — stddef.h and friends. A plain clang
     # finds them next to itself; nix's does not, because they live in a separate
     # output, so the devshell passes the path in and this works it out otherwise.
     cflags="${WASM_CFLAGS:-"-resource-dir $("$cc" -print-resource-dir)"}"
+
+    # The generated glue and the wasm module carry a bindgen schema version that
+    # must match exactly, so whatever wasm-bindgen happens to be on PATH is not
+    # good enough — nixpkgs' is pinned to its own release and ours moves with
+    # Cargo.lock. Fetch the matching one into ./target rather than asking anyone
+    # to keep a global install in step.
+    want="$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q}' Cargo.lock)"
+    have="$(wasm-bindgen --version 2>/dev/null | awk '{print $2}' || true)"
+    if [ "$have" = "$want" ]; then
+        bindgen=wasm-bindgen
+    else
+        bindgen="$PWD/target/wasm-tools/bin/wasm-bindgen"
+        if [ "$("$bindgen" --version 2>/dev/null | awk '{print $2}' || true)" != "$want" ]; then
+            echo "wasm-bindgen ${have:-none} on PATH, need $want — fetching it into target/"
+            cargo install wasm-bindgen-cli --locked --version "$want" \
+                --root "$PWD/target/wasm-tools"
+        fi
+    fi
+
     mkdir -p target/wasm-sqlite-stub clients/iced/pkg
     printf '!<arch>\n' > target/wasm-sqlite-stub/libsqlite3.a
     CC_wasm32_unknown_unknown="$cc" \
@@ -60,19 +80,9 @@ web-build:
     CFLAGS_wasm32_unknown_unknown="$cflags" \
     SQLITE3_LIB_DIR="$PWD/target/wasm-sqlite-stub" SQLITE3_STATIC=1 \
         cargo build -p exo-iced-demo --target wasm32-unknown-unknown --release
-    wasm-bindgen --target web --no-typescript \
+    "$bindgen" --target web --no-typescript \
         --out-dir clients/iced/pkg \
         target/wasm32-unknown-unknown/release/exo_iced_demo.wasm
-
-# Install the wasm-bindgen CLI at exactly the version Cargo.lock pins.
-#
-# The generated glue and the wasm module carry a schema version that must match
-# exactly, so the CLI is not interchangeable between releases. If the devshell's
-# copy is a different version, wasm-bindgen says so plainly — run this and it
-# will be right.
-web-tools:
-    cargo install wasm-bindgen-cli --locked --version \
-        "$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q}' Cargo.lock)"
 
 # Build it and serve it at http://localhost:8080
 web: web-build

@@ -56,10 +56,10 @@
             packages = [ toolchain ] ++ (with pkgs; [
               cargo-nextest
               just
-              # For `just web`. Its schema version must match the wasm-bindgen
-              # crate in Cargo.lock exactly; if nixpkgs ships a different one,
-              # wasm-bindgen says so plainly and `just web-tools` installs the
-              # matching version.
+              # `just web` uses this only when its version happens to match the
+              # wasm-bindgen crate in Cargo.lock, which nixpkgs cannot promise —
+              # the schema versions must be identical. Otherwise the recipe
+              # fetches the matching one into ./target by itself.
               wasm-bindgen-cli
               llvmPackages.llvm
               bun
