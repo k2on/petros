@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/exo"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+ciborium = "0.2"
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled", "uuid"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+uuid = { version = "1", features = ["serde"] }
+
+[profile.test]
+opt-level = 1
