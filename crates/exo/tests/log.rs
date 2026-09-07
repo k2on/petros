@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Todo, TodoMutation};
+use common::todo::{Todo, TodoMutation};
 use exo::{ActorId, AutoCtx, ClientMsg, Entry, Server, ServerMsg, Uuid};
 
 fn entry(actor: &str, m: TodoMutation, auto: &mut AutoCtx) -> Entry<TodoMutation> {

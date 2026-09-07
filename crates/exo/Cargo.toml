@@ -21,6 +21,7 @@ uuid.workspace = true
 tungstenite = { version = "0.24", optional = true }
 
 [dev-dependencies]
+rand.workspace = true
 proptest = "1"
 
 [[example]]

@@ -6,6 +6,5 @@
 // Each integration test binary uses a different slice of this module.
 #![allow(dead_code)]
 
+pub mod sim;
 pub mod todo;
-
-pub use todo::{Todo, TodoMutation};
