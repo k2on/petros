@@ -23,13 +23,6 @@
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ (import rust-overlay) ];
-            # Only the Android SDK needs either of these, and only in the
-            # `android` shell below. Google ships it under a licence nixpkgs
-            # classifies as unfree, and there is no way to accept it per-shell.
-            config = {
-              allowUnfree = true;
-              android_sdk.accept_license = true;
-            };
           };
 
           # Read from ./rust-toolchain.toml rather than repeated here, so the
@@ -47,24 +40,6 @@
           wasmResourceDir =
             "${pkgs.lib.getLib wasmClang}/lib/clang/"
             + pkgs.lib.versions.major wasmClang.version;
-
-          # The Android SDK and NDK, for building `crates/ffi` into the Expo
-          # client. Deliberately *not* in the default shell: it is several
-          # gigabytes, direnv loads the default shell on every `cd` into this
-          # tree, and nothing else here needs it. `nix develop .#android`.
-          #
-          # This shell is x86_64-linux and x86_64-darwin only in practice.
-          # Google ships the NDK as prebuilt binaries and publishes no
-          # aarch64-linux host toolchain, so on an ARM Linux box (an Asahi Mac,
-          # say) the SDK resolves but its `clang` cannot execute — binfmt hands
-          # it to qemu, which then has no x86-64 loader to give it. Build
-          # Android on an x86_64 machine or in CI; nothing about the
-          # configuration below changes.
-          android = pkgs.androidenv.composeAndroidPackages {
-            platformVersions = [ "35" ];
-            buildToolsVersions = [ "35.0.0" ];
-            includeNDK = true;
-          };
 
           # Runtime libraries the iced client will dlopen (phase 5). Wired up
           # now so the shell does not need revisiting when that lands.
@@ -137,37 +112,55 @@
             '';
           };
 
-          # Everything the default shell has, plus the Android SDK and NDK.
+          # Everything the default shell has, plus the two tools that turn Rust
+          # into an Android library.
           #
           #     nix develop .#android -c just expo-android
           #
-          # Separate because it is several gigabytes and direnv loads the
-          # default shell every time you `cd` in here. iOS has no equivalent:
-          # it needs Xcode, so it is built on a macOS runner by
-          # `.github/workflows/ios.yml` rather than anywhere on Linux.
+          # The SDK and the NDK are *not* here, and that is deliberate. This
+          # flake once composed them with `androidenv`; gradle then failed with
+          # "The SDK directory is not writable", because the Android Gradle
+          # Plugin resolves versions against the SDK directory and installs
+          # whatever is missing — and a nix store path is read-only by
+          # construction. Pinning every version to match Expo's exactly would
+          # postpone that fight rather than win it: Expo moves its `compileSdk`
+          # and `ndkVersion` on its own schedule, and nixpkgs moves on another.
+          #
+          # So the SDK comes from where it comes from for every other React
+          # Native project — Android Studio locally, the runner image in CI —
+          # and nix pins the part that is actually ours: the Rust toolchain, its
+          # Android targets, cargo-ndk and bun. `crates/ffi` cross-compiles
+          # identically either way.
           android = pkgs.mkShell {
             inputsFrom = [ self.devShells.${system}.default ];
 
             packages = with pkgs; [
-              # Turns a `cargo build` into one that knows about the NDK's
-              # toolchain, sysroot and target triples, and drops the result
-              # where gradle expects to find it.
+              # Gives `cargo build` the NDK's toolchain, sysroot and target
+              # triples, and drops the result where gradle looks for it.
               cargo-ndk
               jdk17
-              android.androidsdk
             ];
 
-            ANDROID_HOME = "${android.androidsdk}/libexec/android-sdk";
-            ANDROID_SDK_ROOT = "${android.androidsdk}/libexec/android-sdk";
-            ANDROID_NDK_ROOT = "${android.androidsdk}/libexec/android-sdk/ndk-bundle";
-            JAVA_HOME = "${pkgs.jdk17}";
-
             shellHook = ''
-              # gradle refuses to use the SDK's own prebuilt aapt2 on NixOS,
-              # because it is a dynamically linked binary against an FHS that
-              # is not there. The one in the store is patched; point at it.
-              export GRADLE_OPTS="-Dorg.gradle.project.android.aapt2FromMavenOverride=$ANDROID_HOME/build-tools/35.0.0/aapt2"
-              echo "harken android shell — just expo-android"
+              if [ -z "''${ANDROID_HOME:-}" ] && [ -n "''${ANDROID_SDK_ROOT:-}" ]; then
+                export ANDROID_HOME="$ANDROID_SDK_ROOT"
+              fi
+              if [ -z "''${ANDROID_HOME:-}" ]; then
+                echo "android shell: no ANDROID_HOME." >&2
+                echo "  Install the SDK (Android Studio, or sdkmanager) and export it." >&2
+                echo "  Note that Google publishes no aarch64-linux NDK, so an ARM" >&2
+                echo "  Linux machine cannot build this at all — use x86_64, or CI." >&2
+              else
+                # cargo-ndk looks for these in turn; be explicit rather than
+                # depending on which one an SDK install happened to set.
+                export ANDROID_SDK_ROOT="''${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+                if [ -z "''${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
+                  export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)"
+                fi
+                echo "harken android shell — just expo-android"
+                echo "  sdk: $ANDROID_HOME"
+                echo "  ndk: ''${ANDROID_NDK_HOME:-<none found>}"
+              fi
             '';
           };
         });

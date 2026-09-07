@@ -42,12 +42,38 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    env:
+      # What Expo SDK 57 asks gradle for. Pinned here rather than left to
+      # whatever the runner image ships, so a new image cannot silently change
+      # the build — and so `cargo ndk` and the Android Gradle Plugin are looking
+      # at the same NDK rather than two.
+      NDK_VERSION: 27.1.12297006
+      COMPILE_SDK: "36"
+      BUILD_TOOLS: 36.0.0
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      # `run:android` needs an emulator; this stops at the APK, which is what
-      # tells us the JNI, the CMake and the Rust all still agree.
+
+      # The SDK comes from the runner, not from nix. AGP resolves versions
+      # against the SDK directory and installs what is missing, which a nix
+      # store path can never allow. nix still pins everything that is ours:
+      # the Rust toolchain, its Android targets, cargo-ndk and bun.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.COMPILE_SDK }}
+            build-tools;${{ env.BUILD_TOOLS }}
+            ndk;${{ env.NDK_VERSION }}
+            cmake;3.22.1
+      - name: Point every tool at the same NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
       - name: Build the Rust and the turbo module
         run: |
           nix develop .#android --command bash -c '
@@ -56,6 +82,9 @@ jobs:
             ../../node_modules/.bin/ubrn build android \
               --config ubrn.config.yaml --and-generate --release
           '
+
+      # `run:android` would need an emulator; stopping at the APK is what tells
+      # us the JNI, the CMake and the Rust still agree.
       - name: Prebuild and assemble
         run: |
           nix develop .#android --command bash -c '
@@ -63,6 +92,7 @@ jobs:
             bunx expo prebuild --platform android --clean
             cd android && ./gradlew assembleDebug --no-daemon
           '
+
       - uses: actions/upload-artifact@v4
         with:
           name: exo-todo-android

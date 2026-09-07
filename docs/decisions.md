@@ -443,12 +443,41 @@ of a *host* build of the crate, so the loop that actually matters day to day —
 change the Rust, regenerate, see whether the app still compiles — is a couple of
 seconds on any machine.
 
-## The Android SDK is its own devshell
+## The Android SDK comes from the machine, not from nix
 
-`nix develop .#android` rather than the default shell. direnv loads the default
-shell on every `cd` into this tree, and the SDK is several gigabytes that
-nothing else here needs. The Rust targets are not in that shell, though: they
-are in `rust-toolchain.toml` with every other target, because that file is the
-one place a target is named and splitting it would put `wasm32` and
-`aarch64-linux-android` in different places for no reason. The Android shell
-adds an NDK, not a second toolchain.
+`nix develop .#android` was composed with `androidenv` at first, so that the SDK
+and NDK were pinned like everything else. It failed in CI, and the error was the
+interesting part:
+
+```
+Failed to install the following SDK components:
+    ndk;27.1.12297006 NDK (Side by side) 27.1.12297006
+The SDK directory is not writable (/nix/store/…-androidsdk/libexec/android-sdk)
+```
+
+The Android Gradle Plugin does not merely *read* the SDK directory; it resolves
+the versions a project asks for against it and installs whatever is missing. A
+nix store path is read-only by construction, so any version the flake did not
+happen to pin is a hard failure rather than a download — and the flake had
+pinned build-tools 35 and NDK 28 against an Expo that wanted 36 and 27, in a
+layout (`ndk-bundle` rather than `ndk/<version>`) the plugin does not recognise
+as installed.
+
+Matching those numbers exactly would have postponed the fight rather than won
+it: Expo moves its `compileSdk` and `ndkVersion` on its own schedule and nixpkgs
+moves on another, and the next bump breaks the build again in the same way.
+
+So the SDK now comes from where it comes from for every other React Native
+project — Android Studio locally, the runner image in CI — and nix pins the part
+that is actually ours: the Rust toolchain, its Android targets, `cargo-ndk` and
+bun. That is the half that has to match `Cargo.lock`; the Android SDK never did.
+The shell also stopped being several gigabytes, and `flake.nix` stopped needing
+an unfree opt-in to exist.
+
+## The Rust targets stay in `rust-toolchain.toml`
+
+Not in the Android shell. That file is the one place a target is named, read by
+`rust-overlay` inside the devshell and by rustup outside it, and splitting it
+would put `wasm32-unknown-unknown` and `aarch64-linux-android` in different
+places for no reason. The Android shell adds `cargo-ndk`, not a second
+toolchain.
