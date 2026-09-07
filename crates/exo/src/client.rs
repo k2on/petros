@@ -39,7 +39,9 @@ pub struct Client<A: App> {
     savepoint_open: bool,
     out: Vec<ClientMsg<A::Mutation>>,
     rejections: Vec<Rejection>,
-    _app: PhantomData<A>,
+    /// `fn() -> A` rather than `A`: the marker should not drag the app's
+    /// auto traits into ours.
+    _app: PhantomData<fn() -> A>,
 }
 
 impl<A: App> std::fmt::Debug for Client<A> {

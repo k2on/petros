@@ -1,4 +1,5 @@
 [package]
+autoexamples = false
 name = "exo"
 version = "0.1.0"
 description = "An offline-first sync engine: an append-only, server-ordered log of mutations with client-side rebase."

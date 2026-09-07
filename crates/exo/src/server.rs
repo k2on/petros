@@ -29,7 +29,9 @@ pub struct Server<A: App> {
     conns: BTreeMap<ConnId, Seq>,
     head: Seq,
     out: Vec<(ConnId, ServerMsg<A::Mutation>)>,
-    _app: PhantomData<A>,
+    /// `fn() -> A` rather than `A`: the marker should not drag the app's
+    /// auto traits into ours.
+    _app: PhantomData<fn() -> A>,
 }
 
 impl<A: App> std::fmt::Debug for Server<A> {

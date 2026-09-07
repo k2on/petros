@@ -46,6 +46,9 @@ pub enum Error {
     /// The peer said something that cannot be true.
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// The transport broke. Only ever produced by `exo::transport`.
+    #[error("transport: {0}")]
+    Transport(String),
     /// A pushed entry arrived without the client-generated id the log needs.
     #[error("entry {0} is missing a sequence number")]
     MissingSeq(Uuid),
