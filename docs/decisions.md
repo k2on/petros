@@ -289,3 +289,19 @@ headless SwiftShader no text glyphs paint, though widgets, layout and typed
 input all work and the same code draws text correctly on the desktop — a real
 GPU is the place to confirm that. And `winit`'s web event loop can panic with
 "RefCell already borrowed" under synthetic input.
+
+## `CC` in the environment hijacks the wasm build
+
+`cc-rs` picks a compiler by looking for `CC_wasm32_unknown_unknown`, then
+`TARGET_CC`, then plain `CC`. A shell that exports `CC` — the nix devshell does,
+and so does most of CI — therefore hands the *host* compiler a
+`wasm32-unknown-unknown` compile, and gcc cannot target wasm at all. The failure
+is loud but misleading: pages of errors from inside glibc's headers, because the
+host toolchain went looking for a libc that has no business being there.
+
+So the browser recipe sets `CC_wasm32_unknown_unknown` explicitly. In the
+devshell that points at an *unwrapped* clang, because nix's wrapped clang
+injects the system's glibc include paths and fails in the same way for the same
+reason. This did not show up on the machine the browser build was first proven
+on, for the least satisfying possible reason: `CC` happened to be unset there,
+so `cc-rs` defaulted to clang and everything worked by luck.

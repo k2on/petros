@@ -45,9 +45,16 @@
             packages = [ toolchain ] ++ (with pkgs; [
               cargo-nextest
               just
-              # For `just web`. Must match the wasm-bindgen version in
-              # Cargo.lock; if they drift, wasm-bindgen says so loudly.
+              # For `just web`. Its schema version must match the wasm-bindgen
+              # crate in Cargo.lock exactly; if nixpkgs ships a different one,
+              # wasm-bindgen says so plainly and `just web-tools` installs the
+              # matching version.
               wasm-bindgen-cli
+              # SQLite's C, compiled for wasm. Unwrapped on purpose: the wrapped
+              # clang injects this system's glibc headers, which is exactly what
+              # breaks a wasm32-unknown-unknown build.
+              llvmPackages.clang-unwrapped
+              llvmPackages.llvm
               bun
               sqlite
               pkg-config
@@ -57,6 +64,12 @@
 
             # iced loads these at runtime rather than linking them.
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath icedLibs;
+
+            # `just web` reads these. They are explicit paths rather than a bare
+            # `clang` because the devshell also exports `CC=gcc`, and gcc cannot
+            # target wasm.
+            WASM_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+            WASM_AR = "${pkgs.llvmPackages.llvm}/bin/llvm-ar";
 
             shellHook = ''
               echo "harken devshell — just test | just lint | just offline | just serve"
