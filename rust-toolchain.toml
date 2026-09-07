@@ -1,0 +1,10 @@
+# The one place the toolchain version lives. `nix develop` reads this file via
+# rust-overlay's `fromRustupToolchainFile`, and rustup reads it directly, so a
+# contributor inside the devshell and one outside it get the same compiler.
+#
+# This is deliberately not the crate's MSRV: `rust-version` in Cargo.toml
+# declares the floor (1.88, the oldest that builds the dependency tree), and
+# this is the version development actually happens on.
+[toolchain]
+channel = "1.90.0"
+components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]

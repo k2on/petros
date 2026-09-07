@@ -25,11 +25,10 @@
             overlays = [ (import rust-overlay) ];
           };
 
-          # The whole toolchain comes from the overlay, so every machine gets
-          # the same rustc down to the patch version.
-          toolchain = pkgs.rust-bin.stable."1.85.0".default.override {
-            extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
-          };
+          # Read from ./rust-toolchain.toml rather than repeated here, so the
+          # version cannot drift between the devshell and a plain `cargo`
+          # outside it — and so bumping it is a one-line change in one file.
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
           # Runtime libraries the iced client will dlopen (phase 5). Wired up
           # now so the shell does not need revisiting when that lands.
