@@ -15,7 +15,7 @@ ciborium = "0.2"
 # `fira-sans` embeds a default font. Without it iced asks the system for
 # one, which works on a desktop and gets you nothing at all in a browser:
 # wasm has no font access, so every glyph silently fails to draw.
-iced = { version = "0.14", features = ["fira-sans", "smol"] }
+iced = { version = "0.14", features = ["fira-sans"] }
 rand = "0.8"
 diesel = { version = "2.3", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
 # `bundled` is applied per target, not here: the browser build must NOT

@@ -61,6 +61,9 @@ iced.workspace = true
 # no wasm. None of them belong there, so none of them are declared there.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 crossterm = "0.28"
+# `smol` gives iced a timer to drive the example's transport pump. In a browser
+# it already has one.
+iced = { workspace = true, features = ["smol"] }
 proptest = "1"
 ratatui = "0.29"
 tempfile = "3"
@@ -69,6 +72,11 @@ tempfile = "3"
 # that reports "unreachable executed".
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 console_error_panic_hook = "0.1"
+# WebGL rather than WebGPU, for reach. Without it wgpu finds no backend, iced
+# falls back to its software renderer, and that cannot have the canvas because
+# WebGL already claimed it — which surfaces as a blank page and a panic about
+# canvas contexts.
+iced = { workspace = true, features = ["webgl"] }
 
 [[example]]
 name = "offline"
