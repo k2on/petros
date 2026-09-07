@@ -137,16 +137,3 @@ pub fn list(conn: &mut Connection) -> exo::Result<Vec<Item>> {
         .order((todo::pos.asc(), todo::id.asc()))
         .load(conn)?)
 }
-
-/// One line per item, as the demo prints it.
-pub fn render(items: &[Item]) -> String {
-    items
-        .iter()
-        .enumerate()
-        .map(|(i, it)| {
-            let mark = if it.done { "x" } else { " " };
-            format!("  {:>2}. [{}] {}  ({})", i + 1, mark, it.text, it.actor)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}

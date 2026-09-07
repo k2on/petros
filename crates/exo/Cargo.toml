@@ -23,7 +23,10 @@ uuid.workspace = true
 tungstenite = { version = "0.24", optional = true }
 
 [dev-dependencies]
+# Examples only. The engine has no opinion about terminals.
+crossterm = "0.28"
 proptest = "1"
+ratatui = "0.29"
 tempfile = "3"
 
 [[example]]
