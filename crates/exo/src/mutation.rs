@@ -39,7 +39,7 @@ impl Deref for Transaction<'_> {
 
 /// One intent from the app's mutation enum.
 ///
-/// Mutations are intents, not facts: `AddTracks { playlist, tracks }`, never
+/// Mutations are intents, not facts: `AddToList { list, items }`, never
 /// `ItemInserted { pos: "a5" }`. `apply` may read the database to decide what to
 /// write, which is what lets a mutation mean the same thing when it lands after
 /// entries it has never seen.

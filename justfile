@@ -5,6 +5,7 @@ default: fmt lint test
 # Run the whole suite. Must stay under 30 seconds.
 test:
     cargo nextest run --workspace --all-features
+    cargo test --workspace --all-features --doc
 
 # Clippy over everything, warnings are errors.
 lint:

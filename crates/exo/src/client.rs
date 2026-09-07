@@ -188,7 +188,10 @@ impl<A: App> Client<A> {
         self.open_optimistic()
     }
 
-    /// Drain messages the client wants to send.
+    /// Drain messages the client wants to send. A caller with no connection
+    /// should drain and discard rather than let the queue grow: reconnecting
+    /// with [`connected`](Self::connected) re-offers everything still pending,
+    /// and the server dedupes what it has already seen.
     pub fn take_outgoing(&mut self) -> Vec<ClientMsg<A::Mutation>> {
         std::mem::take(&mut self.out)
     }

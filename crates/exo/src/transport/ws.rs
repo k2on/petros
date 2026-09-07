@@ -23,12 +23,6 @@ impl From<tungstenite::Error> for Error {
     }
 }
 
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Transport(e.to_string())
-    }
-}
-
 /// A connection to an Exo server. Owns a thread; drop it to disconnect.
 #[derive(Debug)]
 pub struct Link<M> {
@@ -90,7 +84,8 @@ where
     let peers: Peers<A::Mutation> = Arc::new(Mutex::new(HashMap::new()));
     let mut next_conn: ConnId = 1;
     for stream in listener.incoming() {
-        let stream = stream?;
+        // One peer failing to connect is not a reason to stop serving the rest.
+        let Ok(stream) = stream else { continue };
         let conn = next_conn;
         next_conn += 1;
         let (tx, rx) = channel();

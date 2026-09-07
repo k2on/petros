@@ -1,5 +1,5 @@
-//! A shared to-do list. Nothing musical, nothing clever: the point is that Exo
-//! has never heard of any of it.
+//! A shared to-do list. Nothing clever, and deliberately dull: the point is
+//! that Exo has never heard of any of it.
 
 use exo::{ActorId, App, AutoCtx, Connection, Mutation, MutationError, Transaction, Uuid};
 use serde::{Deserialize, Serialize};

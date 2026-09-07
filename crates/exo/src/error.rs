@@ -49,9 +49,17 @@ pub enum Error {
     /// The transport broke. Only ever produced by `exo::transport`.
     #[error("transport: {0}")]
     Transport(String),
-    /// A pushed entry arrived without the client-generated id the log needs.
+    /// An entry reached the log without the sequence number that orders it.
     #[error("entry {0} is missing a sequence number")]
     MissingSeq(Uuid),
+}
+
+// Not behind the `ws` feature: enabling a feature should add a transport, not
+// change the shape of the error type.
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Transport(e.to_string())
+    }
 }
 
 /// Result alias used throughout the crate.

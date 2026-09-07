@@ -1,7 +1,7 @@
 //! Exo — an offline-first sync engine.
 //!
 //! Exo syncs an append-only, totally ordered log of mutations owned by a
-//! server. Mutations are *intents*, not facts: `AddTracks { playlist, tracks }`,
+//! server. Mutations are *intents*, not facts: `AddToList { list, items }`,
 //! not `ItemInserted { pos: "a5" }`. A mutation's
 //! [`apply`](Mutation::apply) may read the database to decide what to write.
 //!
