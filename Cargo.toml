@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["clients/iced", "crates/exo"]
+members = ["crates/exo"]
 
 [workspace.package]
 edition = "2021"
@@ -12,7 +12,10 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 ciborium = "0.2"
-iced = "0.14"
+# `fira-sans` embeds a default font. Without it iced asks the system for
+# one, which works on a desktop and gets you nothing at all in a browser:
+# wasm has no font access, so every glyph silently fails to draw.
+iced = { version = "0.14", features = ["fira-sans", "smol"] }
 rand = "0.8"
 diesel = { version = "2.3", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
 # `bundled` is applied per target, not here: the browser build must NOT

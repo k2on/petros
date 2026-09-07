@@ -1,4 +1,4 @@
 /target
 result
 result-*
-clients/iced/pkg
+crates/exo/examples/web/pkg

@@ -226,11 +226,19 @@ They are driven under tmux for verification rather than trusted to work: a real
 pty, real keypresses, and the screen captured and checked, including the
 partition-and-heal flow that the whole crate exists to make correct.
 
-## The iced client, and why `view` cannot query the database
+## The iced example, and why `view` cannot query the database
 
-`clients/iced` is the same to-do list as the examples, in iced. The engine is
-untouched by it: the client is an ordinary `exo::Client`, and the app is an
-ordinary iced program.
+The iced app is an example alongside the terminal ones, sharing their to-do
+domain and their server: `just serve`, then `just peer alice` for a TUI peer and
+`just iced bob` for a window, and an item added in one appears in the other. The
+engine is untouched by it — an ordinary `exo::Client` and an ordinary iced
+program.
+
+Being an example rather than its own crate costs one thing worth knowing:
+`cargo build --example` compiles every dev-dependency, so a browser build would
+drag in the test suite's and the terminal examples' dependencies, and `proptest`
+reaches `wait-timeout`, which has no wasm. They are declared under
+`[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]` for that reason.
 
 One shape is worth noting. iced's `view` takes `&self` and Diesel needs `&mut`
 for every query, reads included, so a query cannot happen during rendering. The
@@ -328,3 +336,30 @@ So `just web` does not trust the one on `PATH`. It reads the version out of
 fetches that version into `target/` and uses it from there. The devshell still
 carries nixpkgs' copy for the case where it does match, and nothing breaks when
 it does not.
+
+## Nothing renders text without a font, and a browser has none to give
+
+iced does not embed a font by default: `fira-sans` is a feature, not part of
+`default`. On a desktop it asks the system and fontconfig answers, so the gap is
+invisible. In a browser there is no system to ask, and every glyph silently
+fails to draw — widgets, layout and input all work, and the text is simply not
+there. Enabling `fira-sans` embeds one and both targets draw.
+
+This was misdiagnosed once as an artifact of headless software rendering, which
+is a good reminder that "it only fails in my weird test setup" is a hypothesis,
+not an explanation.
+
+## The browser needs its own WebSocket
+
+`transport::ws` is blocking `tungstenite` on a thread, which a browser has
+neither of. `transport::web` is the same `Link` shape — `send`, `try_recv`,
+`is_alive` — over the DOM's `WebSocket`, with frames arriving in callbacks and
+landing in a queue. That queue is exactly what the sans-io client wants anyway,
+which is the point of sans-io: the engine did not change to gain a second
+transport, and the example picks one with a `cfg`.
+
+Two wrinkles worth keeping: a `WebSocket` refuses sends until it is open, and
+the first thing a client says is its `Hello`, so early frames are held and
+flushed on open. And a sans-io client has to be pumped by someone — in iced that
+is a 50ms subscription, which is also what makes incoming entries appear without
+the user touching anything.
