@@ -10,8 +10,8 @@ use std::marker::PhantomData;
 use rusqlite::Connection;
 
 use crate::{
-    Mutation,
-    store, App, ClientMsg, Entry, Error, MutationError, Result, Seq, ServerMsg, Transaction,
+    store, App, ClientMsg, Entry, Error, Mutation, MutationError, Result, Seq, ServerMsg,
+    Transaction,
 };
 
 /// How many entries one [`ServerMsg::Batch`] carries. A client that sees
@@ -117,8 +117,13 @@ impl<A: App> Server<A> {
                 // A deterministic verdict: this entry will never be in the log,
                 // and every replica would have reached the same conclusion.
                 Err(Error::Mutation(MutationError::Rejected(reason))) => {
-                    self.out
-                        .push((from, ServerMsg::Reject { id: entry.id, reason }));
+                    self.out.push((
+                        from,
+                        ServerMsg::Reject {
+                            id: entry.id,
+                            reason,
+                        },
+                    ));
                 }
                 Err(other) => return Err(other),
             }

@@ -26,7 +26,10 @@ fn append_assigns_monotonic_seq() {
 
     let acked = acks(&mut s);
     assert_eq!(acked.len(), 3);
-    assert_eq!(acked.iter().map(|(_, seq)| *seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        acked.iter().map(|(_, seq)| *seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
     assert_eq!(s.head(), 3);
 }
 
@@ -36,7 +39,13 @@ fn duplicate_uuid_is_deduped() {
     let mut s = server();
     let e = entry("alice", TodoMutation::add("only once"), &mut auto);
 
-    s.recv(1, ClientMsg::Push { entries: vec![e.clone()] }).unwrap();
+    s.recv(
+        1,
+        ClientMsg::Push {
+            entries: vec![e.clone()],
+        },
+    )
+    .unwrap();
     let first = acks(&mut s);
     // A push whose response was lost, retried. The call site should not have to
     // reason about this at all.

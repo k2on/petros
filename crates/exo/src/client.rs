@@ -34,6 +34,9 @@ pub struct Client<A: App> {
     /// Highest confirmed sequence number applied. Contiguous from 1 by
     /// construction: a gap stops us until the missing entry arrives.
     cursor: Seq,
+    /// Whether the optimistic savepoint is currently held. It is held exactly
+    /// when there is something pending.
+    savepoint_open: bool,
     out: Vec<ClientMsg<A::Mutation>>,
     rejections: Vec<Rejection>,
     _app: PhantomData<A>,
@@ -59,11 +62,16 @@ impl<A: App> Client<A> {
             actor: actor.into(),
             auto,
             cursor,
+            savepoint_open: false,
             out: Vec::new(),
             rejections: Vec::new(),
             _app: PhantomData,
         };
-        client.rebuild()?;
+        // Whatever optimistic state a previous session left behind died with its
+        // uncommitted transaction. Finish anything the log is ahead on, then
+        // rebuild the view from the pending mutations that did survive.
+        client.advance()?;
+        client.open_optimistic()?;
         Ok(client)
     }
 
@@ -90,14 +98,24 @@ impl<A: App> Client<A> {
     /// Author a mutation: fill its non-deterministic arguments, apply it
     /// optimistically, and queue it for the server.
     pub fn mutate(&mut self, mut mutation: A::Mutation) -> Result<Uuid> {
+        // Exactly once, here at the origin. From now on these arguments are
+        // frozen: no replay of this entry will ever regenerate them.
         mutation.fill_auto(&mut self.auto);
         let entry = Entry::new(self.auto.uuid(), self.actor.clone(), mutation);
+
+        // Try it against the view the caller is actually looking at. An intent
+        // that is invalid here is invalid everywhere, so it should never reach
+        // the log, the pending queue, or the outbox.
+        self.probe(&entry)?;
+
+        // The optimistic view is scratch, but the intent is not: an offline
+        // client that loses a week of edits to a crash is not offline-first. We
+        // cannot commit anything while holding the savepoint open, so drop the
+        // savepoint, commit the intent on its own, then rebuild the view.
+        self.discard_optimistic()?;
         store::put_pending(&self.conn, &entry)?;
-        if let Err(e) = self.rebuild() {
-            store::drop_pending(&self.conn, &entry.id)?;
-            self.rebuild()?;
-            return Err(e);
-        }
+        self.open_optimistic()?;
+
         let id = entry.id;
         self.out.push(ClientMsg::Push {
             entries: vec![entry],
@@ -109,9 +127,7 @@ impl<A: App> Client<A> {
     /// re-offer everything still pending. Both are safe to repeat — the server
     /// dedupes pushes on entry id.
     pub fn connected(&mut self) -> Result<()> {
-        self.out.push(ClientMsg::Hello {
-            since: self.cursor,
-        });
+        self.out.push(ClientMsg::Hello { since: self.cursor });
         let pending: Vec<Entry<A::Mutation>> = store::pending(&self.conn)?;
         if !pending.is_empty() {
             self.out.push(ClientMsg::Push { entries: pending });
@@ -121,6 +137,10 @@ impl<A: App> Client<A> {
 
     /// Handle one message from the server.
     pub fn recv(&mut self, msg: ServerMsg<A::Mutation>) -> Result<()> {
+        // Undo our optimistic view before touching anything durable: the
+        // bookkeeping below has to be committed, and it cannot be committed
+        // underneath a savepoint we still intend to roll back.
+        self.discard_optimistic()?;
         match msg {
             ServerMsg::Batch { entries, has_more } => {
                 for entry in &entries {
@@ -159,7 +179,11 @@ impl<A: App> Client<A> {
                 self.rejections.push(Rejection { id, reason });
             }
         }
-        self.advance()
+        self.advance()?;
+        // ...and replay whatever is still ours on top of the new confirmed
+        // state. If nothing is pending this opens nothing: steady state holds
+        // no transaction at all.
+        self.open_optimistic()
     }
 
     /// Drain messages the client wants to send.
@@ -172,15 +196,28 @@ impl<A: App> Client<A> {
         std::mem::take(&mut self.rejections)
     }
 
-    /// Move the cursor over every contiguous confirmed entry we now hold, then
-    /// rebuild the view.
+    /// Move the cursor over every contiguous confirmed entry we now hold,
+    /// applying each one. The cursor and the state it describes are committed
+    /// together, so a crash mid-batch simply replays from the old cursor.
     fn advance(&mut self) -> Result<()> {
         let next = self.next_cursor()?;
-        if next != self.cursor {
-            self.cursor = next;
-            store::set_cursor(&self.conn, next)?;
+        if next == self.cursor {
+            return Ok(());
         }
-        self.rebuild()
+        let count = (next - self.cursor) as usize;
+        let entries: Vec<Entry<A::Mutation>> =
+            store::entries_after(&self.conn, self.cursor, count)?;
+        let tx = self.conn.transaction()?;
+        for entry in &entries {
+            // A confirmed entry that will not apply means this client and the
+            // server disagree about what the same arguments mean — a
+            // determinism bug. Fail loudly rather than diverge quietly.
+            entry.mutation.apply(&Transaction::new(&tx), &entry.actor)?;
+        }
+        store::set_cursor(&tx, next)?;
+        tx.commit()?;
+        self.cursor = next;
+        Ok(())
     }
 
     /// The end of the contiguous run of confirmed entries starting at
@@ -198,67 +235,83 @@ impl<A: App> Client<A> {
         Ok(next.map(|s| s as Seq).unwrap_or(self.cursor))
     }
 
-    /// Naive materialisation: throw the app's tables away and replay the whole
-    /// log, then the pending mutations, on top.
-    fn rebuild(&mut self) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        // DROP TABLE fires the foreign key actions of a full DELETE; deferring
-        // them lets us drop a whole schema in any order inside one transaction.
-        tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
-        drop_app_objects(&tx)?;
-        A::migrate(&tx)?;
-        let confirmed: Vec<Entry<A::Mutation>> = store::entries_after(&tx, 0, usize::MAX)?;
-        for entry in &confirmed {
-            if entry.require_seq()? > self.cursor {
-                break;
-            }
-            entry.mutation.apply(&Transaction::new(&tx), &entry.actor)?;
-        }
-        let mut rejected = Vec::new();
-        for entry in store::pending::<A::Mutation>(&tx)? {
-            match entry.mutation.apply(&Transaction::new(&tx), &entry.actor) {
-                Ok(()) => {}
-                // A pending mutation can become invalid once confirmed entries
-                // land under it. The server would reject it for the same
-                // reason, so drop it now rather than push something doomed.
-                Err(MutationError::Rejected(reason)) => {
-                    rejected.push(Rejection {
-                        id: entry.id,
-                        reason,
-                    });
-                }
-                Err(MutationError::Sqlite(e)) => return Err(e.into()),
-            }
-        }
-        for r in &rejected {
-            store::drop_pending(&tx, &r.id)?;
-        }
-        tx.commit()?;
-        if !rejected.is_empty() {
-            self.rejections.extend(rejected);
-            return self.rebuild();
+    /// Apply a mutation and immediately undo it, to find out whether it would
+    /// be accepted. `SAVEPOINT` outside a transaction starts one, and
+    /// `RELEASE` on the outermost savepoint commits it, so this works the same
+    /// whether or not the optimistic savepoint is currently held.
+    fn probe(&self, entry: &Entry<A::Mutation>) -> Result<()> {
+        self.conn.execute_batch("SAVEPOINT probe")?;
+        let verdict = entry
+            .mutation
+            .apply(&Transaction::new(&self.conn), &entry.actor);
+        self.conn
+            .execute_batch("ROLLBACK TO probe; RELEASE probe;")?;
+        Ok(verdict?)
+    }
+
+    /// Throw the optimistic view away. Afterwards the database holds confirmed
+    /// state only and the connection is back in autocommit, so anything written
+    /// next is durable.
+    fn discard_optimistic(&mut self) -> Result<()> {
+        if self.savepoint_open {
+            // ROLLBACK TO undoes everything since the savepoint but leaves the
+            // savepoint (and the transaction) alive; RELEASE discards it;
+            // COMMIT closes the transaction that has nothing left in it.
+            self.conn
+                .execute_batch("ROLLBACK TO pending; RELEASE pending; COMMIT;")?;
+            self.savepoint_open = false;
         }
         Ok(())
     }
+
+    /// Rebuild the optimistic view: open a transaction, mark it with a
+    /// savepoint, and replay every pending mutation into it. With nothing
+    /// pending this does nothing at all — steady state holds no transaction.
+    fn open_optimistic(&mut self) -> Result<()> {
+        loop {
+            let pending: Vec<Entry<A::Mutation>> = store::pending(&self.conn)?;
+            if pending.is_empty() {
+                return Ok(());
+            }
+            self.conn.execute_batch("BEGIN; SAVEPOINT pending;")?;
+            self.savepoint_open = true;
+
+            match replay(&self.conn, &pending) {
+                Ok(rejected) if rejected.is_empty() => return Ok(()),
+                // A pending mutation can be invalidated by confirmed entries
+                // that landed underneath it. The server would reject it for the
+                // same reason, so drop it now — and start the replay over,
+                // because the mutations after it were applied on top of state
+                // it produced.
+                Ok(rejected) => {
+                    self.discard_optimistic()?;
+                    for r in &rejected {
+                        store::drop_pending(&self.conn, &r.id)?;
+                    }
+                    self.rejections.extend(rejected);
+                }
+                Err(e) => {
+                    self.discard_optimistic()?;
+                    return Err(e);
+                }
+            }
+        }
+    }
 }
 
-/// Everything in the schema that Exo does not own. `sqlite_master` rows with a
-/// NULL `sql` are indexes SQLite created for us and cannot be dropped directly.
-fn drop_app_objects(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT type, name FROM sqlite_master
-         WHERE sql IS NOT NULL
-           AND name NOT LIKE 'exo!_%' ESCAPE '!'
-           AND name NOT LIKE 'sqlite!_%' ESCAPE '!'
-         ORDER BY CASE type
-             WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'index' THEN 2 ELSE 3 END, name",
-    )?;
-    let objects: Vec<(String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(stmt);
-    for (kind, name) in objects {
-        conn.execute_batch(&format!("DROP {kind} IF EXISTS \"{name}\""))?;
+/// Apply each pending mutation in order, collecting the ones that no longer
+/// hold. A database failure aborts; a rejection does not.
+fn replay<M: Mutation>(conn: &Connection, pending: &[Entry<M>]) -> Result<Vec<Rejection>> {
+    let mut rejected = Vec::new();
+    for entry in pending {
+        match entry.mutation.apply(&Transaction::new(conn), &entry.actor) {
+            Ok(()) => {}
+            Err(MutationError::Rejected(reason)) => rejected.push(Rejection {
+                id: entry.id,
+                reason,
+            }),
+            Err(MutationError::Sqlite(e)) => return Err(e.into()),
+        }
     }
-    Ok(())
+    Ok(rejected)
 }

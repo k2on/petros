@@ -96,7 +96,10 @@ pub enum ClientMsg<M> {
 #[serde(tag = "t")]
 pub enum ServerMsg<M> {
     /// Confirmed entries, in log order. `has_more` means send another `Hello`.
-    Batch { entries: Vec<Entry<M>>, has_more: bool },
+    Batch {
+        entries: Vec<Entry<M>>,
+        has_more: bool,
+    },
     /// These pushed entries are in the log at these sequence numbers.
     /// Parallel arrays: `ids[i]` was assigned `seqs[i]`.
     Ack { ids: Vec<Uuid>, seqs: Vec<Seq> },

@@ -36,7 +36,11 @@ fn local_mutation_applies_optimistically() {
     let mut c = client("alice");
     c.mutate(TodoMutation::add("buy milk")).unwrap();
 
-    assert_eq!(texts(c.conn()), vec!["buy milk"], "visible before any server saw it");
+    assert_eq!(
+        texts(c.conn()),
+        vec!["buy milk"],
+        "visible before any server saw it"
+    );
     assert_eq!(c.pending_len(), 1);
     let out = pushed(&mut c);
     assert_eq!(out.len(), 1, "and queued for the server");
@@ -160,4 +164,3 @@ fn connect_replays_hello_and_pending() {
         other => panic!("expected a Push, got {other:?}"),
     }
 }
-

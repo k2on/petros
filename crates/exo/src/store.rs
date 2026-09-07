@@ -55,7 +55,9 @@ pub(crate) fn head(conn: &Connection) -> Result<Seq> {
 /// than resyncing from the beginning.
 pub(crate) fn cursor(conn: &Connection) -> Result<Seq> {
     let v: Option<i64> = conn
-        .query_row("SELECT v FROM exo_meta WHERE k = ?1", [CURSOR], |r| r.get(0))
+        .query_row("SELECT v FROM exo_meta WHERE k = ?1", [CURSOR], |r| {
+            r.get(0)
+        })
         .optional()?;
     Ok(v.unwrap_or(0) as Seq)
 }

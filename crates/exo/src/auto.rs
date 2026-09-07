@@ -18,7 +18,10 @@ use crate::Uuid;
 enum Clock {
     System,
     /// A virtual clock, so tests are reproducible.
-    Virtual { now_ms: i64, step_ms: i64 },
+    Virtual {
+        now_ms: i64,
+        step_ms: i64,
+    },
 }
 
 /// Handed to [`fill_auto`](crate::Mutation::fill_auto). Seedable, so a test can

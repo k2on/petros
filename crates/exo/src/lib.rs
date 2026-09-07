@@ -22,13 +22,13 @@
 //! messages and drain their outboxes. No sockets, no async, no runtime.
 //!
 //! ```
-//! # use exo::*;
+//! # use exo::{App, AutoCtx, Client, Connection, Mutation, MutationError, Transaction, ActorId, open_memory};
 //! # use serde::{Deserialize, Serialize};
 //! # #[derive(Serialize, Deserialize)]
 //! # #[serde(tag = "t")]
 //! # enum M { Note { text: String } }
 //! # impl Mutation for M {
-//! #     fn apply(&self, tx: &Transaction, _a: &ActorId) -> Result<(), MutationError> {
+//! #     fn apply(&self, tx: &Transaction, _a: &ActorId) -> std::result::Result<(), MutationError> {
 //! #         let M::Note { text } = self;
 //! #         tx.execute("INSERT INTO note (text) VALUES (?1)", [text])?;
 //! #         Ok(())
