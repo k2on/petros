@@ -4,7 +4,7 @@ mod common;
 
 use common::sim::state_hash;
 use common::todo::{items, texts, Todo, TodoMutation};
-use exo::{ActorId, AutoCtx, Client, ClientMsg, Entry, Mutation, Seq, Server, ServerMsg, Uuid};
+use exo::{ActorId, AutoCtx, Client, ClientMsg, Entry, Id, Mutation, Seq, Server, ServerMsg};
 
 type Up = ClientMsg<TodoMutation>;
 type Down = ServerMsg<TodoMutation>;
@@ -102,7 +102,7 @@ fn cursor_survives_restart() {
 
     // Reopened cold. The confirmed log and the cursor were committed; the
     // optimistic state was not, and is rebuilt by replaying what is pending.
-    let client =
+    let mut client =
         Client::<Todo>::open(exo::open_path(&path).unwrap(), "alice", AutoCtx::seeded(77)).unwrap();
     assert_eq!(
         client.cursor(),
@@ -155,8 +155,8 @@ fn replay_is_deterministic() {
     entries.push(sequenced(7, TodoMutation::claim(first)));
     entries.push(sequenced(8, TodoMutation::remove(items_of(&entries, 1).id)));
 
-    let a = replay_into("alice", 1, entries.clone());
-    let b = replay_into("bob", 2, entries);
+    let mut a = replay_into("alice", 1, entries.clone());
+    let mut b = replay_into("bob", 2, entries);
 
     assert_eq!(
         state_hash(a.conn()),
@@ -174,11 +174,7 @@ fn replay_into(actor: &str, seed: u64, entries: Vec<Entry<TodoMutation>>) -> Cli
 }
 
 fn sequenced(seq: Seq, m: TodoMutation) -> Entry<TodoMutation> {
-    let mut e = Entry::new(
-        Uuid::from_u128(1_000 + seq as u128),
-        ActorId::from("bob"),
-        m,
-    );
+    let mut e = Entry::new(Id::from_u128(1_000 + seq as u128), ActorId::from("bob"), m);
     e.seq = Some(seq);
     e
 }
@@ -192,5 +188,5 @@ fn items_of(entries: &[Entry<TodoMutation>], n: usize) -> Item {
 }
 
 struct Item {
-    id: Uuid,
+    id: Id,
 }

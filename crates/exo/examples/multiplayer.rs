@@ -141,7 +141,7 @@ fn command(
     Ok(true)
 }
 
-fn nth(client: &Client<TodoApp>, arg: &str) -> exo::Result<Option<exo::Uuid>> {
+fn nth(client: &mut Client<TodoApp>, arg: &str) -> exo::Result<Option<exo::Id>> {
     let n: usize = arg.trim().parse().unwrap_or(0);
     Ok(list(client.conn())?.get(n.wrapping_sub(1)).map(|i| i.id))
 }

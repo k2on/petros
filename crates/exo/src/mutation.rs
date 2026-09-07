@@ -1,9 +1,10 @@
 //! The two traits an app implements, and the transaction handle `apply` gets.
 
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
-use rusqlite::Connection;
 use serde::{de::DeserializeOwned, Serialize};
+
+use crate::Connection;
 
 use crate::{ActorId, AutoCtx, MutationError, Result};
 
@@ -13,18 +14,24 @@ use crate::{ActorId, AutoCtx, MutationError, Result};
 /// the distinct type is a reminder: do not commit, roll back, or open nested
 /// transactions here. Exo owns the transaction boundaries — they are what makes
 /// the optimistic rebase possible.
-#[derive(Debug)]
 pub struct Transaction<'a> {
-    conn: &'a Connection,
+    conn: &'a mut Connection,
+}
+
+impl std::fmt::Debug for Transaction<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Transaction")
+    }
 }
 
 impl<'a> Transaction<'a> {
-    pub(crate) fn new(conn: &'a Connection) -> Self {
+    pub(crate) fn new(conn: &'a mut Connection) -> Self {
         Transaction { conn }
     }
 
-    /// The underlying connection.
-    pub fn conn(&self) -> &Connection {
+    /// The underlying connection. Diesel needs `&mut` for every query, hence
+    /// the mutable borrow all the way down.
+    pub fn conn(&mut self) -> &mut Connection {
         self.conn
     }
 }
@@ -33,6 +40,12 @@ impl Deref for Transaction<'_> {
     type Target = Connection;
 
     fn deref(&self) -> &Connection {
+        self.conn
+    }
+}
+
+impl DerefMut for Transaction<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
         self.conn
     }
 }
@@ -55,8 +68,10 @@ impl Deref for Transaction<'_> {
 /// * No floats in anything that affects control flow.
 ///
 /// ```
+/// # use diesel::prelude::*;
 /// # use exo::{ActorId, AutoCtx, Mutation, MutationError, Transaction};
 /// # use serde::{Deserialize, Serialize};
+/// # diesel::table! { counter (n) { n -> BigInt } }
 /// #[derive(Serialize, Deserialize)]
 /// #[serde(tag = "t")]
 /// enum Counter {
@@ -64,9 +79,11 @@ impl Deref for Transaction<'_> {
 /// }
 ///
 /// impl Mutation for Counter {
-///     fn apply(&self, tx: &Transaction, _actor: &ActorId) -> Result<(), MutationError> {
+///     fn apply(&self, tx: &mut Transaction, _actor: &ActorId) -> Result<(), MutationError> {
 ///         let Counter::Bump { by } = self;
-///         tx.execute("UPDATE counter SET n = n + ?1", [by])?;
+///         diesel::update(counter::table)
+///             .set(counter::n.eq(counter::n + by))
+///             .execute(tx.conn())?;
 ///         Ok(())
 ///     }
 /// }
@@ -83,7 +100,11 @@ pub trait Mutation: Serialize + DeserializeOwned + 'static {
     }
 
     /// Apply the intent. Deterministic. May read. May reject.
-    fn apply(&self, tx: &Transaction, actor: &ActorId) -> std::result::Result<(), MutationError>;
+    fn apply(
+        &self,
+        tx: &mut Transaction,
+        actor: &ActorId,
+    ) -> std::result::Result<(), MutationError>;
 }
 
 /// The single extension point. An app supplies one mutation enum and its
@@ -94,7 +115,9 @@ pub trait App: 'static {
     /// The app's mutation enum.
     type Mutation: Mutation;
 
-    /// Create the app's tables. Must be idempotent: Exo calls it on every open,
-    /// and again whenever it rebuilds state from the log.
-    fn migrate(conn: &Connection) -> Result<()>;
+    /// Create the app's tables. Must be idempotent: Exo calls it on every open.
+    ///
+    /// Diesel's `table!` describes a schema rather than creating one, so this is
+    /// where the DDL that `table!` mirrors actually runs.
+    fn migrate(conn: &mut Connection) -> Result<()>;
 }

@@ -1,6 +1,6 @@
 //! Error types. Library code never panics: everything fallible returns these.
 
-use crate::Uuid;
+use crate::Id;
 
 /// What an [`apply`](crate::Mutation::apply) can go wrong with.
 ///
@@ -16,7 +16,7 @@ pub enum MutationError {
     Rejected(String),
     /// The database failed. Not a verdict about the mutation.
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Database(#[from] diesel::result::Error),
 }
 
 impl MutationError {
@@ -36,7 +36,9 @@ impl MutationError {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Database(#[from] diesel::result::Error),
+    #[error("could not open the database: {0}")]
+    Connection(#[from] diesel::ConnectionError),
     #[error(transparent)]
     Mutation(#[from] MutationError),
     #[error("could not encode payload: {0}")]
@@ -51,7 +53,7 @@ pub enum Error {
     Transport(String),
     /// An entry reached the log without the sequence number that orders it.
     #[error("entry {0} is missing a sequence number")]
-    MissingSeq(Uuid),
+    MissingSeq(Id),
 }
 
 // Not behind the `ws` feature: enabling a feature should add a transport, not

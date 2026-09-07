@@ -10,7 +10,8 @@ rust-version = "1.80"
 [workspace.dependencies]
 ciborium = "0.2"
 rand = "0.8"
-rusqlite = { version = "0.32", features = ["bundled", "uuid"] }
+diesel = { version = "2.3", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 uuid = { version = "1", features = ["serde"] }

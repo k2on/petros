@@ -6,12 +6,11 @@
 
 use std::collections::VecDeque;
 
-use exo::rusqlite::types::ValueRef;
 use exo::{AutoCtx, Client, ClientMsg, ConnId, Connection, Server, ServerMsg};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::todo::{Todo, TodoMutation};
+use super::todo::{items, Todo, TodoMutation};
 
 type Up = ClientMsg<TodoMutation>;
 type Down = ServerMsg<TodoMutation>;
@@ -69,15 +68,17 @@ impl Sim {
         self.nodes.len()
     }
 
-    pub fn client(&self, i: usize) -> &Client<Todo> {
-        &self.nodes[i].client
+    pub fn client(&mut self, i: usize) -> &mut Client<Todo> {
+        &mut self.nodes[i].client
     }
 
-    pub fn conn(&self, i: usize) -> &Connection {
+    /// Diesel needs `&mut` even to read, so a test that inspects a client's
+    /// view borrows it mutably.
+    pub fn conn(&mut self, i: usize) -> &mut Connection {
         self.nodes[i].client.conn()
     }
 
-    pub fn server_conn(&self) -> &Connection {
+    pub fn server_conn(&mut self) -> &mut Connection {
         self.server.conn()
     }
 
@@ -158,11 +159,11 @@ impl Sim {
 
     /// A hash of one client's materialised app state. Two clients that agree
     /// have the same hash; the point of the whole crate is that they do.
-    pub fn state_hash(&self, i: usize) -> u64 {
+    pub fn state_hash(&mut self, i: usize) -> u64 {
         state_hash(self.nodes[i].client.conn())
     }
 
-    pub fn server_hash(&self) -> u64 {
+    pub fn server_hash(&mut self) -> u64 {
         state_hash(self.server.conn())
     }
 
@@ -239,81 +240,32 @@ impl std::fmt::Debug for Sim {
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// Hash every app-owned table, row by row, in a fully specified order. Exo's
-/// own tables are excluded: two clients agree about app state long before they
-/// agree about how much of the log each has seen.
-pub fn state_hash(conn: &Connection) -> u64 {
+/// A hash of the app's materialised state, read through the model in a fully
+/// specified order. Exo's own tables are excluded: two replicas agree about app
+/// state long before they agree about how much of the log each has seen.
+pub fn state_hash(conn: &mut Connection) -> u64 {
     let mut h = FNV_OFFSET;
-    for table in app_tables(conn) {
-        eat(&mut h, table.as_bytes());
-        let columns = columns_of(conn, &table);
-        let projection = columns
-            .iter()
-            .map(|c| format!("\"{c}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        // Explicit total order: SQLite's natural row order is not a contract.
-        let sql = format!("SELECT {projection} FROM \"{table}\" ORDER BY {projection}");
-        let mut stmt = conn.prepare(&sql).expect("prepare state hash");
-        let mut rows = stmt.query([]).expect("query state hash");
-        while let Some(row) = rows.next().expect("read row") {
-            for i in 0..columns.len() {
-                eat_value(&mut h, row.get_ref(i).expect("read column"));
+    for item in items(conn) {
+        eat(&mut h, item.id.as_uuid().as_bytes());
+        eat(&mut h, item.text.as_bytes());
+        eat(&mut h, &[item.done as u8]);
+        eat(&mut h, &item.pos.to_le_bytes());
+        eat(&mut h, &item.created_ms.to_le_bytes());
+        eat(&mut h, item.actor.as_bytes());
+        match &item.claimed_by {
+            None => eat(&mut h, &[0]),
+            Some(who) => {
+                eat(&mut h, &[1]);
+                eat(&mut h, who.as_bytes());
             }
         }
     }
     h
 }
 
-fn app_tables(conn: &Connection) -> Vec<String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT name FROM sqlite_master
-             WHERE type = 'table'
-               AND name NOT LIKE 'exo!_%' ESCAPE '!'
-               AND name NOT LIKE 'sqlite!_%' ESCAPE '!'
-             ORDER BY name",
-        )
-        .expect("prepare table list");
-    let names = stmt.query_map([], |r| r.get(0)).expect("query table list");
-    names.map(|n| n.expect("table name")).collect()
-}
-
-fn columns_of(conn: &Connection, table: &str) -> Vec<String> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT name FROM pragma_table_info(\"{table}\") ORDER BY name"
-        ))
-        .expect("prepare column list");
-    let names = stmt.query_map([], |r| r.get(0)).expect("query column list");
-    names.map(|n| n.expect("column name")).collect()
-}
-
 fn eat(h: &mut u64, bytes: &[u8]) {
     for b in bytes {
         *h ^= u64::from(*b);
         *h = h.wrapping_mul(FNV_PRIME);
-    }
-}
-
-fn eat_value(h: &mut u64, v: ValueRef<'_>) {
-    match v {
-        ValueRef::Null => eat(h, &[0]),
-        ValueRef::Integer(i) => {
-            eat(h, &[1]);
-            eat(h, &i.to_le_bytes());
-        }
-        ValueRef::Real(r) => {
-            eat(h, &[2]);
-            eat(h, &r.to_bits().to_le_bytes());
-        }
-        ValueRef::Text(t) => {
-            eat(h, &[3]);
-            eat(h, t);
-        }
-        ValueRef::Blob(b) => {
-            eat(h, &[4]);
-            eat(h, b);
-        }
     }
 }

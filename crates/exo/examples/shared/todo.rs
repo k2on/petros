@@ -1,23 +1,49 @@
 //! A shared to-do list. Nothing clever, and deliberately dull: the point is
 //! that Exo has never heard of any of it.
 
-use exo::{ActorId, App, AutoCtx, Connection, Mutation, MutationError, Transaction, Uuid};
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
+use diesel::sqlite::Sqlite;
+use exo::{ActorId, App, AutoCtx, Connection, Id, Mutation, MutationError, Transaction};
 use serde::{Deserialize, Serialize};
+
+diesel::table! {
+    todo (id) {
+        id -> Binary,
+        text -> Text,
+        done -> Bool,
+        pos -> BigInt,
+        created_ms -> BigInt,
+        actor -> Text,
+    }
+}
+
+/// The model. One struct describes the row for both reading and writing.
+#[derive(Debug, Clone, Queryable, Selectable, Insertable)]
+#[diesel(table_name = todo, check_for_backend(Sqlite))]
+pub struct Item {
+    pub id: Id,
+    pub text: String,
+    pub done: bool,
+    pub pos: i64,
+    pub created_ms: i64,
+    pub actor: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum Todo {
     Add {
-        id: Uuid,
+        id: Id,
         text: String,
         created_ms: i64,
     },
     SetDone {
-        id: Uuid,
+        id: Id,
         done: bool,
     },
     Remove {
-        id: Uuid,
+        id: Id,
     },
 }
 
@@ -25,7 +51,7 @@ impl Todo {
     /// `id` and `created_ms` are placeholders until `fill_auto` runs.
     pub fn add(text: &str) -> Self {
         Todo::Add {
-            id: Uuid::nil(),
+            id: Id::nil(),
             text: text.to_string(),
             created_ms: 0,
         }
@@ -40,7 +66,8 @@ impl Mutation for Todo {
         }
     }
 
-    fn apply(&self, tx: &Transaction, actor: &ActorId) -> Result<(), MutationError> {
+    fn apply(&self, tx: &mut Transaction, actor: &ActorId) -> Result<(), MutationError> {
+        let conn = tx.conn();
         match self {
             Todo::Add {
                 id,
@@ -53,22 +80,30 @@ impl Mutation for Todo {
                 // `pos` is read out of current state: this is "put it at the
                 // end", an intent, not "put it at 3", a fact. It is also what
                 // makes the rebase visible in the demo.
-                tx.execute(
-                    "INSERT OR IGNORE INTO todo (id, text, done, pos, created_ms, actor)
-                     SELECT ?1, ?2, 0, COALESCE(MAX(pos), 0) + 1, ?3, ?4 FROM todo",
-                    exo::rusqlite::params![id, text.trim(), created_ms, actor.as_str()],
-                )?;
+                let last: Option<i64> = todo::table
+                    .select(diesel::dsl::max(todo::pos))
+                    .first(conn)?;
+                diesel::insert_into(todo::table)
+                    .values(Item {
+                        id: *id,
+                        text: text.trim().to_string(),
+                        done: false,
+                        pos: last.unwrap_or(0) + 1,
+                        created_ms: *created_ms,
+                        actor: actor.as_str().to_string(),
+                    })
+                    .on_conflict_do_nothing()
+                    .execute(conn)?;
             }
             // Updating a row that is gone is a no-op, not an error: an entry
             // earlier in the log may have removed it.
             Todo::SetDone { id, done } => {
-                tx.execute(
-                    "UPDATE todo SET done = ?2 WHERE id = ?1",
-                    exo::rusqlite::params![id, done],
-                )?;
+                diesel::update(todo::table.find(id))
+                    .set(todo::done.eq(done))
+                    .execute(conn)?;
             }
             Todo::Remove { id } => {
-                tx.execute("DELETE FROM todo WHERE id = ?1", exo::rusqlite::params![id])?;
+                diesel::delete(todo::table.find(id)).execute(conn)?;
             }
         }
         Ok(())
@@ -80,14 +115,14 @@ pub struct TodoApp;
 impl App for TodoApp {
     type Mutation = Todo;
 
-    fn migrate(conn: &Connection) -> exo::Result<()> {
-        conn.execute_batch(
+    fn migrate(conn: &mut Connection) -> exo::Result<()> {
+        conn.batch_execute(
             "CREATE TABLE IF NOT EXISTS todo (
-                 id         BLOB PRIMARY KEY,
+                 id         BLOB PRIMARY KEY NOT NULL,
                  text       TEXT NOT NULL,
-                 done       INTEGER NOT NULL DEFAULT 0,
-                 pos        INTEGER NOT NULL,
-                 created_ms INTEGER NOT NULL,
+                 done       BOOL NOT NULL DEFAULT 0,
+                 pos        BIGINT NOT NULL,
+                 created_ms BIGINT NOT NULL,
                  actor      TEXT NOT NULL
              );",
         )?;
@@ -95,25 +130,12 @@ impl App for TodoApp {
     }
 }
 
-pub struct Item {
-    pub id: Uuid,
-    pub text: String,
-    pub done: bool,
-    pub actor: String,
-}
-
 /// Always ordered explicitly.
-pub fn list(conn: &Connection) -> exo::Result<Vec<Item>> {
-    let mut stmt = conn.prepare("SELECT id, text, done, actor FROM todo ORDER BY pos, id")?;
-    let rows = stmt.query_map([], |r| {
-        Ok(Item {
-            id: r.get(0)?,
-            text: r.get(1)?,
-            done: r.get::<_, i64>(2)? != 0,
-            actor: r.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<exo::rusqlite::Result<Vec<_>>>()?)
+pub fn list(conn: &mut Connection) -> exo::Result<Vec<Item>> {
+    Ok(todo::table
+        .select(Item::as_select())
+        .order((todo::pos.asc(), todo::id.asc()))
+        .load(conn)?)
 }
 
 /// One line per item, as the demo prints it.

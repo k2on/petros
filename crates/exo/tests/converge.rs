@@ -107,13 +107,13 @@ proptest! {
                 Act::AddInvalid(i) => sim.mutate(i % n_clients, TodoMutation::add("")),
                 Act::ClaimSomething(i) => {
                     let i = i % n_clients;
-                    if let Some(id) = some_item(&sim, i) {
+                    if let Some(id) = some_item(&mut sim, i) {
                         sim.mutate(i, TodoMutation::claim(id));
                     }
                 }
                 Act::RemoveSomething(i) => {
                     let i = i % n_clients;
-                    if let Some(id) = some_item(&sim, i) {
+                    if let Some(id) = some_item(&mut sim, i) {
                         sim.mutate(i, TodoMutation::remove(id));
                     }
                 }
@@ -140,6 +140,6 @@ proptest! {
 
 /// The first item a client can see, if any. Deliberately reads the client's own
 /// view: that is what a real UI would offer the user to act on.
-fn some_item(sim: &Sim, i: usize) -> Option<exo::Uuid> {
+fn some_item(sim: &mut Sim, i: usize) -> Option<exo::Id> {
     common::todo::items(sim.conn(i)).first().map(|it| it.id)
 }

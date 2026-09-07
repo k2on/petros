@@ -12,7 +12,7 @@
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 
-use crate::Uuid;
+use crate::Id;
 
 /// Where wall-clock time comes from.
 enum Clock {
@@ -81,10 +81,10 @@ impl AutoCtx {
     }
 
     /// A fresh random v4 UUID.
-    pub fn uuid(&mut self) -> Uuid {
+    pub fn uuid(&mut self) -> Id {
         let mut bytes = [0u8; 16];
         self.rng.fill_bytes(&mut bytes);
-        uuid::Builder::from_random_bytes(bytes).into_uuid()
+        Id(uuid::Builder::from_random_bytes(bytes).into_uuid())
     }
 
     /// A fresh random `u64`, for apps that need an opaque token.

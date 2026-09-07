@@ -4,7 +4,7 @@
 mod common;
 
 use common::todo::{texts, Todo, TodoMutation};
-use exo::{ActorId, AutoCtx, Client, ClientMsg, Entry, Mutation, Seq, ServerMsg, Uuid};
+use exo::{ActorId, AutoCtx, Client, ClientMsg, Entry, Id, Mutation, Seq, ServerMsg};
 
 type Msg = ServerMsg<TodoMutation>;
 
@@ -16,7 +16,7 @@ fn client(actor: &str) -> Client<Todo> {
 /// auto arguments already frozen, sequenced.
 fn confirmed(seq: Seq, actor: &str, mut m: TodoMutation) -> Entry<TodoMutation> {
     m.fill_auto(&mut AutoCtx::seeded(seq));
-    let mut e = Entry::new(Uuid::from_u128(seq as u128), ActorId::from(actor), m);
+    let mut e = Entry::new(Id::from_u128(seq as u128), ActorId::from(actor), m);
     e.seq = Some(seq);
     e
 }
@@ -84,9 +84,21 @@ fn pending_rebases_over_confirmed() {
     assert_eq!(c.pending_len(), 1, "still ours, still unconfirmed");
 }
 
+/// A second connection to the same file. Uncommitted work is invisible to it,
+/// which is how these tests observe the savepoint without a `is_autocommit`
+/// to ask — and it is the property that actually matters.
+fn on_disk(dir: &std::path::Path) -> (Client<Todo>, exo::Connection) {
+    let path = dir.join("client.db");
+    let client =
+        Client::<Todo>::open(exo::open_path(&path).unwrap(), "alice", AutoCtx::seeded(42)).unwrap();
+    let observer = exo::open_path(&path).unwrap();
+    (client, observer)
+}
+
 #[test]
 fn ack_clears_outbox_and_releases_savepoint() {
-    let mut c = client("alice");
+    let dir = tempfile::tempdir().unwrap();
+    let (mut c, mut observer) = on_disk(dir.path());
     c.mutate(TodoMutation::add("buy milk")).unwrap();
     let id = pushed(&mut c)[0].id;
 
@@ -99,21 +111,28 @@ fn ack_clears_outbox_and_releases_savepoint() {
     assert_eq!(c.pending_len(), 0);
     assert_eq!(c.cursor(), 1);
     assert_eq!(texts(c.conn()), vec!["buy milk"]);
-    assert!(
-        c.conn().is_autocommit(),
-        "with nothing pending there must be no transaction left open"
+    assert_eq!(
+        texts(&mut observer),
+        vec!["buy milk"],
+        "with nothing pending the savepoint is released and the work is committed"
     );
 }
 
 #[test]
 fn pending_state_is_held_in_an_open_savepoint() {
-    let mut c = client("alice");
-    assert!(c.conn().is_autocommit(), "steady state holds nothing open");
+    let dir = tempfile::tempdir().unwrap();
+    let (mut c, mut observer) = on_disk(dir.path());
+    assert!(texts(&mut observer).is_empty());
 
     c.mutate(TodoMutation::add("buy milk")).unwrap();
+    assert_eq!(
+        texts(c.conn()),
+        vec!["buy milk"],
+        "we can see our own guess"
+    );
     assert!(
-        !c.conn().is_autocommit(),
-        "optimistic state lives in a transaction that can be rolled back"
+        texts(&mut observer).is_empty(),
+        "but it is uncommitted, so it can still be rolled back"
     );
 
     let id = pushed(&mut c)[0].id;
@@ -122,7 +141,11 @@ fn pending_state_is_held_in_an_open_savepoint() {
         seqs: vec![1],
     })
     .unwrap();
-    assert!(c.conn().is_autocommit(), "and is released on the last ack");
+    assert_eq!(
+        texts(&mut observer),
+        vec!["buy milk"],
+        "and the last ack commits it"
+    );
 }
 
 #[test]
@@ -130,7 +153,7 @@ fn reject_rolls_back_pending_and_reports() {
     let mut c = client("alice");
     c.mutate(TodoMutation::add("doomed")).unwrap();
     c.mutate(TodoMutation::add("survivor")).unwrap();
-    let ids: Vec<Uuid> = pushed(&mut c).iter().map(|e| e.id).collect();
+    let ids: Vec<Id> = pushed(&mut c).iter().map(|e| e.id).collect();
 
     c.recv(Msg::Reject {
         id: ids[0],

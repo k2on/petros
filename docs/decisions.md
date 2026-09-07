@@ -26,7 +26,7 @@ exploded columns, so a future decoder gets the original bytes to work with.
 
 ## Mutations are intents, not facts
 
-`AddTracks { playlist, tracks }`, never `ItemInserted { pos: "a5" }`. `apply` may
+`AddToList { list, items }`, never `ItemInserted { pos: "a5" }`. `apply` may
 read the database to decide what to write. This is the Replicache/Zero model, not
 event sourcing: it is what lets a mutation still mean the right thing when it
 lands after entries its author never saw. The toy to-do app in the tests computes
@@ -88,6 +88,65 @@ second database file for the queue — buys that back only in exchange for
 two files to keep in sync and a subtler crash story. Nothing is lost on a crash:
 the confirmed log and the cursor are committed independently, and anything the
 server accepted but we failed to commit is re-fetched by the next `Hello`.
+
+## Diesel, and why not any of the others
+
+Storage goes through Diesel: models are structs with `Queryable`/`Selectable`/
+`Insertable` derives, queries are built with the DSL, and `check_for_backend`
+verifies at compile time that each model still matches its table. The field was
+narrow. `exo::client` and `exo::server` are sync by design, which rules out
+sqlx, SeaORM, ormlite and rbatis — all async-first. turbosql owns a global
+connection singleton, which cannot coexist with a connection Exo hands to
+`apply`. That leaves Diesel as the only real sync ORM, and `sea-query` as a
+query builder that would have layered onto rusqlite without replacing it. We
+took the ORM: Diesel has no way to wrap an existing `rusqlite::Connection` — its
+only constructor is `establish(url)` and there is no interop — so rusqlite is
+gone from the crate entirely, `exo::Connection` is `diesel::SqliteConnection`,
+and Exo's own three tables go through models like everything else.
+
+## Diesel describes schemas, it does not create them
+
+`table!` is a description, not a generator: it produces no DDL. So the `CREATE
+TABLE` statements still live in `store::DDL` for Exo's tables and in
+`App::migrate` for the app's, and `crate::schema` mirrors them by hand.
+`check_for_backend(Sqlite)` catches a model whose types drift from `table!`, but
+nothing catches a `table!` that drifts from the DDL — the test suite does, only
+because every query in it goes through these models. This is the one place the
+ORM gives less than it looks like it should.
+
+## `Id`, because Diesel's UUID support is PostgreSQL-only
+
+Diesel implements `ToSql<Uuid, Pg>` and nothing for SQLite, and the orphan rule
+stops us implementing it for `uuid::Uuid` ourselves. So [`Id`] is a newtype
+carrying the mapping to `Binary`. It is `#[serde(transparent)]`, so it encodes
+exactly as the bare UUID did — the checked-in wire fixture predates it and still
+decodes, which is the test that proves the migration cost nothing on the wire.
+
+## Exo drives every transaction itself, behind Diesel's back
+
+Diesel has a transaction manager; Exo never uses it. The optimistic savepoint
+outlives any single call, so it cannot be expressed as a closure the way
+`Connection::transaction` wants, and every boundary — `BEGIN`, `SAVEPOINT
+pending`, `ROLLBACK TO`, `COMMIT` — is raw SQL through `batch_execute`. Verified
+that this leaves Diesel's own manager healthy: a `transaction()` call after the
+dance still works. Apps must not call `transaction()` on a client's connection;
+the `Client` docs say so.
+
+## `apply` takes `&mut Transaction`, and reads need `&mut` too
+
+Diesel requires `&mut SqliteConnection` for every query, reads included. So
+`Mutation::apply` takes `&mut Transaction` rather than `&Transaction`, and
+`Client::conn`, `Server::conn` and `Client::pending_len` all take `&mut self`.
+This is pure Diesel tax — nothing about the engine wants a mutable borrow to
+read — and it is the visible cost of the ORM.
+
+## The savepoint is tested by what another connection can see
+
+There is no `is_autocommit` on a Diesel connection to assert against, so the
+savepoint tests open a second connection to the same file and check that
+optimistic state is invisible to it until the last ack commits. That is a better
+test than the one it replaced: it asserts the property that actually matters —
+uncommitted, therefore still revocable — rather than a proxy for it.
 
 ## Exo owns the `exo_` prefix and nothing else
 

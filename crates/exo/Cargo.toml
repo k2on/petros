@@ -14,18 +14,17 @@ ws = ["dep:tungstenite"]
 
 [dependencies]
 ciborium.workspace = true
+diesel.workspace = true
+libsqlite3-sys.workspace = true
 rand.workspace = true
-tempfile = "3"
-rusqlite.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tungstenite = { version = "0.24", optional = true }
 
 [dev-dependencies]
-rand.workspace = true
-tempfile = "3"
 proptest = "1"
+tempfile = "3"
 
 [[example]]
 name = "offline"

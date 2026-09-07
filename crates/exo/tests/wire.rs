@@ -6,7 +6,7 @@
 mod common;
 
 use common::todo::TodoMutation;
-use exo::{ActorId, ServerMsg, Uuid};
+use exo::{ActorId, Id, ServerMsg};
 use serde::{Deserialize, Serialize};
 
 const FIXTURE: &str = include_str!("fixtures/wire-v1.hex");
@@ -37,7 +37,7 @@ fn old_wire_bytes_still_deserialize() {
     assert_eq!(
         entries[0].mutation,
         TodoMutation::Add {
-            id: Uuid::from_u128(0x11),
+            id: Id::from_u128(0x11),
             text: "buy milk".into(),
             created_ms: 1_577_836_800_000,
         }
@@ -45,7 +45,7 @@ fn old_wire_bytes_still_deserialize() {
     assert_eq!(
         entries[4].mutation,
         TodoMutation::Remove {
-            id: Uuid::from_u128(0x11)
+            id: Id::from_u128(0x11)
         }
     );
 }
@@ -54,26 +54,26 @@ fn old_wire_bytes_still_deserialize() {
 #[derive(Serialize)]
 #[serde(tag = "t")]
 enum Before {
-    Add { id: Uuid, text: String },
+    Add { id: Id, text: String },
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "t")]
 enum After {
     Add {
-        id: Uuid,
+        id: Id,
         text: String,
         #[serde(default)]
         note: Option<String>,
     },
     /// Variants may be added; existing ones are never renamed or removed.
-    Star { id: Uuid },
+    Star { id: Id },
 }
 
 #[test]
 fn a_field_added_with_serde_default_reads_old_bytes() {
     let old = exo::encode(&Before::Add {
-        id: Uuid::from_u128(9),
+        id: Id::from_u128(9),
         text: "written before the field existed".into(),
     })
     .unwrap();
@@ -82,7 +82,7 @@ fn a_field_added_with_serde_default_reads_old_bytes() {
     assert_eq!(
         new,
         After::Add {
-            id: Uuid::from_u128(9),
+            id: Id::from_u128(9),
             text: "written before the field existed".into(),
             note: None,
         }

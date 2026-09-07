@@ -3,7 +3,7 @@
 mod common;
 
 use common::todo::{Todo, TodoMutation};
-use exo::{ActorId, AutoCtx, ClientMsg, Entry, Server, ServerMsg, Uuid};
+use exo::{ActorId, AutoCtx, ClientMsg, Entry, Id, Server, ServerMsg};
 
 fn entry(actor: &str, m: TodoMutation, auto: &mut AutoCtx) -> Entry<TodoMutation> {
     Entry::new(auto.uuid(), ActorId::from(actor), m)
@@ -57,7 +57,7 @@ fn duplicate_uuid_is_deduped() {
 }
 
 /// Drain the server's outgoing queue and collect (entry id, assigned seq).
-fn acks(s: &mut Server<Todo>) -> Vec<(Uuid, u64)> {
+fn acks(s: &mut Server<Todo>) -> Vec<(Id, u64)> {
     let mut out = Vec::new();
     for (_conn, msg) in s.take_outgoing() {
         if let ServerMsg::Ack { ids, seqs } = msg {

@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
-use rusqlite::Connection;
+use diesel::connection::SimpleConnection;
 
 use crate::{
-    store, App, ClientMsg, Entry, Error, Mutation, MutationError, Result, Seq, ServerMsg,
-    Transaction,
+    store, App, ClientMsg, Connection, Entry, Error, Mutation, MutationError, Result, Seq,
+    ServerMsg, Transaction,
 };
 
 /// How many entries one [`ServerMsg::Batch`] carries. A client that sees
@@ -46,10 +46,10 @@ impl<A: App> std::fmt::Debug for Server<A> {
 impl<A: App> Server<A> {
     /// Open a server over an existing connection, running both Exo's migrations
     /// and the app's.
-    pub fn open(conn: Connection) -> Result<Self> {
-        store::migrate(&conn)?;
-        A::migrate(&conn)?;
-        let head = store::head(&conn)?;
+    pub fn open(mut conn: Connection) -> Result<Self> {
+        store::migrate(&mut conn)?;
+        A::migrate(&mut conn)?;
+        let head = store::head(&mut conn)?;
         Ok(Server {
             conn,
             conns: BTreeMap::new(),
@@ -60,9 +60,9 @@ impl<A: App> Server<A> {
     }
 
     /// The authoritative materialised state. Read-only by convention: the log
-    /// is the only way to change it.
-    pub fn conn(&self) -> &Connection {
-        &self.conn
+    /// is the only way to change it. Diesel needs `&mut` even to read.
+    pub fn conn(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     /// The highest assigned sequence number.
@@ -104,7 +104,7 @@ impl<A: App> Server<A> {
             // Dedupe. A push whose Ack was lost gets retried verbatim; the
             // second attempt must be indistinguishable from the first, so we
             // answer with the sequence number the entry already has.
-            if let Some(seq) = store::seq_of(&self.conn, &entry.id)? {
+            if let Some(seq) = store::seq_of(&mut self.conn, &entry.id)? {
                 ids.push(entry.id);
                 seqs.push(seq);
                 continue;
@@ -138,13 +138,31 @@ impl<A: App> Server<A> {
 
     /// Apply and append atomically: the log row and the state it produced land
     /// together or not at all.
+    ///
+    /// The transaction is opened with raw SQL rather than Diesel's
+    /// `transaction()` so that the server and the client drive their
+    /// boundaries the same way — the client cannot use Diesel's transaction
+    /// manager at all, because its savepoint outlives any single call.
     fn append_one(&mut self, entry: &Entry<A::Mutation>) -> Result<Seq> {
         let seq = entry.require_seq()?;
-        let tx = self.conn.transaction()?;
-        entry.mutation.apply(&Transaction::new(&tx), &entry.actor)?;
-        store::put_confirmed(&tx, entry)?;
-        tx.commit()?;
-        Ok(seq)
+        self.conn.batch_execute("BEGIN")?;
+        match self.append_within(entry) {
+            Ok(()) => {
+                self.conn.batch_execute("COMMIT")?;
+                Ok(seq)
+            }
+            Err(e) => {
+                self.conn.batch_execute("ROLLBACK")?;
+                Err(e)
+            }
+        }
+    }
+
+    fn append_within(&mut self, entry: &Entry<A::Mutation>) -> Result<()> {
+        entry
+            .mutation
+            .apply(&mut Transaction::new(&mut self.conn), &entry.actor)?;
+        store::put_confirmed(&mut self.conn, entry)
     }
 
     /// Send every connection everything it has not been sent yet. One rule,
@@ -160,7 +178,7 @@ impl<A: App> Server<A> {
         for id in stale {
             let cursor = self.conns.get(&id).copied().unwrap_or(0);
             let entries: Vec<Entry<A::Mutation>> =
-                store::entries_after(&self.conn, cursor, BATCH_LIMIT)?;
+                store::entries_after(&mut self.conn, cursor, BATCH_LIMIT)?;
             let Some(last) = entries.last() else { continue };
             let sent_to = last.require_seq()?;
             self.conns.insert(id, sent_to);

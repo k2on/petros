@@ -49,7 +49,7 @@ fn main() -> exo::Result<()> {
     } // the client is dropped here: process gone, connection closed
 
     println!("...reopening the database cold...\n");
-    let client = Client::<TodoApp>::open(exo::open_path(&path)?, "alice", AutoCtx::system())?;
+    let mut client = Client::<TodoApp>::open(exo::open_path(&path)?, "alice", AutoCtx::system())?;
     println!("{}", render(&list(client.conn())?));
     println!(
         "\n  cursor {}, {} still pending. Nothing was lost.",

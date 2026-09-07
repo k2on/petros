@@ -2,17 +2,21 @@
 
 use std::marker::PhantomData;
 
-use rusqlite::Connection;
+use diesel::connection::SimpleConnection;
 
 use crate::{
-    store, ActorId, App, AutoCtx, ClientMsg, Entry, Error, Mutation, MutationError, Result, Seq,
-    ServerMsg, Transaction, Uuid,
+    store, ActorId, App, AutoCtx, ClientMsg, Connection, Entry, Error, Id, Mutation, MutationError,
+    Result, Seq, ServerMsg, Transaction,
 };
+
+/// How many confirmed entries are applied in one transaction. Bounds memory on
+/// a client that has been away for a long time.
+const APPLY_CHUNK: usize = 256;
 
 /// A mutation that will never be in the log, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejection {
-    pub id: Uuid,
+    pub id: Id,
     pub reason: String,
 }
 
@@ -27,6 +31,13 @@ pub struct Rejection {
 /// Confirmed entries only ever move forward, because the server's log is
 /// append-only and never reordered. The only thing ever undone is this client's
 /// own pending mutations, and they are replayed on top afterwards.
+///
+/// # Transactions belong to Exo
+///
+/// Never call Diesel's `Connection::transaction` on a client's connection. The
+/// optimistic savepoint outlives any single call, so Exo drives every boundary
+/// itself with raw SQL and Diesel's transaction manager is deliberately left
+/// out of it.
 pub struct Client<A: App> {
     conn: Connection,
     actor: ActorId,
@@ -55,10 +66,10 @@ impl<A: App> std::fmt::Debug for Client<A> {
 
 impl<A: App> Client<A> {
     /// Open a client over an existing connection.
-    pub fn open(conn: Connection, actor: impl Into<ActorId>, auto: AutoCtx) -> Result<Self> {
-        store::migrate(&conn)?;
-        A::migrate(&conn)?;
-        let cursor = store::cursor(&conn)?;
+    pub fn open(mut conn: Connection, actor: impl Into<ActorId>, auto: AutoCtx) -> Result<Self> {
+        store::migrate(&mut conn)?;
+        A::migrate(&mut conn)?;
+        let cursor = store::cursor(&mut conn)?;
         let mut client = Client {
             conn,
             actor: actor.into(),
@@ -78,9 +89,9 @@ impl<A: App> Client<A> {
     }
 
     /// The materialised view. Read-only by convention: mutations are the only
-    /// supported way to change it.
-    pub fn conn(&self) -> &Connection {
-        &self.conn
+    /// supported way to change it. Diesel needs `&mut` even to read.
+    pub fn conn(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     pub fn actor(&self) -> &ActorId {
@@ -93,13 +104,13 @@ impl<A: App> Client<A> {
     }
 
     /// How many of this client's own mutations are still unconfirmed.
-    pub fn pending_len(&self) -> usize {
-        store::pending_len(&self.conn).unwrap_or(0)
+    pub fn pending_len(&mut self) -> usize {
+        store::pending_len(&mut self.conn).unwrap_or(0)
     }
 
     /// Author a mutation: fill its non-deterministic arguments, apply it
     /// optimistically, and queue it for the server.
-    pub fn mutate(&mut self, mut mutation: A::Mutation) -> Result<Uuid> {
+    pub fn mutate(&mut self, mut mutation: A::Mutation) -> Result<Id> {
         // Exactly once, here at the origin. From now on these arguments are
         // frozen: no replay of this entry will ever regenerate them.
         mutation.fill_auto(&mut self.auto);
@@ -115,7 +126,7 @@ impl<A: App> Client<A> {
         // cannot commit anything while holding the savepoint open, so drop the
         // savepoint, commit the intent on its own, then rebuild the view.
         self.discard_optimistic()?;
-        store::put_pending(&self.conn, &entry)?;
+        store::put_pending(&mut self.conn, &entry)?;
         self.open_optimistic()?;
 
         let id = entry.id;
@@ -130,7 +141,7 @@ impl<A: App> Client<A> {
     /// dedupes pushes on entry id.
     pub fn connected(&mut self) -> Result<()> {
         self.out.push(ClientMsg::Hello { since: self.cursor });
-        let pending: Vec<Entry<A::Mutation>> = store::pending(&self.conn)?;
+        let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.conn)?;
         if !pending.is_empty() {
             self.out.push(ClientMsg::Push { entries: pending });
         }
@@ -146,22 +157,21 @@ impl<A: App> Client<A> {
         match msg {
             ServerMsg::Batch { entries, has_more } => {
                 for entry in &entries {
-                    store::put_confirmed(&self.conn, entry)?;
+                    store::put_confirmed(&mut self.conn, entry)?;
                     // Our own entry coming back confirmed: it is no longer ours
                     // to replay.
-                    store::drop_pending(&self.conn, &entry.id)?;
+                    store::drop_pending(&mut self.conn, &entry.id)?;
                 }
                 if has_more {
-                    self.out.push(ClientMsg::Hello {
-                        since: self.next_cursor()?,
-                    });
+                    let since = store::contiguous_after(&mut self.conn, self.cursor, APPLY_CHUNK)?;
+                    self.out.push(ClientMsg::Hello { since });
                 }
             }
             ServerMsg::Ack { ids, seqs } => {
                 if ids.len() != seqs.len() {
                     return Err(Error::Protocol("Ack ids and seqs differ in length".into()));
                 }
-                let pending: Vec<Entry<A::Mutation>> = store::pending(&self.conn)?;
+                let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.conn)?;
                 for (id, seq) in ids.iter().zip(seqs) {
                     // The ack tells us where in the order our entry landed, so
                     // we can promote it from pending to confirmed without
@@ -171,13 +181,13 @@ impl<A: App> Client<A> {
                             seq: Some(seq),
                             ..Entry::new(entry.id, entry.actor.clone(), &entry.mutation)
                         };
-                        store::put_confirmed(&self.conn, &confirmed)?;
+                        store::put_confirmed(&mut self.conn, &confirmed)?;
                     }
-                    store::drop_pending(&self.conn, id)?;
+                    store::drop_pending(&mut self.conn, id)?;
                 }
             }
             ServerMsg::Reject { id, reason } => {
-                store::drop_pending(&self.conn, &id)?;
+                store::drop_pending(&mut self.conn, &id)?;
                 self.rejections.push(Rejection { id, reason });
             }
         }
@@ -201,69 +211,56 @@ impl<A: App> Client<A> {
         std::mem::take(&mut self.rejections)
     }
 
-    /// Move the cursor over every contiguous confirmed entry we now hold,
-    /// applying each one. The cursor and the state it describes are committed
-    /// together, so a crash mid-batch simply replays from the old cursor.
+    /// Apply every contiguous confirmed entry we now hold, a chunk at a time.
+    /// The cursor and the state it describes are committed together, so a crash
+    /// mid-chunk simply replays from the old cursor.
     fn advance(&mut self) -> Result<()> {
-        let next = self.next_cursor()?;
-        if next == self.cursor {
-            return Ok(());
+        loop {
+            let next = store::contiguous_after(&mut self.conn, self.cursor, APPLY_CHUNK)?;
+            if next == self.cursor {
+                return Ok(());
+            }
+            let count = (next - self.cursor) as usize;
+            let entries: Vec<Entry<A::Mutation>> =
+                store::entries_after(&mut self.conn, self.cursor, count)?;
+            self.conn.batch_execute("BEGIN")?;
+            match apply_confirmed(&mut self.conn, &entries, next) {
+                Ok(()) => {
+                    self.conn.batch_execute("COMMIT")?;
+                    self.cursor = next;
+                }
+                Err(e) => {
+                    self.conn.batch_execute("ROLLBACK")?;
+                    return Err(e);
+                }
+            }
         }
-        let count = (next - self.cursor) as usize;
-        let entries: Vec<Entry<A::Mutation>> =
-            store::entries_after(&self.conn, self.cursor, count)?;
-        let tx = self.conn.transaction()?;
-        for entry in &entries {
-            // A confirmed entry that will not apply means this client and the
-            // server disagree about what the same arguments mean — a
-            // determinism bug. Fail loudly rather than diverge quietly.
-            entry.mutation.apply(&Transaction::new(&tx), &entry.actor)?;
-        }
-        store::set_cursor(&tx, next)?;
-        tx.commit()?;
-        self.cursor = next;
-        Ok(())
-    }
-
-    /// The end of the contiguous run of confirmed entries starting at
-    /// `cursor + 1`. A gap means an entry is still in flight, and everything
-    /// after it has to wait: applying out of order would not be the log.
-    fn next_cursor(&self) -> Result<Seq> {
-        let next: Option<i64> = self.conn.query_row(
-            "SELECT MIN(l.seq) FROM exo_log l
-             WHERE l.seq > ?1
-               AND NOT EXISTS (SELECT 1 FROM exo_log n WHERE n.seq = l.seq + 1)
-               AND EXISTS (SELECT 1 FROM exo_log s WHERE s.seq = ?1 + 1)",
-            [self.cursor as i64],
-            |r| r.get(0),
-        )?;
-        Ok(next.map(|s| s as Seq).unwrap_or(self.cursor))
     }
 
     /// Apply a mutation and immediately undo it, to find out whether it would
     /// be accepted. `SAVEPOINT` outside a transaction starts one, and
     /// `RELEASE` on the outermost savepoint commits it, so this works the same
     /// whether or not the optimistic savepoint is currently held.
-    fn probe(&self, entry: &Entry<A::Mutation>) -> Result<()> {
-        self.conn.execute_batch("SAVEPOINT probe")?;
+    fn probe(&mut self, entry: &Entry<A::Mutation>) -> Result<()> {
+        self.conn.batch_execute("SAVEPOINT probe")?;
         let verdict = entry
             .mutation
-            .apply(&Transaction::new(&self.conn), &entry.actor);
+            .apply(&mut Transaction::new(&mut self.conn), &entry.actor);
         self.conn
-            .execute_batch("ROLLBACK TO probe; RELEASE probe;")?;
+            .batch_execute("ROLLBACK TO probe; RELEASE probe;")?;
         Ok(verdict?)
     }
 
     /// Throw the optimistic view away. Afterwards the database holds confirmed
-    /// state only and the connection is back in autocommit, so anything written
-    /// next is durable.
+    /// state only and no transaction is open, so anything written next is
+    /// durable.
     fn discard_optimistic(&mut self) -> Result<()> {
         if self.savepoint_open {
             // ROLLBACK TO undoes everything since the savepoint but leaves the
             // savepoint (and the transaction) alive; RELEASE discards it;
             // COMMIT closes the transaction that has nothing left in it.
             self.conn
-                .execute_batch("ROLLBACK TO pending; RELEASE pending; COMMIT;")?;
+                .batch_execute("ROLLBACK TO pending; RELEASE pending; COMMIT;")?;
             self.savepoint_open = false;
         }
         Ok(())
@@ -274,14 +271,14 @@ impl<A: App> Client<A> {
     /// pending this does nothing at all — steady state holds no transaction.
     fn open_optimistic(&mut self) -> Result<()> {
         loop {
-            let pending: Vec<Entry<A::Mutation>> = store::pending(&self.conn)?;
+            let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.conn)?;
             if pending.is_empty() {
                 return Ok(());
             }
-            self.conn.execute_batch("BEGIN; SAVEPOINT pending;")?;
+            self.conn.batch_execute("BEGIN; SAVEPOINT pending;")?;
             self.savepoint_open = true;
 
-            match replay(&self.conn, &pending) {
+            match replay(&mut self.conn, &pending) {
                 Ok(rejected) if rejected.is_empty() => return Ok(()),
                 // A pending mutation can be invalidated by confirmed entries
                 // that landed underneath it. The server would reject it for the
@@ -291,7 +288,7 @@ impl<A: App> Client<A> {
                 Ok(rejected) => {
                     self.discard_optimistic()?;
                     for r in &rejected {
-                        store::drop_pending(&self.conn, &r.id)?;
+                        store::drop_pending(&mut self.conn, &r.id)?;
                     }
                     self.rejections.extend(rejected);
                 }
@@ -304,18 +301,39 @@ impl<A: App> Client<A> {
     }
 }
 
+/// Apply confirmed entries and move the cursor, inside a transaction the caller
+/// opened.
+fn apply_confirmed<M: Mutation>(
+    conn: &mut Connection,
+    entries: &[Entry<M>],
+    next: Seq,
+) -> Result<()> {
+    for entry in entries {
+        // A confirmed entry that will not apply means this client and the
+        // server disagree about what the same arguments mean — a determinism
+        // bug. Fail loudly rather than diverge quietly.
+        entry
+            .mutation
+            .apply(&mut Transaction::new(conn), &entry.actor)?;
+    }
+    store::set_cursor(conn, next)
+}
+
 /// Apply each pending mutation in order, collecting the ones that no longer
 /// hold. A database failure aborts; a rejection does not.
-fn replay<M: Mutation>(conn: &Connection, pending: &[Entry<M>]) -> Result<Vec<Rejection>> {
+fn replay<M: Mutation>(conn: &mut Connection, pending: &[Entry<M>]) -> Result<Vec<Rejection>> {
     let mut rejected = Vec::new();
     for entry in pending {
-        match entry.mutation.apply(&Transaction::new(conn), &entry.actor) {
+        match entry
+            .mutation
+            .apply(&mut Transaction::new(conn), &entry.actor)
+        {
             Ok(()) => {}
             Err(MutationError::Rejected(reason)) => rejected.push(Rejection {
                 id: entry.id,
                 reason,
             }),
-            Err(MutationError::Sqlite(e)) => return Err(e.into()),
+            Err(MutationError::Database(e)) => return Err(e.into()),
         }
     }
     Ok(rejected)

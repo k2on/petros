@@ -5,7 +5,7 @@
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{Error, Result, Uuid};
+use crate::{Error, Id, Result};
 
 /// A position in the server's totally ordered log. The first entry is 1.
 pub type Seq = u64;
@@ -55,7 +55,7 @@ impl std::fmt::Debug for ActorId {
 /// reasoning at the call site. `seq` is unset until the server assigns one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry<M> {
-    pub id: Uuid,
+    pub id: Id,
     pub actor: ActorId,
     #[serde(default)]
     pub seq: Option<Seq>,
@@ -65,7 +65,7 @@ pub struct Entry<M> {
 
 impl<M> Entry<M> {
     /// A new, unsequenced entry.
-    pub fn new(id: Uuid, actor: ActorId, mutation: M) -> Self {
+    pub fn new(id: Id, actor: ActorId, mutation: M) -> Self {
         Entry {
             id,
             actor,
@@ -102,9 +102,9 @@ pub enum ServerMsg<M> {
     },
     /// These pushed entries are in the log at these sequence numbers.
     /// Parallel arrays: `ids[i]` was assigned `seqs[i]`.
-    Ack { ids: Vec<Uuid>, seqs: Vec<Seq> },
+    Ack { ids: Vec<Id>, seqs: Vec<Seq> },
     /// This pushed entry will never be in the log.
-    Reject { id: Uuid, reason: String },
+    Reject { id: Id, reason: String },
 }
 
 /// Encode a value as CBOR.
