@@ -46,11 +46,19 @@ desktop:
 # symbols come from `sqlite-wasm-rs`, linked into the same module. `!<arch>` is a
 # valid empty `ar` archive, which saves keeping a binary in the tree.
 web-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cc="${WASM_CC:-clang}"
+    # clang needs its own builtin headers — stddef.h and friends. A plain clang
+    # finds them next to itself; nix's does not, because they live in a separate
+    # output, so the devshell passes the path in and this works it out otherwise.
+    cflags="${WASM_CFLAGS:-"-resource-dir $("$cc" -print-resource-dir)"}"
     mkdir -p target/wasm-sqlite-stub clients/iced/pkg
     printf '!<arch>\n' > target/wasm-sqlite-stub/libsqlite3.a
-    CC_wasm32_unknown_unknown="${WASM_CC:-clang}" \
+    CC_wasm32_unknown_unknown="$cc" \
     AR_wasm32_unknown_unknown="${WASM_AR:-llvm-ar}" \
-    SQLITE3_LIB_DIR=$PWD/target/wasm-sqlite-stub SQLITE3_STATIC=1 \
+    CFLAGS_wasm32_unknown_unknown="$cflags" \
+    SQLITE3_LIB_DIR="$PWD/target/wasm-sqlite-stub" SQLITE3_STATIC=1 \
         cargo build -p exo-iced-demo --target wasm32-unknown-unknown --release
     wasm-bindgen --target web --no-typescript \
         --out-dir clients/iced/pkg \

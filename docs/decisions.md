@@ -305,3 +305,11 @@ injects the system's glibc include paths and fails in the same way for the same
 reason. This did not show up on the machine the browser build was first proven
 on, for the least satisfying possible reason: `CC` happened to be unset there,
 so `cc-rs` defaulted to clang and everything worked by luck.
+
+Unwrapping clang then costs you the thing the wrapper was also doing: telling
+clang where its own builtin headers live. An unwrapped nix clang cannot find
+`stddef.h`, because nixpkgs puts the resource directory in a separate output
+from the binary. So the devshell passes `-resource-dir` too, located with
+`lib.getLib` rather than a literal path so it survives that output split. Outside
+nix the recipe asks `clang -print-resource-dir` itself, and a normally-installed
+clang answers correctly.

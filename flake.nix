@@ -30,6 +30,17 @@
           # outside it — and so bumping it is a one-line change in one file.
           toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+          # SQLite's C, compiled for wasm. Unwrapped on purpose: nix's wrapped
+          # clang injects this system's glibc headers, which is exactly what
+          # breaks a wasm32-unknown-unknown build.
+          wasmClang = pkgs.llvmPackages.clang-unwrapped;
+          # clang's own builtin headers. `getLib` rather than a literal path
+          # because nixpkgs may put them in the `lib` output, and an unwrapped
+          # clang cannot find them on its own.
+          wasmResourceDir =
+            "${pkgs.lib.getLib wasmClang}/lib/clang/"
+            + pkgs.lib.versions.major wasmClang.version;
+
           # Runtime libraries the iced client will dlopen (phase 5). Wired up
           # now so the shell does not need revisiting when that lands.
           icedLibs = pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
@@ -50,10 +61,6 @@
               # wasm-bindgen says so plainly and `just web-tools` installs the
               # matching version.
               wasm-bindgen-cli
-              # SQLite's C, compiled for wasm. Unwrapped on purpose: the wrapped
-              # clang injects this system's glibc headers, which is exactly what
-              # breaks a wasm32-unknown-unknown build.
-              llvmPackages.clang-unwrapped
               llvmPackages.llvm
               bun
               sqlite
@@ -68,8 +75,9 @@
             # `just web` reads these. They are explicit paths rather than a bare
             # `clang` because the devshell also exports `CC=gcc`, and gcc cannot
             # target wasm.
-            WASM_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+            WASM_CC = "${wasmClang}/bin/clang";
             WASM_AR = "${pkgs.llvmPackages.llvm}/bin/llvm-ar";
+            WASM_CFLAGS = "-resource-dir ${wasmResourceDir}";
 
             shellHook = ''
               echo "harken devshell — just test | just lint | just offline | just serve"
