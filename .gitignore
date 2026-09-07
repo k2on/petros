@@ -2,3 +2,4 @@
 result
 result-*
 crates/exo/examples/web/pkg
+.direnv

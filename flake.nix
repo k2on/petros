@@ -67,6 +67,8 @@
               pkg-config
               # For the audio server's transcoding (phase 3).
               ffmpeg
+              
+              python3
             ]) ++ icedLibs;
 
             # iced loads these at runtime rather than linking them.
@@ -80,6 +82,29 @@
             WASM_CFLAGS = "-resource-dir ${wasmResourceDir}";
 
             shellHook = ''
+              # NixOS keeps the host's GPU drivers under /run/opengl-driver, and
+              # they are linked against the host's libwayland. LD_LIBRARY_PATH
+              # beats a library's own RUNPATH, so on a machine tracking a newer
+              # channel than this flake's pin, the wayland above shadows the one
+              # Mesa was built for. Every Mesa Vulkan driver then fails to load
+              # ("undefined symbol: wl_fixes_interface"), wgpu finds no adapter
+              # at all, and iced quietly falls back to its software renderer —
+              # which draws the right pixels far too slowly to scroll, and
+              # leaves stale ones behind where its damage tracking undershoots.
+              # Nothing says so out loud, so let the host's own copy win.
+              for driver in /run/opengl-driver/lib/libvulkan_*.so; do
+                [ -e "$driver" ] || continue
+                # Ask the driver itself, with our own path out of the way, so
+                # this keeps working when the host moves on again.
+                hostWayland=$(LD_LIBRARY_PATH= ldd "$driver" 2>/dev/null \
+                  | sed -n 's|.*=> \(.*\)/libwayland-client\.so\.0 .*|\1|p' \
+                  | head -1)
+                if [ -n "$hostWayland" ]; then
+                  export LD_LIBRARY_PATH="$hostWayland:$LD_LIBRARY_PATH"
+                  break
+                fi
+              done
+
               echo "harken devshell — just test | just lint | just offline | just serve"
             '';
           };

@@ -155,7 +155,12 @@ impl App {
     /// Move messages between the client and the wire. While offline the outbox
     /// is drained and dropped: reconnecting re-offers everything still pending,
     /// and the server dedupes what it has already seen.
-    fn pump(&mut self) {
+    ///
+    /// Reports whether anything arrived, so that the twenty ticks a second that
+    /// find an empty socket cost a `try_recv` rather than a re-query of the
+    /// whole list.
+    fn pump(&mut self) -> bool {
+        let mut moved = false;
         for msg in self.client.take_outgoing() {
             if let Some(link) = &self.link {
                 link.send(msg);
@@ -163,6 +168,7 @@ impl App {
         }
         if let Some(link) = &self.link {
             while let Some(msg) = link.try_recv() {
+                moved = true;
                 if let Err(e) = self.client.recv(msg) {
                     self.note = e.to_string();
                 }
@@ -174,10 +180,17 @@ impl App {
         }
         for r in self.client.take_rejections() {
             self.note = format!("the server refused a change: {}", r.reason);
+            moved = true;
         }
+        moved
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Typing, ticking and pulling the plug all leave the list alone.
+        let edited = matches!(
+            message,
+            Message::Add | Message::Toggle(..) | Message::Remove(_)
+        );
         let outcome = match message {
             Message::Typed(text) => {
                 self.input = text;
@@ -205,8 +218,12 @@ impl App {
         if let Err(e) = outcome {
             self.note = e.to_string();
         }
-        self.pump();
-        self.refresh();
+        // `refresh` reads the whole list back out of SQLite, so it waits for a
+        // reason: either this message was an edit, or the wire brought one.
+        let arrived = self.pump();
+        if edited || arrived {
+            self.refresh();
+        }
         Task::none()
     }
 

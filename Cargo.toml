@@ -29,3 +29,11 @@ uuid = { version = "1", features = ["serde"] }
 
 [profile.test]
 opt-level = 1
+
+# `just iced` runs a `dev` build, and iced is not a library you only compile:
+# every frame goes through its text shaping and its rasteriser. Unoptimised,
+# that is slow enough to feel while scrolling. Dependencies change rarely, so
+# optimise them and leave this workspace's own crates at `opt-level = 0`, where
+# an edit still rebuilds in a second.
+[profile.dev.package."*"]
+opt-level = 2
