@@ -26,5 +26,9 @@ serve addr="127.0.0.1:8787":
 peer user addr="127.0.0.1:8787":
     cargo run -p exo --features ws --example multiplayer -- --user {{user}} --server {{addr}}
 
+# The iced client on the desktop.
+desktop:
+    cargo run -p exo-iced-demo
+
 doc:
     cargo doc -p exo --no-deps --all-features --open

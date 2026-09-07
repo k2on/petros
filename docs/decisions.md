@@ -225,3 +225,44 @@ miserable way to end a demo.
 They are driven under tmux for verification rather than trusted to work: a real
 pty, real keypresses, and the screen captured and checked, including the
 partition-and-heal flow that the whole crate exists to make correct.
+
+## The iced client, and why `view` cannot query the database
+
+`clients/iced` is the same to-do list as the examples, in iced. The engine is
+untouched by it: the client is an ordinary `exo::Client`, and the app is an
+ordinary iced program.
+
+One shape is worth noting. iced's `view` takes `&self` and Diesel needs `&mut`
+for every query, reads included, so a query cannot happen during rendering. The
+app therefore keeps the materialised rows and the pending count in its own state
+and refreshes them after each mutation. That is the right shape for iced anyway —
+`view` should be cheap and pure — and it is precisely the seam a reactive query
+layer would slot into later.
+
+## The browser build is blocked on SQLite, not on iced
+
+iced runs on `wasm32-unknown-unknown` and `iced_winit` handles the web properly
+(it spawns the event loop and appends its canvas to `<body>`). SQLite is the
+blocker, and these are the facts, each established by trying it:
+
+* `libsqlite3-sys` with `bundled` cannot compile for `wasm32-unknown-unknown`:
+  SQLite's C needs a libc, and the target has no sysroot — `fatal error:
+  'stdio.h' file not found`. Its build script handles `wasm32-wasi*` only, and
+  WASI is not the target a browser needs.
+* `sqlite-wasm-rs` is not a `libsqlite3-sys` drop-in, despite appearances. It is
+  a separate FFI crate: its version is 0.5.x against `libsqlite3-sys`'s 0.38, so
+  a `[patch]` is silently ignored for failing the version requirement, and it
+  declares `links = "wsqlite3"` rather than `links = "sqlite3"`. It carries its
+  own musl header-and-source shim and compiles its own SQLite with its own
+  flags.
+* A `[patch]` could not be scoped to the browser anyway. `[patch]` is not
+  target-conditional, so putting one in the workspace manifest would swap the
+  server and the whole test suite onto a SQLite built with `SQLITE_OS_OTHER` and
+  no filesystem VFS.
+
+So the two routes are: teach `libsqlite3-sys` to link a `libsqlite3.a` built for
+`wasm32-unknown-unknown` (cargo can override a build script per target for a
+package that declares `links`, which is how a prebuilt library gets substituted),
+or give the browser no local database at all and make it read through to the
+server, which costs offline-first in the browser specifically. That choice is
+about what the product is, so it is not one to make quietly in a commit.

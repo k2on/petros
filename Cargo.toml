@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/exo"]
+members = ["clients/iced", "crates/exo"]
 
 [workspace.package]
 edition = "2021"
@@ -12,6 +12,7 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 ciborium = "0.2"
+iced = "0.14"
 rand = "0.8"
 diesel = { version = "2.3", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
