@@ -45,6 +45,9 @@
             packages = [ toolchain ] ++ (with pkgs; [
               cargo-nextest
               just
+              # For `just web`. Must match the wasm-bindgen version in
+              # Cargo.lock; if they drift, wasm-bindgen says so loudly.
+              wasm-bindgen-cli
               bun
               sqlite
               pkg-config

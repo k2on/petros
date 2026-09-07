@@ -12,6 +12,14 @@
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 
+// `std::time::SystemTime::now` panics on `wasm32-unknown-unknown` — there is no
+// clock in the target, only in the host. `web-time` is the same API backed by
+// `performance.now`/`Date` in a browser and by `std` everywhere else.
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_arch = "wasm32")]
+use web_time::{SystemTime, UNIX_EPOCH};
+
 use crate::Id;
 
 /// Where wall-clock time comes from.
@@ -68,8 +76,8 @@ impl AutoCtx {
     /// Milliseconds since the Unix epoch.
     pub fn now_ms(&mut self) -> i64 {
         match &mut self.clock {
-            Clock::System => std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            Clock::System => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or_default(),
             Clock::Virtual { now_ms, step_ms } => {

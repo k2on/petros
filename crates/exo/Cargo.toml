@@ -15,12 +15,27 @@ ws = ["dep:tungstenite"]
 [dependencies]
 ciborium.workspace = true
 diesel.workspace = true
-libsqlite3-sys.workspace = true
 rand.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tungstenite = { version = "0.24", optional = true }
+
+# Native: SQLite's C, compiled and linked in.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libsqlite3-sys = { workspace = true, features = ["bundled"] }
+
+# Browser: the same C, but compiled for wasm by `sqlite-wasm-rs`, which also
+# supplies the libc shims SQLite needs and registers an in-memory VFS. Diesel
+# reaches it through `libsqlite3-sys`'s declarations, which resolve to those
+# symbols at link time — so `libsqlite3-sys` must NOT bundle here, or there
+# would be two SQLites. Cargo unifies features per target, which is what makes
+# that split expressible at all.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+libsqlite3-sys.workspace = true
+sqlite-wasm-rs.workspace = true
+web-time.workspace = true
 
 [dev-dependencies]
 # Examples only. The engine has no opinion about terminals.

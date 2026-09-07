@@ -8,3 +8,5 @@
 [toolchain]
 channel = "1.90.0"
 components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
+# The browser build. `rust-overlay` reads this too, so the devshell gets it.
+targets = ["wasm32-unknown-unknown"]

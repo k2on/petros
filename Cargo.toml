@@ -15,7 +15,11 @@ ciborium = "0.2"
 iced = "0.14"
 rand = "0.8"
 diesel = { version = "2.3", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
-libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+# `bundled` is applied per target, not here: the browser build must NOT
+# bundle, because SQLite's C cannot compile for wasm32-unknown-unknown.
+libsqlite3-sys = "0.30"
+sqlite-wasm-rs = "0.5"
+web-time = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 uuid = { version = "1", features = ["serde"] }
