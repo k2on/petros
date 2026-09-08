@@ -1,5 +1,5 @@
 //! Everything that needs a real SQLite: the table, the rows, the Diesel host
-//! and the `exo::App` the native peers run.
+//! and the `petros::App` the native peers run.
 //!
 //! Behind the `storage` feature, because the wasm build wants
 //! [`domain`](crate::domain) and none of this.
@@ -11,7 +11,7 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::BigInt;
 use diesel::sqlite::Sqlite as SqliteBackend;
-use exo::{ActorId, App, AutoCtx, Connection, Id, Mutation, MutationError, Transaction};
+use petros::{ActorId, App, AutoCtx, Connection, Id, Mutation, MutationError, Transaction};
 use serde::{Deserialize, Serialize};
 
 diesel::table! {
@@ -39,7 +39,7 @@ pub struct Item {
 }
 
 /// Always ordered explicitly.
-pub fn list(conn: &mut Connection) -> exo::Result<Vec<Item>> {
+pub fn list(conn: &mut Connection) -> petros::Result<Vec<Item>> {
     Ok(todo::table
         .select(Item::as_select())
         .order((todo::pos.asc(), todo::id.asc()))
@@ -104,13 +104,13 @@ impl Mutation for Payload {
     }
 }
 
-/// The app: Exo's tables plus this one.
+/// The app: Petros's tables plus this one.
 pub struct TodoApp;
 
 impl App for TodoApp {
     type Mutation = Payload;
 
-    fn migrate(conn: &mut Connection) -> exo::Result<()> {
+    fn migrate(conn: &mut Connection) -> petros::Result<()> {
         conn.batch_execute(
             "CREATE TABLE IF NOT EXISTS todo (
                  id         BLOB PRIMARY KEY NOT NULL,
@@ -171,7 +171,7 @@ fn json_to_cbor(value: serde_json::Value, is_id: bool) -> Result<Value, String> 
             None => return Err(format!("{n} is not an integer")),
         },
         J::String(s) if is_id => Value::Bytes(
-            exo::uuid::Uuid::parse_str(&s)
+            petros::uuid::Uuid::parse_str(&s)
                 .map_err(|e| format!("not an id: {e}"))?
                 .as_bytes()
                 .to_vec(),
@@ -204,12 +204,12 @@ pub fn add(text: &str) -> Payload {
 }
 
 pub fn set_done(id: &[u8; 16], done: bool) -> Payload {
-    let id = exo::uuid::Uuid::from_bytes(*id).to_string();
+    let id = petros::uuid::Uuid::from_bytes(*id).to_string();
     from_value("SetDone", serde_json::json!({ "id": id, "done": done }))
         .expect("a formatted uuid always parses")
 }
 
 pub fn remove(id: &[u8; 16]) -> Payload {
-    let id = exo::uuid::Uuid::from_bytes(*id).to_string();
+    let id = petros::uuid::Uuid::from_bytes(*id).to_string();
     from_value("Remove", serde_json::json!({ "id": id })).expect("a formatted uuid always parses")
 }

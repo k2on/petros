@@ -10,10 +10,10 @@ use diesel::connection::SimpleConnection;
 use diesel::deserialize::QueryableByName;
 use diesel::sql_types::{BigInt, Text};
 use diesel::{sql_query, RunQueryDsl};
-use exo::{AutoCtx, Connection};
-use exo_mutators::Mutators;
+use petros::{AutoCtx, Connection};
+use petros_mutators::Mutators;
 
-const MODULE: &[u8] = exo_mutators::BUNDLED;
+const MODULE: &[u8] = petros_mutators::BUNDLED;
 
 #[derive(QueryableByName, Debug)]
 struct Row {
@@ -28,7 +28,7 @@ struct Row {
 }
 
 fn database() -> Connection {
-    let mut conn = exo::open_memory().expect("open");
+    let mut conn = petros::open_memory().expect("open");
     conn.batch_execute(
         "CREATE TABLE todo (
              id BLOB PRIMARY KEY NOT NULL, text TEXT NOT NULL,

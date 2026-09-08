@@ -17,7 +17,7 @@ use diesel::connection::SimpleConnection;
 use diesel::deserialize::QueryableByName;
 use diesel::sql_types::BigInt;
 use diesel::{sql_query, RunQueryDsl};
-use exo::{AutoCtx, Connection};
+use petros::{AutoCtx, Connection};
 use wasmi::{Caller, Engine, Linker, Memory, Module, Store, TypedFunc};
 
 /// How much stack one mutation gets.
@@ -88,7 +88,7 @@ impl Mutators {
         let engine = Engine::default();
         let module = Module::new(&engine, bytes).map_err(|e| format!("not a wasm module: {e}"))?;
         let names: Vec<&str> = module.exports().map(|e| e.name()).collect();
-        for required in ["exo_alloc", "exo_apply", "exo_fill_auto", "memory"] {
+        for required in ["petros_alloc", "petros_apply", "petros_fill_auto", "memory"] {
             if !names.contains(&required) {
                 return Err(format!("the module does not export `{required}`"));
             }
@@ -129,7 +129,7 @@ impl Mutators {
     ) -> Result<R, String> {
         std::thread::scope(|scope| {
             std::thread::Builder::new()
-                .name("exo-mutator".into())
+                .name("petros-mutator".into())
                 .stack_size(MUTATOR_STACK)
                 .spawn_scoped(scope, || self.run_here(conn, call))
                 .map_err(|e| format!("could not start the mutator thread: {e}"))?
@@ -157,9 +157,9 @@ impl Mutators {
         );
         let mut linker = Linker::new(&self.engine);
         linker
-            .func_wrap("exo", "query_int", host_query_int)
-            .and_then(|l| l.func_wrap("exo", "query_exists", host_query_exists))
-            .and_then(|l| l.func_wrap("exo", "exec", host_exec))
+            .func_wrap("petros", "query_int", host_query_int)
+            .and_then(|l| l.func_wrap("petros", "query_exists", host_query_exists))
+            .and_then(|l| l.func_wrap("petros", "exec", host_exec))
             .map_err(|e| format!("could not define the host imports: {e}"))?;
 
         let instance = linker
@@ -170,8 +170,8 @@ impl Mutators {
             .get_memory(&store, "memory")
             .ok_or("the module exports no memory")?;
         let alloc = instance
-            .get_typed_func::<u32, u32>(&store, "exo_alloc")
-            .map_err(|e| format!("exo_alloc has the wrong shape: {e}"))?;
+            .get_typed_func::<u32, u32>(&store, "petros_alloc")
+            .map_err(|e| format!("petros_alloc has the wrong shape: {e}"))?;
         store.data_mut().memory = Some(memory);
         store.data_mut().alloc = Some(alloc);
 
@@ -200,11 +200,11 @@ impl Mutators {
             let p = write_bytes(store, payload)?;
             let u = write_bytes(store, &uuid)?;
             let f = instance
-                .get_typed_func::<(u32, u32, u32, i64), u64>(&*store, "exo_fill_auto")
-                .map_err(|e| format!("exo_fill_auto has the wrong shape: {e}"))?;
+                .get_typed_func::<(u32, u32, u32, i64), u64>(&*store, "petros_fill_auto")
+                .map_err(|e| format!("petros_fill_auto has the wrong shape: {e}"))?;
             let packed = f
                 .call(&mut *store, (p.0, p.1, u.0, now))
-                .map_err(|e| format!("exo_fill_auto trapped: {e}"))?;
+                .map_err(|e| format!("petros_fill_auto trapped: {e}"))?;
             read_packed(store, packed)
         })
     }
@@ -220,11 +220,11 @@ impl Mutators {
             let p = write_bytes(store, payload)?;
             let a = write_bytes(store, actor.as_bytes())?;
             let f = instance
-                .get_typed_func::<(u32, u32, u32, u32), u64>(&*store, "exo_apply")
-                .map_err(|e| format!("exo_apply has the wrong shape: {e}"))?;
+                .get_typed_func::<(u32, u32, u32, u32), u64>(&*store, "petros_apply")
+                .map_err(|e| format!("petros_apply has the wrong shape: {e}"))?;
             let packed = f
                 .call(&mut *store, (p.0, p.1, a.0, a.1))
-                .map_err(|e| format!("exo_apply trapped: {e}"))?;
+                .map_err(|e| format!("petros_apply trapped: {e}"))?;
             if packed == 0 {
                 return Ok(Ok(()));
             }
@@ -239,11 +239,11 @@ impl Mutators {
 /// Ask the guest for a buffer and fill it. Everything crossing the boundary
 /// goes through here, in both directions.
 fn write_bytes(store: &mut Store<HostState>, bytes: &[u8]) -> Result<(u32, u32), String> {
-    let alloc = store.data().alloc.ok_or("no exo_alloc yet")?;
+    let alloc = store.data().alloc.ok_or("no petros_alloc yet")?;
     let memory = store.data().memory.ok_or("no memory yet")?;
     let ptr = alloc
         .call(&mut *store, bytes.len() as u32)
-        .map_err(|e| format!("exo_alloc trapped: {e}"))?;
+        .map_err(|e| format!("petros_alloc trapped: {e}"))?;
     memory
         .write(&mut *store, ptr as usize, bytes)
         .map_err(|e| format!("could not write guest memory: {e}"))?;

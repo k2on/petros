@@ -12,10 +12,10 @@ use diesel::connection::SimpleConnection;
 use diesel::deserialize::QueryableByName;
 use diesel::sql_types::{BigInt, Text};
 use diesel::{sql_query, RunQueryDsl};
-use exo::{AutoCtx, Connection};
-use exo_mutators::Mutators;
+use petros::{AutoCtx, Connection};
+use petros_mutators::Mutators;
 
-const MODULE: &[u8] = exo_mutators::BUNDLED;
+const MODULE: &[u8] = petros_mutators::BUNDLED;
 
 #[derive(QueryableByName, Debug, PartialEq)]
 struct Row {
@@ -32,7 +32,7 @@ struct Row {
 }
 
 fn database() -> Connection {
-    let mut conn = exo::open_memory().expect("open");
+    let mut conn = petros::open_memory().expect("open");
     conn.batch_execute(
         "CREATE TABLE todo (
              id BLOB PRIMARY KEY NOT NULL, text TEXT NOT NULL,
@@ -101,7 +101,7 @@ fn both_ways(script: &[(&str, serde_json::Value)]) -> (Vec<Row>, Vec<Row>) {
         .iter()
         .map(|(kind, args)| {
             let mut p = todo::from_value(kind, args.clone()).expect("author");
-            <todo::Payload as exo::Mutation>::fill_auto(&mut p, &mut auto);
+            <todo::Payload as petros::Mutation>::fill_auto(&mut p, &mut auto);
             p
         })
         .collect();
@@ -180,7 +180,7 @@ fn refusals_match_too() {
         ("Frobnicate", serde_json::json!({})),
     ] {
         let mut p = todo::from_value(kind, args).expect("author");
-        <todo::Payload as exo::Mutation>::fill_auto(&mut p, &mut auto);
+        <todo::Payload as petros::Mutation>::fill_auto(&mut p, &mut auto);
 
         let mut a = database();
         let native = todo::domain::apply(&mut Native(&mut a), &p.0, "alice");

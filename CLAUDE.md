@@ -1,13 +1,13 @@
 # harken
 
 A self-hosted, local-first music system. **Phase 1 plus its clients exist**:
-`crates/exo`, a general-purpose offline-first sync engine that knows nothing
+`crates/petros`, a general-purpose offline-first sync engine that knows nothing
 about music; `crates/todo`, the demo domain it is exercised with; `crates/ffi`,
 that domain exported over UniFFI; and four peers — two TUIs, an iced window
 (desktop and browser) and an Expo app. `crates/api` and `crates/server` are
 later phases and are not built. Do not start one without being asked.
 
-## What Exo is
+## What Petros is
 
 A server owns an append-only, totally ordered log of mutations. Mutations are
 *intents*, not facts — `AddToList { list, items }`, never
@@ -34,24 +34,24 @@ story: no CRDTs, no vector clocks, no merge functions.
   a field's type; add fields with `#[serde(default)]`. `tests/wire.rs` pins this
   against a checked-in byte fixture — if it fails, the change would have broken
   every existing installation.
-- **Exo owns every transaction boundary.** Never call Diesel's
+- **Petros owns every transaction boundary.** Never call Diesel's
   `Connection::transaction` on a client's connection: the optimistic savepoint
   outlives any single call, so boundaries are raw SQL through `batch_execute`.
-- Exo owns tables prefixed `exo_`. The app owns everything else.
-- `exo::client` and `exo::server` are sans-io: no sockets, no async, no runtime.
+- Petros owns tables prefixed `petros_`. The app owns everything else.
+- `petros::client` and `petros::server` are sans-io: no sockets, no async, no runtime.
   This is what makes the deterministic simulation tests possible. The transport
   module is the only place networking lives.
 
 ## Layout
 
 ```
-crates/exo/src/          the engine
+crates/petros/src/          the engine
   client.rs              the savepoint rebase — the least obvious code here
   server.rs              assigns sequence numbers, dedupes, fans out
-  store.rs, schema.rs    the three exo_ tables, as Diesel models
+  store.rs, schema.rs    the three petros_ tables, as Diesel models
   transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
-crates/exo/tests/        19 tests; common/sim.rs is a seeded in-process network
-crates/exo/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
+crates/petros/tests/        19 tests; common/sim.rs is a seeded in-process network
+crates/petros/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
 crates/todo/             the domain — the ONLY apply
   domain.rs              apply + fill_auto, generic over a 3-method `Host`
   storage.rs             that Host over Diesel; what every native peer links
@@ -60,7 +60,7 @@ crates/todo-wasm/        the same domain, Host over three wasm imports
 crates/mutators/         the wasmi host — the phone only; conformance test here
 crates/ffi/              the client over UniFFI, for the Expo app
 clients/expo/            the Expo app; src/ is UI and a socket, nothing else
-  modules/exo-todo/      the turbo module — generated, gitignored, not authored
+  modules/petros-todo/      the turbo module — generated, gitignored, not authored
 docs/decisions.md        why everything is the way it is — read this first
 ```
 
@@ -112,7 +112,7 @@ a rebuild costs four minutes instead of four seconds.
 `crates/mutators/tests/conformance.rs` runs every verb through both builds and
 compares rows and refusals, so the two cannot drift apart unnoticed. `crates/ffi` exports the client with `#[uniffi::export]`
 (there is no UDL file; the Rust is the interface definition) and
-`uniffi-bindgen-react-native` generates `clients/expo/modules/exo-todo/`, which
+`uniffi-bindgen-react-native` generates `clients/expo/modules/petros-todo/`, which
 is gitignored so it cannot be hand-edited.
 
 Changing a mutation does **not** need a native build: `just mutators` rebuilds

@@ -1,0 +1,96 @@
+[package]
+autoexamples = false
+name = "petros"
+version = "0.1.0"
+description = "An offline-first sync engine: an append-only, server-ordered log of mutations with client-side rebase."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# A deliberately thin, obviously replaceable WebSocket transport. Not part of
+# the core: `petros::client` and `petros::server` never touch a socket.
+ws = ["dep:tungstenite", "dep:wasm-bindgen", "dep:web-sys"]
+
+[dependencies]
+ciborium.workspace = true
+diesel.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+
+# Native: SQLite's C, compiled and linked in.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libsqlite3-sys = { workspace = true, features = ["bundled"] }
+tungstenite = { version = "0.24", optional = true }
+
+# Browser: the same C, but compiled for wasm by `sqlite-wasm-rs`, which also
+# supplies the libc shims SQLite needs and registers an in-memory VFS. Diesel
+# reaches it through `libsqlite3-sys`'s declarations, which resolve to those
+# symbols at link time — so `libsqlite3-sys` must NOT bundle here, or there
+# would be two SQLites. Cargo unifies features per target, which is what makes
+# that split expressible at all.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Two majors of getrandom end up in a browser build: 0.2 via `rand`, 0.3 via
+# iced. They want telling about the browser in different ways — 0.2 takes a
+# feature, 0.3 also needs a cfg flag, which the web recipe passes.
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+libsqlite3-sys.workspace = true
+sqlite-wasm-rs.workspace = true
+wasm-bindgen = { version = "0.2", optional = true }
+web-time.workspace = true
+web-sys = { version = "0.3", optional = true, features = [
+    "BinaryType",
+    "CloseEvent",
+    "Location",
+    "MessageEvent",
+    "WebSocket",
+    "Window",
+] }
+
+[dev-dependencies]
+# The engine has no opinion about windows; the iced example does.
+iced.workspace = true
+# The domain. These are ordinary Rust programs, so they call `apply` directly
+# — no interpreter, no module to load. The phone runs the same source compiled
+# to wasm; `crates/todo/tests/conformance.rs` holds the two builds together. A dev-dependency that depends back on this
+# crate is a cycle cargo allows and resolves — and it is what keeps the
+# examples, the server and the generated FFI bindings running the same `apply`.
+todo = { workspace = true, features = ["storage"] }
+
+# `cargo build --example` compiles every dev-dependency, so the terminal
+# examples' and the test suite's dependencies would be dragged into a browser
+# build of the iced example — and `proptest` reaches `wait-timeout`, which has
+# no wasm. None of them belong there, so none of them are declared there.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+crossterm = "0.28"
+# `smol` gives iced a timer to drive the example's transport pump. In a browser
+# it already has one.
+iced = { workspace = true, features = ["smol"] }
+proptest = "1"
+ratatui = "0.29"
+tempfile = "3"
+
+# The iced example in a browser: a panic that reaches the console beats one
+# that reports "unreachable executed".
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+console_error_panic_hook = "0.1"
+# WebGL rather than WebGPU, for reach. Without it wgpu finds no backend, iced
+# falls back to its software renderer, and that cannot have the canvas because
+# WebGL already claimed it — which surfaces as a blank page and a panic about
+# canvas contexts.
+iced = { workspace = true, features = ["webgl"] }
+
+[[example]]
+name = "offline"
+
+[[example]]
+name = "multiplayer"
+required-features = ["ws"]
+
+[[example]]
+name = "iced"
+required-features = ["ws"]

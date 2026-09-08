@@ -82,7 +82,7 @@ jobs:
             cargo build -p todo-wasm --target wasm32-unknown-unknown --profile mutators
             cargo run -q -p emit-mutators
             cd clients/expo && bun install
-            cd modules/exo-todo
+            cd modules/petros-todo
             ../../node_modules/.bin/ubrn build android \
               --config ubrn.config.yaml --and-generate --release
           '
@@ -99,7 +99,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: exo-todo-android
+          name: petros-todo-android
           path: clients/expo/android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
@@ -117,7 +117,7 @@ jobs:
         run: |
           nix develop --command bash -c '
             cd clients/expo && bun install
-            cd modules/exo-todo
+            cd modules/petros-todo
             ../../node_modules/.bin/ubrn build ios \
               --config ubrn.config.yaml --and-generate --release
           '
@@ -132,8 +132,8 @@ jobs:
         run: |
           cd clients/expo/ios
           xcodebuild \
-            -workspace exoexpo.xcworkspace \
-            -scheme exoexpo \
+            -workspace petrosexpo.xcworkspace \
+            -scheme petrosexpo \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \

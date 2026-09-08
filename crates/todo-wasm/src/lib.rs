@@ -18,8 +18,8 @@ use ciborium::value::Value;
 use todo::domain::{self, Host};
 
 // Without this the imports land in a module called `env`, and the host — which
-// names them `exo` — cannot satisfy them.
-#[link(wasm_import_module = "exo")]
+// names them `petros` — cannot satisfy them.
+#[link(wasm_import_module = "petros")]
 extern "C" {
     #[link_name = "query_int"]
     fn host_query_int(sql: *const u8, sql_len: u32) -> i64;
@@ -52,7 +52,7 @@ impl Host for Imports {
 
 /// Give the host a buffer in our linear memory.
 #[no_mangle]
-pub extern "C" fn exo_alloc(len: u32) -> *mut u8 {
+pub extern "C" fn petros_alloc(len: u32) -> *mut u8 {
     let mut buf = Vec::<u8>::with_capacity(len as usize);
     let ptr = buf.as_mut_ptr();
     core::mem::forget(buf);
@@ -73,7 +73,7 @@ fn packed(bytes: Vec<u8>) -> u64 {
 /// The host must pass pointer/length pairs describing live buffers in this
 /// module's linear memory — the only thing its `write_bytes` produces.
 #[no_mangle]
-pub unsafe extern "C" fn exo_apply(
+pub unsafe extern "C" fn petros_apply(
     mutation: *const u8,
     mutation_len: u32,
     actor: *const u8,
@@ -96,10 +96,10 @@ pub unsafe extern "C" fn exo_apply(
 /// Fill the auto values and hand back the rewritten payload.
 ///
 /// # Safety
-/// As [`exo_apply`]: the pointers must describe live buffers here, and `uuid`
+/// As [`petros_apply`]: the pointers must describe live buffers here, and `uuid`
 /// must address sixteen readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn exo_fill_auto(
+pub unsafe extern "C" fn petros_fill_auto(
     mutation: *const u8,
     mutation_len: u32,
     uuid: *const u8,
@@ -120,6 +120,6 @@ pub unsafe extern "C" fn exo_fill_auto(
 
 /// Bumped when the host/guest contract changes, so a mismatched pair says so.
 #[no_mangle]
-pub extern "C" fn exo_abi_version() -> u32 {
+pub extern "C" fn petros_abi_version() -> u32 {
     1
 }

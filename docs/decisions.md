@@ -80,7 +80,7 @@ outermost savepoint *is* a commit, so the probe committed on its own when no
 optimistic savepoint was held, `discard_optimistic` committed when one was, and
 `put_pending` then committed again as its own implicit transaction.
 
-At `synchronous = FULL` — SQLite's default, which Exo never overrode — each of
+At `synchronous = FULL` — SQLite's default, which Petros never overrode — each of
 those fsyncs the WAL, and an fsync is the largest number in the system. Traced
 with `strace`: two `fsync` calls per tap, against 4.0ms for a single fsync of a
 4KiB overwrite on this machine, which is the whole 8.0ms a tap measured.
@@ -108,7 +108,7 @@ is not offline-first — but the optimistic state they produce must stay
 rollback-able, which means staying uncommitted. On one connection those two are
 incompatible: you cannot commit anything while holding an open transaction you
 still intend to roll back. So a local write closes the savepoint (discarding the
-optimistic view), commits the intent to `exo_pending` on its own, then reopens the
+optimistic view), commits the intent to `petros_pending` on its own, then reopens the
 savepoint and replays all pending mutations. The cost is that authoring a
 mutation is O(pending) rather than O(1); pending is the set of mutations awaiting
 an ack, which is small in every case we care about, and the alternative — a
@@ -122,20 +122,20 @@ server accepted but we failed to commit is re-fetched by the next `Hello`.
 Storage goes through Diesel: models are structs with `Queryable`/`Selectable`/
 `Insertable` derives, queries are built with the DSL, and `check_for_backend`
 verifies at compile time that each model still matches its table. The field was
-narrow. `exo::client` and `exo::server` are sync by design, which rules out
+narrow. `petros::client` and `petros::server` are sync by design, which rules out
 sqlx, SeaORM, ormlite and rbatis — all async-first. turbosql owns a global
-connection singleton, which cannot coexist with a connection Exo hands to
+connection singleton, which cannot coexist with a connection Petros hands to
 `apply`. That leaves Diesel as the only real sync ORM, and `sea-query` as a
 query builder that would have layered onto rusqlite without replacing it. We
 took the ORM: Diesel has no way to wrap an existing `rusqlite::Connection` — its
 only constructor is `establish(url)` and there is no interop — so rusqlite is
-gone from the crate entirely, `exo::Connection` is `diesel::SqliteConnection`,
-and Exo's own three tables go through models like everything else.
+gone from the crate entirely, `petros::Connection` is `diesel::SqliteConnection`,
+and Petros's own three tables go through models like everything else.
 
 ## Diesel describes schemas, it does not create them
 
 `table!` is a description, not a generator: it produces no DDL. So the `CREATE
-TABLE` statements still live in `store::DDL` for Exo's tables and in
+TABLE` statements still live in `store::DDL` for Petros's tables and in
 `App::migrate` for the app's, and `crate::schema` mirrors them by hand.
 `check_for_backend(Sqlite)` catches a model whose types drift from `table!`, but
 nothing catches a `table!` that drifts from the DDL — the test suite does, only
@@ -150,9 +150,9 @@ carrying the mapping to `Binary`. It is `#[serde(transparent)]`, so it encodes
 exactly as the bare UUID did — the checked-in wire fixture predates it and still
 decodes, which is the test that proves the migration cost nothing on the wire.
 
-## Exo drives every transaction itself, behind Diesel's back
+## Petros drives every transaction itself, behind Diesel's back
 
-Diesel has a transaction manager; Exo never uses it. The optimistic savepoint
+Diesel has a transaction manager; Petros never uses it. The optimistic savepoint
 outlives any single call, so it cannot be expressed as a closure the way
 `Connection::transaction` wants, and every boundary — `BEGIN`, `SAVEPOINT
 pending`, `ROLLBACK TO`, `COMMIT` — is raw SQL through `batch_execute`. Verified
@@ -176,16 +176,16 @@ optimistic state is invisible to it until the last ack commits. That is a better
 test than the one it replaced: it asserts the property that actually matters —
 uncommitted, therefore still revocable — rather than a proxy for it.
 
-## Exo owns the `exo_` prefix and nothing else
+## Petros owns the `petros_` prefix and nothing else
 
-Exo's three tables are `exo_log`, `exo_pending` and `exo_meta`. The prefix (the
+Petros's three tables are `petros_log`, `petros_pending` and `petros_meta`. The prefix (the
 brief says "log", "pending", "meta") exists so an app can never collide with
-them, and so "everything that is not `exo_`" is a precise description of the
+them, and so "everything that is not `petros_`" is a precise description of the
 app's own schema.
 
 ## Sans-io
 
-`exo::client` and `exo::server` are state machines: you feed them messages and
+`petros::client` and `petros::server` are state machines: you feed them messages and
 drain their outgoing queues. No async, no runtime, no sockets in the core. This
 is what makes the deterministic simulation tests possible — a three-week network
 partition is a few `step()` calls with no sleeps — and what will keep the FFI
@@ -210,7 +210,7 @@ construction, so the common path exercises the same code as the recovery path.
 
 ## The transport is a thread per connection, and blocking
 
-`exo::transport::ws` uses `tungstenite` synchronously: each socket is owned by
+`petros::transport::ws` uses `tungstenite` synchronously: each socket is owned by
 one thread that polls it with a short read timeout and writes whatever the state
 machine has queued in between. That costs a thread per peer and up to one tick of
 latency, and it is the right trade here — it keeps `async` and a runtime out of
@@ -246,7 +246,7 @@ a thing you watch rather than a thing you read about: press `o` in two peers,
 add something in each, press `o` again, and an item you added while alone slides
 down the list as the other peer's confirmed entries land underneath it. All the
 terminal code lives in `examples/shared/tui.rs` so each example file stays about
-Exo — which is what a reader opened it for — and the terminal is restored from a
+Petros — which is what a reader opened it for — and the terminal is restored from a
 panic hook as well as on drop, because raw mode outliving the process is a
 miserable way to end a demo.
 
@@ -259,7 +259,7 @@ partition-and-heal flow that the whole crate exists to make correct.
 The iced app is an example alongside the terminal ones, sharing their to-do
 domain and their server: `just serve`, then `just peer alice` for a TUI peer and
 `just iced bob` for a window, and an item added in one appears in the other. The
-engine is untouched by it — an ordinary `exo::Client` and an ordinary iced
+engine is untouched by it — an ordinary `petros::Client` and an ordinary iced
 program.
 
 Being an example rather than its own crate costs one thing worth knowing:
@@ -287,7 +287,7 @@ math and localtime to Rust.
 
 What makes it fit together is that `libsqlite3-sys` is only a set of
 `extern "C"` declarations. If something else in the crate graph defines those
-symbols, the link succeeds. So on wasm, `exo` depends on `sqlite-wasm-rs` for
+symbols, the link succeeds. So on wasm, `petros` depends on `sqlite-wasm-rs` for
 the SQLite and takes `libsqlite3-sys` *without* `bundled`, so there are not two
 of them; Diesel never knows the difference. Cargo unifies features per target,
 so `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` keeps `bundled`
@@ -314,7 +314,7 @@ same API backed by the browser's clock, and `AutoCtx` uses it there.
 
 ## The browser is verified by running it
 
-`clients/iced/index.html` takes a `?selftest` query, which drives Exo directly —
+`clients/iced/index.html` takes a `?selftest` query, which drives Petros directly —
 two adds, a toggle, and an empty to-do that must be refused — and prints the
 result to the console. It exists because a rendering engine is a poor place to
 find out whether a database works: the self-test answers that question with iced
@@ -398,8 +398,8 @@ the user touching anything.
 That worked while every caller was an example in the same crate. It stopped
 working the moment the Expo client needed the same mutations, because an
 example cannot be depended on. So the to-do domain is `crates/todo`: the same
-code, in a place `crates/ffi` can reach. `crates/exo` takes it as a
-dev-dependency, which is a cycle — `todo` depends on `exo` — and one cargo
+code, in a place `crates/ffi` can reach. `crates/petros` takes it as a
+dev-dependency, which is a cycle — `todo` depends on `petros` — and one cargo
 resolves without complaint.
 
 The move is the whole point rather than tidying. There is exactly one `apply`
@@ -435,7 +435,7 @@ hands back encoded frames, `recv()` takes them, and the caller owns the
 transport. React Native then does what a browser does in `transport/web.rs`,
 for the same reason it did there — the platform already has a WebSocket.
 
-The alternative was to run `exo::transport::ws` on a thread inside the FFI and
+The alternative was to run `petros::transport::ws` on a thread inside the FFI and
 hand JavaScript nothing but a `connect(url)`. It would have been thinner at the
 call site and worse everywhere else: a `tungstenite` and a TLS stack in the
 mobile binary, a uniffi callback interface to push changes back up, a thread to
@@ -643,12 +643,12 @@ instantiation, and the remaining ~0.24ms is interpreted execution and the SQL
 under it — against 0.027ms for the same mutation linked.
 
 So a persistent instance is worth about 0.15ms of 0.39ms, not the bulk of it,
-and it needs an ABI change first: `exo_alloc` deliberately leaks
+and it needs an ABI change first: `petros_alloc` deliberately leaks
 (`mem::forget`) and so does `packed` (`Vec::leak`), which is harmless only
 because each call gets a fresh `Store`. Measured, sixty calls into one reused
 instance grow guest memory to 1.1MiB and it never comes back. Reuse needs
-either `exo_free` or a bump arena the entry points reset, gated on
-`exo_abi_version`.
+either `petros_free` or a bump arena the entry points reset, gated on
+`petros_abi_version`.
 
 ## `default-features = false` needs saying twice
 

@@ -7,7 +7,7 @@
 //! there is one artifact, and a peer that has not loaded it cannot mutate at
 //! all.
 //!
-//! [`MUTATORS`] is process-wide because `exo` calls `Mutation::apply` during a
+//! [`MUTATORS`] is process-wide because `petros` calls `Mutation::apply` during a
 //! rebase and hands it no context of ours. One domain per process is the same
 //! assumption a linked `apply` made; this just makes it replaceable at runtime.
 

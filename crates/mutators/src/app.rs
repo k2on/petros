@@ -1,4 +1,4 @@
-//! The exo app whose `apply` is a wasm module — the phone's, and only the
+//! The petros app whose `apply` is a wasm module — the phone's, and only the
 //! phone's.
 //!
 //! Every other peer links `todo` and calls `apply` directly; see
@@ -6,13 +6,13 @@
 //! buys is the thing only this peer wants: a domain it can replace over Metro,
 //! or one day over the air, without a native build.
 //!
-//! `exo` calls `Mutation::apply` during a rebase and hands it no context of
+//! `petros` calls `Mutation::apply` during a rebase and hands it no context of
 //! ours, so the module lives in a process-wide slot and this looks it up. One
 //! domain per process is the same assumption a linked `apply` makes; this only
 //! makes it replaceable while the process runs.
 
 use ciborium::value::Value;
-use exo::{ActorId, App, AutoCtx, Connection, Mutation, MutationError, Transaction};
+use petros::{ActorId, App, AutoCtx, Connection, Mutation, MutationError, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::MUTATORS;
@@ -84,7 +84,7 @@ pub struct WasmTodo;
 impl App for WasmTodo {
     type Mutation = Payload;
 
-    fn migrate(conn: &mut Connection) -> exo::Result<()> {
+    fn migrate(conn: &mut Connection) -> petros::Result<()> {
         // One schema. Migrations are the one thing that should not arrive over
         // the air, so they stay where every peer can see them.
         <todo::TodoApp as App>::migrate(conn)

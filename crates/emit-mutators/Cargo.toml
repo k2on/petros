@@ -9,7 +9,7 @@ rust-version.workspace = true
 # No dependencies, on purpose, and its own crate for the same reason.
 #
 # This runs immediately after `cargo build -p todo-wasm` on every save. When it
-# lived in `crates/ffi` it shared a dependency graph with the engine — `exo`,
+# lived in `crates/ffi` it shared a dependency graph with the engine — `petros`,
 # `wasmi`, `serde_json` — and the two cargo invocations resolved features
 # differently, so each rebuilt what the other had just built. That thrash cost
 # more than a second: the loop measured 1.55s with it and 0.43s without.

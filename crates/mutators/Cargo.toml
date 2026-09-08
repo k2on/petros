@@ -1,5 +1,5 @@
 [package]
-name = "exo-mutators"
+name = "petros-mutators"
 version = "0.1.0"
 description = "Running the domain from a wasm module: the host side of crates/todo-wasm, shared by every peer and the server."
 edition.workspace = true
@@ -8,10 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 ciborium.workspace = true
-# Direct, not through `exo`'s re-export: Diesel's derives generate `::diesel`
+# Direct, not through `petros`'s re-export: Diesel's derives generate `::diesel`
 # paths and need to find the crate at that name.
 diesel.workspace = true
-exo.workspace = true
+petros.workspace = true
 # The domain, for authoring payloads. `apply` here comes from the module, but
 # building a mutation is the same code every peer uses.
 todo = { workspace = true, features = ["storage"] }
