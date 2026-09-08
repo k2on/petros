@@ -1,0 +1,26 @@
+[package]
+name = "petros-sql"
+version = "0.1.0"
+description = "Raw SQL for a Petros mutation, verified at build time by preparing it against the app's schema."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+# All build-time. None of this reaches the module: what the macro emits is a
+# string and some values, which is why a domain compiled to wasm can use it
+# while SQLite itself cannot go there.
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+# Running what the macro checked. A dev-dependency on the engine, which does
+# not depend on this crate, so there is no cycle.
+diesel = { workspace = true, features = ["sqlite"] }
+petros.workspace = true
+petros-schema.workspace = true

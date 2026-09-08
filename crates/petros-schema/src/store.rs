@@ -203,6 +203,20 @@ pub trait Backend {
     /// which is what `MAX(pos)` over nothing should mean here.
     fn max_int(&mut self, table: &TableDef, column: &str) -> i64;
     fn write(&mut self, changes: &[Write]);
+
+    /// Run a statement the typed surface cannot express, with its values bound.
+    ///
+    /// The escape hatch, and a narrow one: it takes SQL that something has
+    /// already checked. `petros-sql` is what checks it — at build time, by
+    /// preparing it against a real SQLite that has this app's schema — so by
+    /// the time a string reaches here its tables, its columns and its parameter
+    /// count are known good. Reaching this directly with a runtime string gives
+    /// all of that up.
+    ///
+    /// Exists because set operations are the one thing the typed surface loses:
+    /// `INSERT ... SELECT` over a whole table is one statement here and a scan
+    /// plus a write per row otherwise.
+    fn exec(&mut self, sql: &str, params: &[Value]);
 }
 
 /// What `apply` sees. Typed, and implemented for every [`Backend`].
@@ -217,6 +231,8 @@ pub trait Store {
     /// each of these is a boundary crossing, and host frames accumulate inside
     /// the interpreter rather than unwinding between calls.
     fn write_all(&mut self, changes: &[Write]);
+    /// A checked statement. Use `petros_sql::exec!` rather than calling this.
+    fn exec(&mut self, sql: &str, params: &[Value]);
 }
 
 impl<B: Backend> Store for B {
@@ -263,6 +279,10 @@ impl<B: Backend> Store for B {
 
     fn write_all(&mut self, changes: &[Write]) {
         Backend::write(self, changes);
+    }
+
+    fn exec(&mut self, sql: &str, params: &[Value]) {
+        Backend::exec(self, sql, params);
     }
 }
 

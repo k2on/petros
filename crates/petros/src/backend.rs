@@ -83,6 +83,27 @@ impl Backend for SqliteStore<'_> {
             .unwrap_or(0)
     }
 
+    fn exec(&mut self, sql: &str, params: &[Value]) {
+        // The SQL arrives already checked — `petros-sql` prepared it against
+        // this schema at build time — so the only work here is binding.
+        let mut q = Sql::new();
+        let mut rest = sql;
+        for value in params {
+            match rest.find('?') {
+                Some(i) => {
+                    q.sql(&rest[..i]);
+                    q.bind(value.clone());
+                    rest = &rest[i + 1..];
+                }
+                // More values than placeholders. `petros-sql` makes this
+                // unreachable from a checked call site.
+                None => break,
+            }
+        }
+        q.sql(rest);
+        let _ = q.execute(self.0);
+    }
+
     fn write(&mut self, changes: &[Write]) {
         for change in changes {
             let mut q = Sql::new();
