@@ -1,5 +1,5 @@
 /target
 result
 result-*
-crates/petros/examples/web/pkg
+crates/todo/examples/web/pkg
 .direnv

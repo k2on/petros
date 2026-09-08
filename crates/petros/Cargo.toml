@@ -56,45 +56,5 @@ web-sys = { version = "0.3", optional = true, features = [
 # which cargo resolves without complaint and which is the only honest shape:
 # the testkit is for apps, and the engine is just another user of it.
 petros-testkit.workspace = true
-# The engine has no opinion about windows; the iced example does.
-iced.workspace = true
-# The domain. These are ordinary Rust programs, so they call `apply` directly
-# — no interpreter, no module to load. The phone runs the same source compiled
-# to wasm; `crates/todo/tests/conformance.rs` holds the two builds together. A dev-dependency that depends back on this
-# crate is a cycle cargo allows and resolves — and it is what keeps the
-# examples, the server and the generated FFI bindings running the same `apply`.
-todo = { workspace = true, features = ["storage"] }
-
-# `cargo build --example` compiles every dev-dependency, so the terminal
-# examples' and the test suite's dependencies would be dragged into a browser
-# build of the iced example — and `proptest` reaches `wait-timeout`, which has
-# no wasm. None of them belong there, so none of them are declared there.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-crossterm = "0.28"
-# `smol` gives iced a timer to drive the example's transport pump. In a browser
-# it already has one.
-iced = { workspace = true, features = ["smol"] }
 proptest = "1"
-ratatui = "0.29"
 tempfile = "3"
-
-# The iced example in a browser: a panic that reaches the console beats one
-# that reports "unreachable executed".
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-console_error_panic_hook = "0.1"
-# WebGL rather than WebGPU, for reach. Without it wgpu finds no backend, iced
-# falls back to its software renderer, and that cannot have the canvas because
-# WebGL already claimed it — which surfaces as a blank page and a panic about
-# canvas contexts.
-iced = { workspace = true, features = ["webgl"] }
-
-[[example]]
-name = "offline"
-
-[[example]]
-name = "multiplayer"
-required-features = ["ws"]
-
-[[example]]
-name = "iced"
-required-features = ["ws"]

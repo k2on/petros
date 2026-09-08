@@ -21,18 +21,18 @@ fmt:
 
 # The offline demo: a client with no server in existence.
 offline:
-    cargo run -p petros --example offline
+    cargo run -p todo --example offline
 
 # The multiplayer demo. `just serve` in one terminal, `just peer <name>` in others.
 serve addr="127.0.0.1:8787":
-    cargo run -p petros --features ws --example multiplayer -- --serve --server {{addr}}
+    cargo run -p todo --features ws --example multiplayer -- --serve --server {{addr}}
 
 peer user addr="127.0.0.1:8787":
-    cargo run -p petros --features ws --example multiplayer -- --user {{user}} --server {{addr}}
+    cargo run -p todo --features ws --example multiplayer -- --user {{user}} --server {{addr}}
 
 # The iced peer on the desktop. Same server as `just peer`.
 iced user="bob" addr="127.0.0.1:8787":
-    cargo run -p petros --features ws --example iced -- --user {{user}} --server {{addr}}
+    cargo run -p todo --features ws --example iced -- --user {{user}} --server {{addr}}
 
 # The iced client in a browser.
 #
@@ -77,23 +77,23 @@ web-build:
         fi
     fi
 
-    mkdir -p target/wasm-sqlite-stub crates/petros/examples/web/pkg
+    mkdir -p target/wasm-sqlite-stub crates/todo/examples/web/pkg
     printf '!<arch>\n' > target/wasm-sqlite-stub/libsqlite3.a
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
     CC_wasm32_unknown_unknown="$cc" \
     AR_wasm32_unknown_unknown="${WASM_AR:-llvm-ar}" \
     CFLAGS_wasm32_unknown_unknown="$cflags" \
     SQLITE3_LIB_DIR="$PWD/target/wasm-sqlite-stub" SQLITE3_STATIC=1 \
-        cargo build -p petros --features ws --example iced \
+        cargo build -p todo --features ws --example iced \
             --target wasm32-unknown-unknown --release
     "$bindgen" --target web --no-typescript \
-        --out-dir crates/petros/examples/web/pkg \
+        --out-dir crates/todo/examples/web/pkg \
         target/wasm32-unknown-unknown/release/examples/iced.wasm
 
 # Build it and serve it at http://localhost:8080
 web: web-build
     @echo "serving on http://localhost:8080"
-    cd crates/petros/examples/web && python3 -m http.server 8080
+    cd crates/todo/examples/web && python3 -m http.server 8080
 
 # ---------------------------------------------------------------- the Expo peer
 #
