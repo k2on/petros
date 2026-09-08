@@ -1,0 +1,14 @@
+[package]
+name = "petros-wasm-guest"
+version = "0.1.0"
+description = "The guest half of the Petros mutator ABI: one macro, and an app's wasm crate is a few lines."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# As light as the module it ends up inside. `ciborium` because the payload the
+# log stores is CBOR and the guest has to decode it; `petros-schema` for the
+# `Host` contract and the schema section.
+[dependencies]
+ciborium.workspace = true
+petros-schema.workspace = true

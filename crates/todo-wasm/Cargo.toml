@@ -10,8 +10,7 @@ rust-version.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-ciborium.workspace = true
-petros-schema.workspace = true
+petros-wasm-guest.workspace = true
 # `default-features = false` drops the read model, Diesel and `petros`: there is no
 # SQLite in here, only a channel to the host's. What is left is `apply`,
 # `fill_auto` and the verb declaration — which is the whole point.

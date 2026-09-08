@@ -1065,13 +1065,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
-name = "emit-mutators"
-version = "0.1.0"
-dependencies = [
- "petros-schema",
-]
-
-[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2759,17 +2752,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "petros-mutators"
+name = "petros-codegen"
 version = "0.1.0"
 dependencies = [
- "ciborium",
- "diesel",
- "petros",
  "petros-schema",
- "serde",
- "serde_json",
- "todo",
- "wasmi",
 ]
 
 [[package]]
@@ -2786,11 +2772,33 @@ dependencies = [
  "ciborium",
  "diesel",
  "petros",
- "petros-mutators",
+ "petros-wasm-host",
  "serde_json",
  "thiserror 1.0.69",
  "todo",
  "uniffi",
+]
+
+[[package]]
+name = "petros-wasm-guest"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "petros-schema",
+]
+
+[[package]]
+name = "petros-wasm-host"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "diesel",
+ "petros",
+ "petros-schema",
+ "serde",
+ "serde_json",
+ "todo",
+ "wasmi",
 ]
 
 [[package]]
@@ -3897,8 +3905,7 @@ dependencies = [
 name = "todo-wasm"
 version = "0.1.0"
 dependencies = [
- "ciborium",
- "petros-schema",
+ "petros-wasm-guest",
  "todo",
 ]
 

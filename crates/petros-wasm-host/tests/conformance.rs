@@ -13,9 +13,9 @@ use diesel::deserialize::QueryableByName;
 use diesel::sql_types::{BigInt, Text};
 use diesel::{sql_query, RunQueryDsl};
 use petros::{AutoCtx, Connection};
-use petros_mutators::Mutators;
+use petros_wasm_host::Mutators;
 
-const MODULE: &[u8] = petros_mutators::BUNDLED;
+const MODULE: &[u8] = petros_wasm_host::BUNDLED;
 
 #[derive(QueryableByName, Debug, PartialEq)]
 struct Row {

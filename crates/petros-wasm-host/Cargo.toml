@@ -1,5 +1,5 @@
 [package]
-name = "petros-mutators"
+name = "petros-wasm-host"
 version = "0.1.0"
 description = "Running the domain from a wasm module: the host side of crates/todo-wasm, shared by every peer and the server."
 edition.workspace = true

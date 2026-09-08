@@ -11,9 +11,9 @@ use diesel::deserialize::QueryableByName;
 use diesel::sql_types::{BigInt, Text};
 use diesel::{sql_query, RunQueryDsl};
 use petros::{AutoCtx, Connection};
-use petros_mutators::Mutators;
+use petros_wasm_host::Mutators;
 
-const MODULE: &[u8] = petros_mutators::BUNDLED;
+const MODULE: &[u8] = petros_wasm_host::BUNDLED;
 
 #[derive(QueryableByName, Debug)]
 struct Row {
@@ -286,7 +286,7 @@ use petros_schema::Ty;
 
 /// The module carries a schema; it has to be the one the domain declares.
 ///
-/// Everything downstream reads the carried copy — `emit-mutators` generates the
+/// Everything downstream reads the carried copy — `petros-codegen` generates the
 /// TypeScript from it without linking the domain at all — so if the two ever
 /// drift, the types describe a module nobody is running and `tsc` blesses call
 /// sites that will fail on a device.

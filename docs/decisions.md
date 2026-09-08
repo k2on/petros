@@ -599,7 +599,7 @@ much weaker version of the same risk — the source is shared, but the toolchain
 the integer widths and the SQL round-trip are not — and a drift would be frozen
 into the log by whichever build authored the entry.
 
-`crates/mutators/tests/conformance.rs` runs every declared verb through both
+`crates/petros-wasm-host/tests/conformance.rs` runs every declared verb through both
 builds against real SQLite and compares the rows and the refusals.
 
 The first version of it passed while being vacuous. It filled each payload once,
@@ -678,7 +678,7 @@ shipped it a new binary through an app store.
 ## The module carries its own schema, because linking the domain cost the loop
 
 A verb was declared in a dependency-free `crates/todo/src/verbs.rs` that
-`emit-mutators` pulled in with `include!` — textual sharing, chosen so the code
+`petros-codegen` pulled in with `include!` — textual sharing, chosen so the code
 generator could stay free of dependencies. It broke once on a `//!` comment and
 would have broken again.
 
@@ -704,6 +704,30 @@ was falsified by adding a verb to the declaration without rebuilding.
 
 A module with no section is an error naming the missing macro, not an empty
 schema — an empty one would silently generate types that reject every call site.
+
+## The ABI is a macro, because it was going to be copied
+
+`crates/todo-wasm` was a hundred and thirty-two lines, of which four mentioned
+the to-do domain. The rest — the import block, the `Host` impl over it, the
+allocator, the packed-pointer convention, four `#[no_mangle]` exports — is the
+same in every app that ever compiles a domain to wasm, and copying it is how
+two apps end up with two subtly different ABIs against one host.
+
+So it is `petros_wasm_guest::export!(domain, SCHEMA_TEXT)`, and the crate is
+fourteen lines including the doc comment. The module it produces is byte-for-byte
+the same shape: same four exports, same schema section, same tests.
+
+The `Host` trait moved to `petros-schema` with it. It has to live somewhere both
+the guest and the native host can see, and it cannot live anywhere that pulls
+Diesel, because the wasm build has no SQLite. That makes `petros-schema` the app
+*contract* rather than only its schema — what an app declares, and what a
+mutation is allowed to see — which is the same reason both halves belong at the
+bottom of the graph.
+
+One thing the macro has to keep saying out loud: allocation is one-way. The
+guest forgets every buffer it hands out, which is sound only because the host
+gives each call a fresh `Store` and drops the whole linear memory with it.
+`ABI_VERSION` is the thing that has to move if a host ever reuses an instance.
 
 ## Android is built by EAS
 

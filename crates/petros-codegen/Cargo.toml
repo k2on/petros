@@ -1,5 +1,5 @@
 [package]
-name = "emit-mutators"
+name = "petros-codegen"
 version = "0.1.0"
 description = "Wraps the mutator module as a TypeScript file for Metro to carry."
 edition.workspace = true

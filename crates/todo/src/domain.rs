@@ -13,45 +13,9 @@
 
 use ciborium::value::Value;
 
-/// The database, as much of it as a mutation is allowed to see.
-pub trait Host {
-    /// First column of the first row, as an integer. Zero for no rows or NULL —
-    /// which is what `MAX(pos)` over an empty table should mean here.
-    fn query_int(&mut self, sql: &str) -> i64;
-    /// Whether the query matched anything at all.
-    fn query_exists(&mut self, sql: &str) -> bool;
-    /// Run a statement.
-    fn exec(&mut self, sql: &str);
-}
-
-/// A SQLite literal, escaped the way SQLite defines them.
-///
-/// Values are inlined rather than bound because the wasm side has no way to
-/// bind: it holds a channel to the host's SQLite, not a connection. Both builds
-/// go through here so the SQL is identical either way, which is the property
-/// the conformance test checks.
-pub enum Lit<'a> {
-    Int(i64),
-    Text(&'a str),
-    Blob(&'a [u8]),
-}
-
-pub fn lit(v: Lit<'_>) -> String {
-    match v {
-        Lit::Int(i) => i.to_string(),
-        // A single quote is escaped by doubling it. That is the whole rule.
-        Lit::Text(s) => format!("'{}'", s.replace('\'', "''")),
-        Lit::Blob(b) => {
-            let mut out = String::with_capacity(b.len() * 2 + 3);
-            out.push_str("X'");
-            for byte in b {
-                out.push_str(&format!("{byte:02x}"));
-            }
-            out.push('\'');
-            out
-        }
-    }
-}
+// The contract, not a copy of it: the same three methods the wasm module
+// imports and the same escaping both builds go through.
+pub use petros_schema::{lit, Host, Lit};
 
 /// Applying a mutation: `Ok` or a deterministic refusal every replica reaches.
 pub fn apply<H: Host>(host: &mut H, mutation: &Value, actor: &str) -> Result<(), String> {

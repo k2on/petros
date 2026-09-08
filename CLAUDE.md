@@ -52,13 +52,17 @@ crates/petros/src/          the engine
   transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
 crates/petros/tests/        19 tests; common/sim.rs is a seeded in-process network
 crates/petros/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
-crates/petros-schema/    what an app IS, as data — the bottom of the graph
+crates/petros-schema/    the app contract: the schema, and the `Host` a
+                         mutation sees. The bottom of the graph, no deps
+crates/petros-wasm-guest/ `export!` — an app's wasm crate is one line
+crates/petros-wasm-host/ the wasmi side; the phone only. Conformance test here
+crates/petros-codegen/   reads a module's schema section, writes TypeScript
 crates/todo/             the domain — the ONLY apply
   domain.rs              apply + fill_auto, generic over a 3-method `Host`
   storage.rs             that Host over Diesel; what every native peer links
   schema.rs              the verbs, via `petros_schema::declare!`
 crates/todo-wasm/        the same domain, Host over three wasm imports
-crates/mutators/         the wasmi host — the phone only; conformance test here
+crates/petros-wasm-host/         the wasmi host — the phone only; conformance test here
 crates/ffi/              the client over UniFFI, for the Expo app
 clients/expo/            the Expo app; src/ is UI and a socket, nothing else
   modules/petros-todo/      the turbo module — generated, gitignored, not authored
@@ -108,9 +112,9 @@ come back — that is the rebase, visible.
 Never write domain logic in TypeScript. `apply` is in `crates/todo/domain.rs`,
 generic over a three-method `Host`. Native peers — server, TUIs, iced — link it
 through the Diesel host and pay nothing; the phone runs the same source compiled
-to wasm and interpreted by `crates/mutators`, because that is the only peer where
+to wasm and interpreted by `crates/petros-wasm-host`, because that is the only peer where
 a rebuild costs four minutes instead of four seconds.
-`crates/mutators/tests/conformance.rs` runs every verb through both builds and
+`crates/petros-wasm-host/tests/conformance.rs` runs every verb through both builds and
 compares rows and refusals, so the two cannot drift apart unnoticed. `crates/ffi` exports the client with `#[uniffi::export]`
 (there is no UDL file; the Rust is the interface definition) and
 `uniffi-bindgen-react-native` generates `clients/expo/modules/petros-todo/`, which

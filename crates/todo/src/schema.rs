@@ -3,7 +3,7 @@
 //! Read four times, which is the point: by [`domain::apply`](crate::domain) so
 //! an unknown verb can say what it *does* know; by `crates/todo-wasm`, which
 //! carries it into the module so a tool holding only the `.wasm` can recover
-//! it; by `emit-mutators`, which turns it into TypeScript types; and by the
+//! it; by `petros-codegen`, which turns it into TypeScript types; and by the
 //! tests, which check that everything declared here is handled, so the
 //! declaration cannot quietly lie.
 //!

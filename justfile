@@ -116,7 +116,7 @@ ffi-lib := if os() == "macos" { "libpetros_todo_ffi.dylib" } else { "libpetros_t
 # Build the mutator module and hand it to Metro.
 mutators:
     cargo build -p todo-wasm --target wasm32-unknown-unknown --profile mutators
-    cargo run -q -p emit-mutators
+    cargo run -q -p petros-codegen
 
 # Where the time goes in one mutation. Ignored by `just test` because it is a
 # measurement and it is slow; run it when a number is in question.

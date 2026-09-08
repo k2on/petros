@@ -140,6 +140,54 @@ impl Ty {
     }
 }
 
+// ------------------------------------------------------- what a mutation sees
+
+/// The database, as much of it as a mutation is allowed to see.
+///
+/// Three methods, and deliberately no more. On wasm this is what the sandbox
+/// enforces — the module imports these and nothing else, so `apply` *cannot*
+/// read a clock, draw a random number, open a socket or touch a file. Natively
+/// the same trait is the only argument `apply` gets, so the rule is the same
+/// one, kept by construction rather than by review.
+pub trait Host {
+    /// First column of the first row, as an integer. Zero for no rows or NULL —
+    /// which is what `MAX(pos)` over an empty table should mean.
+    fn query_int(&mut self, sql: &str) -> i64;
+    /// Whether the query matched anything at all.
+    fn query_exists(&mut self, sql: &str) -> bool;
+    /// Run a statement.
+    fn exec(&mut self, sql: &str);
+}
+
+/// A SQLite literal, escaped the way SQLite defines them.
+///
+/// Values are inlined rather than bound because the wasm side has no way to
+/// bind: it holds a channel to the host's SQLite, not a connection. Both builds
+/// go through here so the SQL is identical either way, which is the property a
+/// conformance test can then check.
+pub enum Lit<'a> {
+    Int(i64),
+    Text(&'a str),
+    Blob(&'a [u8]),
+}
+
+pub fn lit(v: Lit<'_>) -> String {
+    match v {
+        Lit::Int(i) => i.to_string(),
+        // A single quote is escaped by doubling it. That is the whole rule.
+        Lit::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        Lit::Blob(b) => {
+            let mut out = String::with_capacity(b.len() * 2 + 3);
+            out.push_str("X'");
+            for byte in b {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out.push('\'');
+            out
+        }
+    }
+}
+
 // ------------------------------------------------- declaring one, carrying one
 
 /// The custom section a module carries its schema in.
