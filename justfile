@@ -121,7 +121,7 @@ mutators:
 # Where the time goes in one mutation. Ignored by `just test` because it is a
 # measurement and it is slow; run it when a number is in question.
 latency:
-    cargo test -p exo-todo-ffi --test latency -- --ignored --nocapture --test-threads=1
+    cargo test -p exo-todo-ffi --release --test latency -- --ignored --nocapture --test-threads=1
 
 # The loop. Leave this running beside `bun start`, then edit crates/todo-wasm.
 mutators-watch:

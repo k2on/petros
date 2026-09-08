@@ -496,17 +496,22 @@ which is what makes a rejection a verdict rather than one machine's opinion.
 Measuring the result showed what it cost the peers that never had the problem:
 
 ```
-one tap, by pending depth (ms, synchronous = NORMAL)
-    pending      via wasmi      linked
-          0          5.9         0.2
-         10         19.6         0.6
-         50        118.5         1.4
+one `Add`, release build (ms)
+    natively linked                          0.027
+    via wasmi, thread + fresh instance       0.39
 ```
 
 The slope is the finding, not the intercept. A tap replays every pending
-mutation, so an interpreter instantiation — each on its own 64MB thread — is
-paid once per pending entry, and ~2.3ms per entry becomes 118ms at a depth an
-offline peer reaches easily. A server rebuild was never the thing that hurt.
+mutation, so the whole wasm overhead is paid once per pending entry: at a depth
+of 50, which an offline peer reaches easily, that is ~20ms of interpreter
+against ~1.3ms of SQLite. A server rebuild was never the thing that hurt.
+
+Two warnings about these numbers, both learned the hard way. They were first
+taken at the test profile, where our own crates build at `opt-level = 1`, and
+that inflates the wasm path by about 4.7x (0.62ms vs 2.89ms for the same
+`apply`) while barely moving the native path, which is dominated by SQLite
+rather than by our Rust. Comparing the two at that profile therefore overstates
+the gap several-fold. `just latency` now passes `--release` for that reason.
 
 So the module is scoped to the caller that needs it. `crates/todo` holds the
 domain generic over a three-method `Host` trait; `crates/todo/storage.rs`
@@ -602,9 +607,20 @@ of which only touched pages are resident. `exec` also stopped going through
 the frame and wanted no row count anyway.
 
 None of this applies to a linked peer any more, which is most of why the linked
-path is 30x faster. The thread costs about 2.3ms of the 3.1ms a wasm mutation
-takes; removing it — a persistent worker rather than a thread per call — is now
-a phone-only optimisation.
+path is faster. The thread itself is *not* where the time goes, despite an
+earlier note here saying so: a scoped spawn-and-join with a 64MB stack and an
+empty body measures 0.06ms, at either profile. Of the 0.39ms a release-build
+wasm `Add` costs, roughly 0.06ms is the thread, 0.13ms is `Store::new` plus
+instantiation, and the remaining ~0.24ms is interpreted execution and the SQL
+under it — against 0.027ms for the same mutation linked.
+
+So a persistent instance is worth about 0.15ms of 0.39ms, not the bulk of it,
+and it needs an ABI change first: `exo_alloc` deliberately leaks
+(`mem::forget`) and so does `packed` (`Vec::leak`), which is harmless only
+because each call gets a fresh `Store`. Measured, sixty calls into one reused
+instance grow guest memory to 1.1MiB and it never comes back. Reuse needs
+either `exo_free` or a bump arena the entry points reset, gated on
+`exo_abi_version`.
 
 ## `default-features = false` needs saying twice
 
