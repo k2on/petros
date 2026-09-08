@@ -80,7 +80,7 @@ jobs:
         run: |
           nix develop .#android --command bash -c '
             cargo build -p todo-wasm --target wasm32-unknown-unknown --profile mutators
-            cargo run -q -p exo-todo-ffi --bin emit-mutators
+            cargo run -q -p emit-mutators
             cd clients/expo && bun install
             cd modules/exo-todo
             ../../node_modules/.bin/ubrn build android \

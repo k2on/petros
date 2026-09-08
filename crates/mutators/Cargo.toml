@@ -13,6 +13,9 @@ ciborium.workspace = true
 diesel.workspace = true
 exo.workspace = true
 serde.workspace = true
+# Only for the generic entry point, which takes its arguments as JSON because
+# that is what a foreign caller can write without a CBOR encoder.
+serde_json.workspace = true
 # A pure-Rust wasm interpreter. No JIT, which is what makes it legal on iOS and
 # what lets one module run on a server, in a TUI and on a phone.
 wasmi = "2"

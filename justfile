@@ -116,7 +116,12 @@ ffi-lib := if os() == "macos" { "libexo_todo_ffi.dylib" } else { "libexo_todo_ff
 # Build the mutator module and hand it to Metro.
 mutators:
     cargo build -p todo-wasm --target wasm32-unknown-unknown --profile mutators
-    cargo run -q -p exo-todo-ffi --bin emit-mutators
+    cargo run -q -p emit-mutators
+
+# Where the time goes in one mutation. Ignored by `just test` because it is a
+# measurement and it is slow; run it when a number is in question.
+latency:
+    cargo test -p exo-todo-ffi --test latency -- --ignored --nocapture --test-threads=1
 
 # The loop. Leave this running beside `bun start`, then edit crates/todo-wasm.
 mutators-watch:

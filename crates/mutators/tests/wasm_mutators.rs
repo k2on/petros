@@ -218,3 +218,140 @@ fn report_the_on_device_costs() {
     );
     assert!(compile.as_millis() < 2000, "compile was {compile:?}");
 }
+
+/// `AddFive` expands one seed into five rows — and the expansion has to be a
+/// pure function of that seed, or two replicas replaying the same entry would
+/// disagree about what is in the list.
+#[test]
+fn a_batch_is_frozen_at_the_client_that_authored_it() {
+    let mutators = Mutators::load(MODULE).expect("load");
+
+    let request = {
+        let v = ciborium::value::Value::Map(vec![("t".into(), "AddFive".into())]);
+        let mut out = Vec::new();
+        ciborium::into_writer(&v, &mut out).unwrap();
+        out
+    };
+
+    // Two peers with different entropy author different batches.
+    let a = mutators
+        .fill_auto(&request, &mut AutoCtx::seeded(1))
+        .unwrap();
+    let b = mutators
+        .fill_auto(&request, &mut AutoCtx::seeded(2))
+        .unwrap();
+    assert_ne!(a, b, "a different seed gives a different batch");
+
+    // The same entry replayed anywhere gives the same rows. This is the whole
+    // invariant: `apply` never rolls the dice, it reads what was frozen.
+    let mut first = database();
+    mutators.apply(&mut first, &a, "alice").unwrap().unwrap();
+    let mut second = database();
+    mutators.apply(&mut second, &a, "alice").unwrap().unwrap();
+    let texts =
+        |c: &mut Connection| -> Vec<String> { rows(c).into_iter().map(|r| r.text).collect() };
+    assert_eq!(texts(&mut first), texts(&mut second));
+
+    let rows = rows(&mut first);
+    assert_eq!(rows.len(), 5, "five rows from one entry");
+    assert_eq!(
+        rows.iter().map(|r| r.pos).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5],
+        "counted up from the end of the list, once"
+    );
+
+    // Applied twice, it is still five rows: the ids came from the payload, so
+    // redelivery is a no-op exactly as it is for a single Add.
+    mutators.apply(&mut first, &a, "alice").unwrap().unwrap();
+    assert_eq!(rows.len(), 5);
+
+    // And it lands after whatever was already there.
+    let mut later = database();
+    let one = mutators
+        .fill_auto(&add("already here"), &mut AutoCtx::seeded(9))
+        .unwrap();
+    mutators.apply(&mut later, &one, "bob").unwrap().unwrap();
+    mutators.apply(&mut later, &a, "alice").unwrap().unwrap();
+    let after = rows_of(&mut later);
+    assert_eq!(after.len(), 6);
+    assert_eq!(after[0].text, "already here");
+    assert_eq!(after[5].pos, 6, "pos continued from the end");
+}
+
+fn rows_of(conn: &mut Connection) -> Vec<Row> {
+    rows(conn)
+}
+
+// The declaration the TypeScript types are generated from. Included rather than
+// imported, because `todo-wasm` is a cdylib for another architecture.
+include!("../../todo-wasm/src/verbs.rs");
+
+/// The declaration is only worth generating types from if it cannot lie.
+///
+/// Every verb named in `verbs.rs` has to be one `apply` actually handles —
+/// otherwise the app gets a green `tsc` and a phone that says "unknown
+/// mutation", which is precisely the failure the declaration exists to prevent.
+#[test]
+fn every_declared_verb_is_one_the_module_handles() {
+    let mutators = Mutators::load(MODULE).expect("load");
+    let mut conn = database();
+
+    for verb in VERBS {
+        // Minimal, and deliberately not always valid: a verb may refuse these
+        // arguments. What it may not do is fail to recognise the name.
+        let mut fields = vec![(
+            ciborium::value::Value::from("t"),
+            ciborium::value::Value::from(verb.name),
+        )];
+        for arg in verb.args {
+            let value = match arg.ty {
+                Ty::Id => ciborium::value::Value::Bytes(vec![7u8; 16]),
+                Ty::Text => "something".into(),
+                Ty::Integer => ciborium::value::Value::Integer(1.into()),
+                Ty::Bool => ciborium::value::Value::Bool(true),
+            };
+            fields.push((ciborium::value::Value::from(arg.name), value));
+        }
+        let mut payload = Vec::new();
+        ciborium::into_writer(&ciborium::value::Value::Map(fields), &mut payload).unwrap();
+
+        let outcome = mutators
+            .apply(&mut conn, &payload, "alice")
+            .expect("the host ran");
+        if let Err(reason) = outcome {
+            assert!(
+                !reason.contains("unknown mutation"),
+                "verbs.rs declares `{}`, which generates a TypeScript type, but \
+                 the module does not handle it: {reason}",
+                verb.name
+            );
+        }
+    }
+}
+
+/// And the error a *genuinely* unknown verb produces should say what is known,
+/// because "nothing happened" is the worst possible answer on a device.
+#[test]
+fn an_unknown_verb_says_what_the_module_does_know() {
+    let mutators = Mutators::load(MODULE).expect("load");
+    let mut conn = database();
+    let mut payload = Vec::new();
+    ciborium::into_writer(
+        &ciborium::value::Value::Map(vec![("t".into(), "Frobnicate".into())]),
+        &mut payload,
+    )
+    .unwrap();
+
+    let reason = mutators
+        .apply(&mut conn, &payload, "alice")
+        .expect("the host ran")
+        .expect_err("Frobnicate is not a verb");
+    assert!(reason.contains("Frobnicate"), "{reason}");
+    for verb in VERBS {
+        assert!(
+            reason.contains(verb.name),
+            "should list {}: {reason}",
+            verb.name
+        );
+    }
+}

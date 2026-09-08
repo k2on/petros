@@ -13,15 +13,32 @@
 
 use std::sync::Arc;
 
+use diesel::connection::SimpleConnection;
 use diesel::deserialize::QueryableByName;
 use diesel::sql_types::BigInt;
 use diesel::{sql_query, RunQueryDsl};
 use exo::{AutoCtx, Connection};
 use wasmi::{Caller, Engine, Linker, Memory, Module, Store, TypedFunc};
 
-/// How much stack one mutation gets. Comfortably more than measured need; it is
-/// reserved address space, not resident memory, so the margin is nearly free.
-const MUTATOR_STACK: usize = 8 * 1024 * 1024;
+/// How much stack one mutation gets.
+///
+/// This is not a guess. A host import runs *inside* wasmi's execution loop, and
+/// measurement shows those frames accumulate for as long as the guest function
+/// runs rather than unwinding between calls — so the stack a mutation needs
+/// scales with how many times it calls `query_int`, `query_exists` or `exec`,
+/// not with how deep any one of them goes.
+///
+/// The constant that matters is the frame size, and it is dominated by Diesel's
+/// monomorphised query machinery: roughly a megabyte per call unoptimised, much
+/// less in release. `Add` makes three calls and fit in 8MB either way;
+/// `AddFive` makes eleven and overflowed 8MB in a test build while passing in
+/// release. That gap is the whole reason this is 64MB now: a limit only a debug
+/// build trips is a limit that will be tripped by whoever writes the next
+/// mutation, on the machine where it is hardest to diagnose.
+///
+/// It costs nothing to be generous. This is reserved address space; only pages
+/// actually touched become resident.
+const MUTATOR_STACK: usize = 64 * 1024 * 1024;
 
 /// The compiled module, shared by every call. Compilation is the expensive part
 /// of running wasm; instantiation is not, so this is what gets cached and what
@@ -296,9 +313,14 @@ fn host_query_exists(mut caller: Caller<'_, HostState>, sql: u32, sql_len: u32) 
 fn host_exec(mut caller: Caller<'_, HostState>, sql: u32, sql_len: u32) -> i64 {
     let outcome = read_sql(&caller, sql, sql_len).and_then(|sql| {
         let conn = caller.data_mut().conn()?;
-        sql_query(&sql)
-            .execute(conn)
-            .map(|n| n as i64)
+        // `batch_execute` rather than `sql_query(..).execute(..)`: this frame
+        // sits on top of wasmi's, and those frames accumulate for as long as
+        // the guest function runs, so every kilobyte here is paid once per host
+        // call a mutation makes. Diesel's typed query machinery is many layers
+        // of monomorphised generics; the simple path is a fraction of it, and
+        // nothing here wants the row count anyway.
+        conn.batch_execute(&sql)
+            .map(|()| 0i64)
             .map_err(|e| format!("{sql}: {e}"))
     });
     match outcome {

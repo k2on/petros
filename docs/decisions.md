@@ -531,18 +531,31 @@ host's, so its SQL is written out and its values are inlined as literals rather
 than bound — which gives up `check_for_backend`'s compile-time check that a
 model still matches its table. The tests have to carry that instead.
 
-## A mutation gets its own stack
+## A mutation gets its own stack, and the stack bounds the mutation
 
 A host import runs *inside* wasmi's execution loop, so its frames sit on top of
 the interpreter's, and this one then calls Diesel — many layers of deeply nested
 generics. Together they overflowed a default 2MB thread stack, which is how this
 was found; iOS gives React Native's JS thread about half of that. So each
-mutation runs on a scoped thread with 8MB rather than borrowing whichever stack
-called in.
+mutation runs on a scoped thread of its own rather than borrowing whichever
+stack called in.
 
-It costs about 2.3ms of the 3.1ms a mutation takes. Worth removing eventually —
-a persistent worker rather than a thread per call — and not worth removing
-before something needs it.
+Writing a mutation that inserts five rows turned up the part that matters:
+those host frames *accumulate* for as long as the guest function runs, instead
+of unwinding between calls. So the stack a mutation needs scales with how many
+times it calls into the host. `Add` makes three calls; `AddFive` makes eleven
+and overflowed 8MB in a test build while passing in release, because the frame
+size is dominated by Diesel's generics and release inlines most of them away.
+
+A limit only a debug build trips is one the next person will trip on the machine
+where it is hardest to diagnose, so the stack is 64MB — reserved address space,
+of which only touched pages are resident. `exec` also stopped going through
+`sql_query(..).execute(..)` in favour of `batch_execute`, which is a fraction of
+the frame and wanted no row count anyway.
+
+The thread costs about 2.3ms of the 3.1ms a mutation takes. Worth removing
+eventually — a persistent worker rather than a thread per call — and it is the
+other half of what makes a deep replay slow.
 
 ## The mutation type is the payload, not a Rust enum
 

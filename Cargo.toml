@@ -5,6 +5,7 @@ members = [
     "crates/todo",
     "crates/todo-wasm",
     "crates/mutators",
+    "crates/emit-mutators",
     "crates/ffi",
 ]
 
@@ -33,6 +34,7 @@ libsqlite3-sys = "0.30"
 sqlite-wasm-rs = "0.5"
 web-time = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "1"
 # Pinned exactly: `uniffi-bindgen-react-native` pins `uniffi = "=0.31"`, and the
 # generator and the runtime must agree on the metadata format or the bindings

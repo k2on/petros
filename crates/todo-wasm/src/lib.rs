@@ -12,6 +12,7 @@
 //! matches its table, which the tests have to cover instead.
 
 mod host;
+pub mod verbs;
 
 use ciborium::value::Value;
 use host::{exec, lit, query_exists, query_int, Lit};
@@ -68,6 +69,55 @@ fn apply(mutation: &Value, actor: &str) -> Result<(), String> {
             ));
             Ok(())
         }
+        // Five to-dos as one entry. The ids are already in the payload —
+        // `fill_auto` put them there at the originating client — so this is as
+        // deterministic as any other apply, and replaying it in a year produces
+        // the same five rows.
+        "AddFive" => {
+            let Some(Value::Array(items)) = field(mutation, "items") else {
+                return Err("AddFive has no items".into());
+            };
+            let created_ms = field(mutation, "created_ms").and_then(as_int).unwrap_or(0);
+            // Read the end of the list once, then count up. Re-reading between
+            // inserts would give the same answer and cost five more round trips
+            // through the host.
+            let mut pos = query_int("SELECT COALESCE(MAX(pos), 0) FROM todo");
+            for item in items {
+                let Some(id) = field(item, "id").and_then(as_bytes) else {
+                    return Err("an item has no id".into());
+                };
+                let text = field(item, "text").and_then(as_text).unwrap_or_default();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if query_exists(&format!(
+                    "SELECT 1 FROM todo WHERE id = {}",
+                    lit(Lit::Blob(&id))
+                )) {
+                    continue;
+                }
+                pos += 1;
+                exec(&format!(
+                    "INSERT INTO todo (id, text, done, pos, created_ms, actor) \
+                     VALUES ({}, {}, 0, {}, {}, {})",
+                    lit(Lit::Blob(&id)),
+                    lit(Lit::Text(text.trim())),
+                    lit(Lit::Int(pos)),
+                    lit(Lit::Int(created_ms)),
+                    lit(Lit::Text(actor)),
+                ));
+            }
+            Ok(())
+        }
+        // Marks everything done in one entry rather than one per row. That is
+        // the intent — "I am finished" — and it is what makes it behave
+        // correctly when it lands after entries its author never saw: rows
+        // added by another peer in the meantime are covered too, which a
+        // batch of per-row `SetDone`s would have missed.
+        "MarkAllDone" => {
+            exec("UPDATE todo SET done = 1 WHERE done = 0");
+            Ok(())
+        }
         "Remove" => {
             let id = field(mutation, "id")
                 .and_then(as_bytes)
@@ -80,8 +130,15 @@ fn apply(mutation: &Value, actor: &str) -> Result<(), String> {
         }
         // A variant this module has never heard of. The log is permanent and
         // variants are only added, so this is a peer newer than us — and the
-        // fix is to fetch a newer module, not to ship a new binary.
-        other => Err(format!("unknown mutation \"{other}\"")),
+        // fix is to fetch a newer module, not to ship a new binary. Saying what
+        // this one *does* know turns "why did nothing happen" into an answer.
+        other => {
+            let known: Vec<&str> = verbs::VERBS.iter().map(|v| v.name).collect();
+            Err(format!(
+                "unknown mutation \"{other}\"; this module knows {}",
+                known.join(", ")
+            ))
+        }
     }
 }
 
@@ -92,11 +149,72 @@ fn apply(mutation: &Value, actor: &str) -> Result<(), String> {
 /// it is allowed to have. Which fields they belong in is decided here, so that
 /// knowledge lives with the mutation rather than with the engine.
 fn fill_auto(mutation: &mut Value, uuid: Vec<u8>, now_ms: i64) {
-    if field(mutation, "t").and_then(as_text).as_deref() != Some("Add") {
-        return;
+    match field(mutation, "t").and_then(as_text).as_deref() {
+        Some("Add") => {
+            set(mutation, "id", Value::Bytes(uuid));
+            set(mutation, "created_ms", Value::Integer(now_ms.into()));
+        }
+        // Five rows out of one seed.
+        //
+        // The names are just "item 1".."item 5", but the *ids* cannot be: they
+        // have to be unique and `apply` may not invent them — `CLAUDE.md` asks
+        // for that and the sandbox enforces it, since the host imports no
+        // randomness. So the host's one uuid is expanded here, in the single
+        // place non-determinism is allowed, and the log freezes the result.
+        Some("AddFive") => {
+            let mut seed = Seed::from(&uuid);
+            let items = (1..=HOW_MANY)
+                .map(|n| {
+                    Value::Map(vec![
+                        (Value::Text("id".into()), Value::Bytes(seed.id())),
+                        (Value::Text("text".into()), Value::Text(format!("item {n}"))),
+                    ])
+                })
+                .collect();
+            set(mutation, "items", Value::Array(items));
+            set(mutation, "created_ms", Value::Integer(now_ms.into()));
+        }
+        _ => {}
     }
-    set(mutation, "id", Value::Bytes(uuid));
-    set(mutation, "created_ms", Value::Integer(now_ms.into()));
+}
+
+const HOW_MANY: usize = 5;
+/// xorshift128+, seeded from the uuid the host supplied.
+///
+/// Deliberately not a good random number generator — it is a *deterministic
+/// expansion* of one non-deterministic seed, which is the only shape the log
+/// can hold. The unpredictability is the host's uuid; everything after it is a
+/// pure function of that, which is why replaying the entry reproduces the rows.
+struct Seed(u64, u64);
+
+impl Seed {
+    fn from(bytes: &[u8]) -> Self {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        Seed(h | 1, h.rotate_left(31) | 1)
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        let y = self.1;
+        self.0 = y;
+        x ^= x << 23;
+        x ^= x >> 17;
+        x ^= y ^ (y >> 26);
+        self.1 = x;
+        x.wrapping_add(y)
+    }
+
+    fn id(&mut self) -> Vec<u8> {
+        let (a, b) = (self.next(), self.next());
+        let mut out = Vec::with_capacity(16);
+        out.extend_from_slice(&a.to_be_bytes());
+        out.extend_from_slice(&b.to_be_bytes());
+        out
+    }
 }
 
 // ------------------------------------------------------------ CBOR accessors

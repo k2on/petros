@@ -1,0 +1,15 @@
+[package]
+name = "emit-mutators"
+version = "0.1.0"
+description = "Wraps the mutator module as a TypeScript file for Metro to carry."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No dependencies, on purpose, and its own crate for the same reason.
+#
+# This runs immediately after `cargo build -p todo-wasm` on every save. When it
+# lived in `crates/ffi` it shared a dependency graph with the engine — `exo`,
+# `wasmi`, `serde_json` — and the two cargo invocations resolved features
+# differently, so each rebuilt what the other had just built. That thrash cost
+# more than a second: the loop measured 1.55s with it and 0.43s without.

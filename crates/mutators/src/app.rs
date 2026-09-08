@@ -96,29 +96,108 @@ impl App for WasmTodo {
     }
 }
 
-/// Build an `Add` the way the module expects it, with the placeholders
-/// `fill_auto` replaces. The one place this crate names a mutation's shape;
-/// everything else about the domain is in the module.
+/// Build a mutation from a name and its arguments, without knowing what either
+/// means.
+///
+/// This is the entry point that makes the design pay off. Every other way to
+/// author a mutation needs a Rust function per verb, and therefore a new uniffi
+/// export, a native rebuild and a trip through an app store — which defeats the
+/// point of `apply` being hot-swappable. Through here, adding a verb to the
+/// domain is a module rebuild and a call site: both of them things Metro can
+/// push, and both of them things an over-the-air update can carry.
+///
+/// It needs no domain knowledge because the module supplies all of it. The
+/// payload is just `{ "t": kind, ...args }`, and the auto-filled fields are not
+/// this function's problem: `fill_auto` runs inside the module afterwards and
+/// *appends* whatever the verb needs, so `add` here is `{"text": "..."}` and the
+/// id and the timestamp appear later, chosen by the module.
+///
+/// One convention, and it is protocol rather than domain: a field named `id`
+/// holding a canonical uuid becomes the sixteen-byte string the log uses.
+/// Nothing else in this wire format is anything but JSON's own types.
+pub fn from_json(kind: &str, args_json: &str) -> Result<Payload, String> {
+    let args: serde_json::Value = if args_json.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        serde_json::from_str(args_json).map_err(|e| format!("the arguments are not json: {e}"))?
+    };
+    from_value(kind, args)
+}
+
+/// As [`from_json`], for a caller that already has the arguments as values —
+/// which is every Rust peer. One encoder, so the phone and the terminal cannot
+/// disagree about what an `Add` looks like on the wire.
+pub fn from_value(kind: &str, args: serde_json::Value) -> Result<Payload, String> {
+    let serde_json::Value::Object(args) = args else {
+        return Err("the arguments should be a json object".into());
+    };
+
+    let mut fields = vec![(Value::Text("t".into()), Value::Text(kind.to_string()))];
+    for (name, value) in args {
+        let is_id = name == "id" || name.ends_with("_id");
+        fields.push((Value::Text(name), json_to_cbor(value, is_id)?));
+    }
+    Ok(Payload(Value::Map(fields)))
+}
+
+fn json_to_cbor(value: serde_json::Value, is_id: bool) -> Result<Value, String> {
+    use serde_json::Value as J;
+    Ok(match value {
+        J::Null => Value::Null,
+        J::Bool(b) => Value::Bool(b),
+        J::Number(n) => match n.as_i64() {
+            Some(i) => Value::Integer(i.into()),
+            // `docs/decisions.md`: no floats anywhere near the log.
+            None => return Err(format!("{n} is not an integer")),
+        },
+        J::String(s) if is_id => Value::Bytes(
+            exo::uuid::Uuid::parse_str(&s)
+                .map_err(|e| format!("not an id: {e}"))?
+                .as_bytes()
+                .to_vec(),
+        ),
+        J::String(s) => Value::Text(s),
+        J::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| json_to_cbor(v, false))
+                .collect::<Result<_, _>>()?,
+        ),
+        J::Object(entries) => Value::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| {
+                    let is_id = k == "id" || k.ends_with("_id");
+                    Ok((Value::Text(k), json_to_cbor(v, is_id)?))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+    })
+}
+
+// The three verbs the Rust peers spell out. They are conveniences over
+// [`from_value`], not a second encoder: a call site reads better with a name,
+// and the wire format still has exactly one definition.
+//
+// The `expect` cannot fire. The only fallible step in `from_value` is parsing a
+// uuid, and these format one rather than taking it from a caller.
+
 pub fn add(text: &str) -> Payload {
-    Payload(Value::Map(vec![
-        ("t".into(), "Add".into()),
-        ("id".into(), Value::Bytes(vec![0u8; 16])),
-        ("text".into(), text.into()),
-        ("created_ms".into(), Value::Integer(0.into())),
-    ]))
+    from_value("Add", serde_json::json!({ "text": text })).expect("a text is always encodable")
 }
 
-pub fn set_done(id: &[u8], done: bool) -> Payload {
-    Payload(Value::Map(vec![
-        ("t".into(), "SetDone".into()),
-        ("id".into(), Value::Bytes(id.to_vec())),
-        ("done".into(), Value::Bool(done)),
-    ]))
+pub fn set_done(id: &[u8; 16], done: bool) -> Payload {
+    let id = exo::uuid::Uuid::from_bytes(*id).to_string();
+    from_value("SetDone", serde_json::json!({ "id": id, "done": done }))
+        .expect("a formatted uuid always parses")
 }
 
-pub fn remove(id: &[u8]) -> Payload {
-    Payload(Value::Map(vec![
-        ("t".into(), "Remove".into()),
-        ("id".into(), Value::Bytes(id.to_vec())),
-    ]))
+pub fn remove(id: &[u8; 16]) -> Payload {
+    let id = exo::uuid::Uuid::from_bytes(*id).to_string();
+    from_value("Remove", serde_json::json!({ "id": id })).expect("a formatted uuid always parses")
+}
+
+/// Mark every unfinished to-do done, in one entry rather than one per row.
+pub fn mark_all_done() -> Payload {
+    from_value("MarkAllDone", serde_json::json!({})).expect("no arguments to encode")
 }

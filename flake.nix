@@ -76,6 +76,7 @@
               ffmpeg
               
               python3
+              eas-cli
             ]) ++ icedLibs;
 
             # iced loads these at runtime rather than linking them.
