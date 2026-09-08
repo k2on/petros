@@ -125,7 +125,7 @@ proptest! {
         sim.settle();
 
         let expected = sim.server_hash();
-        for i in 0..sim.n_clients() {
+        for i in 0..sim.clients() {
             prop_assert_eq!(
                 sim.state_hash(i),
                 expected,

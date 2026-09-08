@@ -52,6 +52,10 @@ web-sys = { version = "0.3", optional = true, features = [
 ] }
 
 [dev-dependencies]
+# The simulated network. A dev-dependency cycle — it depends on this crate —
+# which cargo resolves without complaint and which is the only honest shape:
+# the testkit is for apps, and the engine is just another user of it.
+petros-testkit.workspace = true
 # The engine has no opinion about windows; the iced example does.
 iced.workspace = true
 # The domain. These are ordinary Rust programs, so they call `apply` directly

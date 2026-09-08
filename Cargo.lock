@@ -2882,6 +2882,7 @@ dependencies = [
  "getrandom 0.3.4",
  "iced",
  "libsqlite3-sys",
+ "petros-testkit",
  "proptest",
  "rand 0.8.8",
  "ratatui",
@@ -2921,6 +2922,16 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "serde",
+]
+
+[[package]]
+name = "petros-testkit"
+version = "0.1.0"
+dependencies = [
+ "diesel",
+ "petros",
+ "rand 0.8.8",
+ "todo",
 ]
 
 [[package]]

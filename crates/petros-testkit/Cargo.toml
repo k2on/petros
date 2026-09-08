@@ -1,0 +1,17 @@
+[package]
+name = "petros-testkit"
+version = "0.1.0"
+description = "A deterministic, in-process network for testing a Petros app: partitions, drops, duplicates and reordering, all seeded."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Direct, not through petros's re-export: the generic state hash builds its own
+# queries and Diesel's derives generate `::diesel` paths.
+diesel.workspace = true
+petros.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+todo = { workspace = true, features = ["storage"] }

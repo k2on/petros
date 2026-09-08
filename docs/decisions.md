@@ -795,6 +795,43 @@ And the first attempt to falsify it was mangled by shell quoting, so it "failed"
 by not compiling; redone properly, pointing one decode at a field the schema
 does not declare, it fails on the assertion it is supposed to fail on.
 
+## The simulated network is a crate, because an app needs it more than the engine
+
+`tests/common/sim.rs` was the best thing in this repository and the only people
+who could use it were us. An app has exactly the same problem the engine has —
+does my domain converge when two peers go dark and come back — and no reason to
+write a second simulator to find out.
+
+So it is `petros-testkit`, generic over `A: App`, and `crates/petros`'s own copy
+is three lines that name the type. It is a dev-dependency cycle, since the
+testkit depends on the engine, which cargo resolves without complaint and which
+is the honest shape: the testkit is for apps, and the engine is just another
+user of it.
+
+The state hash had to change to get there. It read the tests' own model, field
+by field, which cannot be generic. It now walks the schema instead — every table
+except `petros_`-prefixed ones, every column in declaration order, every row
+ordered by its own rendered text, with SQLite's `quote()` doing the rendering so
+blobs and NULL are unambiguous. That is strictly stronger than what it replaced:
+it covers columns an app forgot to put in its model, and it does not need
+rewriting when the model changes.
+
+## The falsification found the test, not the code
+
+`a_real_domain_converges_across_a_broken_network` called `heal()` on both
+partitioned clients and then `settle()`. Removing the reconnect from `settle`
+entirely — so nothing re-offers work authored while dark — did not break it,
+because `heal()` had already done the re-offering.
+
+The test now partitions, mutates, and goes straight to `settle()`, which is what
+that method's own documentation claims to handle. Falsified the same way it
+fails, with the two replicas hashing differently.
+
+This is the third test in this repository to be vacuous, and all three were
+vacuous in the same way: the assertion was satisfied by a path other than the
+one under test. It is worth running the falsification every time, because it
+costs a minute and it has never once been a waste.
+
 ## Android is built by EAS
 
 `.eas/build/rust.yml` installs Rust from `rust-toolchain.toml` — still the one

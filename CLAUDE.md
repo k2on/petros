@@ -50,7 +50,7 @@ crates/petros/src/          the engine
   server.rs              assigns sequence numbers, dedupes, fans out
   store.rs, schema.rs    the three petros_ tables, as Diesel models
   transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
-crates/petros/tests/        19 tests; common/sim.rs is a seeded in-process network
+crates/petros/tests/        common/sim.rs is now three lines over petros-testkit
 crates/petros/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
 crates/petros-schema/    the app contract: `mutations!`, the schema it
                          declares, and the `Host` a mutation sees
@@ -58,6 +58,7 @@ crates/petros-wasm-guest/ `export!` — an app's wasm crate is one line
 crates/petros-wasm-host/ the wasmi side; the phone only. Conformance test here
 crates/petros-codegen/   reads a module's schema section, writes TypeScript
 crates/petros-axum/      one handler; the app keeps its routes and its auth
+crates/petros-testkit/   the seeded in-process network, generic over an app
 crates/todo/             the domain — the ONLY apply
   domain.rs              `mutations!` — the verbs and their bodies, declared
                          and dispatched from one place; plus fill_auto
