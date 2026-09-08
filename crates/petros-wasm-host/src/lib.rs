@@ -1,22 +1,22 @@
-//! The domain, run from a wasm module.
+//! Running a domain from a wasm module instead of from a linked symbol.
 //!
-//! Every peer links this and none of them link an `apply`: the server, the two
-//! terminal examples, the iced window and the phone all interpret the same
-//! `crates/todo-wasm` build. That is the invariant at the top of `CLAUDE.md`
-//! made structural rather than aspirational — there is one `apply` because
-//! there is one artifact, and a peer that has not loaded it cannot mutate at
-//! all.
+//! This is the half a peer needs when it wants to *replace* `apply` without
+//! being rebuilt — which in practice means a phone, where a native build is
+//! four minutes and a module push is half a second. Every other peer links its
+//! domain and never comes here.
 //!
-//! [`MUTATORS`] is process-wide because `petros` calls `Mutation::apply` during a
-//! rebase and hands it no context of ours. One domain per process is the same
-//! assumption a linked `apply` made; this just makes it replaceable at runtime.
+//! There is nothing app-specific in this crate. The `petros::App` that runs a
+//! module, and the module bytes themselves, belong to whoever is being run;
+//! see `crates/ffi` in the example workspace for what that looks like.
+//!
+//! [`MUTATORS`] is process-wide because `petros` calls `Mutation::apply` during
+//! a rebase and hands it no context of ours. One domain per process is the same
+//! assumption a linked `apply` makes; this just makes it replaceable at runtime.
 
 use std::sync::RwLock;
 
-pub mod app;
 pub mod wasm;
 
-pub use app::{from_json, Payload, WasmTodo};
 pub use wasm::Mutators;
 
 /// The module every peer in this process runs.
@@ -45,17 +45,4 @@ pub fn generation() -> u64 {
         .ok()
         .and_then(|s| s.as_ref().map(|m| m.generation))
         .unwrap_or(0)
-}
-
-/// The module this build was compiled against.
-///
-/// Every peer that is not hot-reloading — the server, the terminal examples —
-/// wants exactly this and nothing else, so it is baked in rather than found at
-/// runtime. `just mutators` is what puts it there.
-pub const BUNDLED: &[u8] =
-    include_bytes!("../../../target/wasm32-unknown-unknown/mutators/todo_wasm.wasm");
-
-/// Install [`BUNDLED`]. What a peer with no Metro attached calls at startup.
-pub fn load_bundled() -> Result<u64, String> {
-    load(BUNDLED)
 }

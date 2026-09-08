@@ -15,7 +15,11 @@ use diesel::{sql_query, RunQueryDsl};
 use petros::{AutoCtx, Connection};
 use petros_wasm_host::Mutators;
 
-const MODULE: &[u8] = petros_wasm_host::BUNDLED;
+/// The module under test, read straight from where `just mutators` puts it.
+/// A test fixture rather than part of the crate: `petros-wasm-host` runs
+/// modules and has no idea which one you mean.
+const MODULE: &[u8] =
+    include_bytes!("../../../target/wasm32-unknown-unknown/mutators/todo_wasm.wasm");
 
 #[derive(QueryableByName, Debug, PartialEq)]
 struct Row {

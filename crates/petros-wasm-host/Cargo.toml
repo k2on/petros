@@ -1,7 +1,7 @@
 [package]
 name = "petros-wasm-host"
 version = "0.1.0"
-description = "Running the domain from a wasm module: the host side of crates/todo-wasm, shared by every peer and the server."
+description = "Running a Petros domain from a wasm module, so a peer can replace `apply` without being rebuilt."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,17 +12,13 @@ ciborium.workspace = true
 # paths and need to find the crate at that name.
 diesel.workspace = true
 petros.workspace = true
-# The domain, for authoring payloads. `apply` here comes from the module, but
-# building a mutation is the same code every peer uses.
-todo = { workspace = true, features = ["storage"] }
-serde.workspace = true
-# Only for the generic entry point, which takes its arguments as JSON because
-# that is what a foreign caller can write without a CBOR encoder.
 # A pure-Rust wasm interpreter. No JIT, which is what makes it legal on iOS and
 # what lets one module run on a server, in a TUI and on a phone.
 wasmi = "2"
 
 [dev-dependencies]
+# A domain to run. Nothing above this line knows what a to-do is.
+todo = { workspace = true, features = ["storage"] }
 # The tests check the module against the schema it was generated from.
 petros-schema.workspace = true
 serde_json.workspace = true
