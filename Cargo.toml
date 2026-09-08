@@ -10,7 +10,6 @@ members = [
     "crates/todo-wasm",
     "crates/petros-wasm-host",
     "crates/petros-codegen",
-    "crates/ffi",
 ]
 
 [workspace.package]
@@ -47,10 +46,6 @@ web-time = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
-# Pinned exactly: `uniffi-bindgen-react-native` pins `uniffi = "=0.31"`, and the
-# generator and the runtime must agree on the metadata format or the bindings
-# it emits will not match the library it read them from.
-uniffi = "=0.31"
 uuid = { version = "1", features = ["serde"] }
 
 [profile.test]

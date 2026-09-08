@@ -1,11 +1,9 @@
-# harken
+# petros
 
-A self-hosted, local-first music system. **Phase 1 plus its clients exist**:
-`crates/petros`, a general-purpose offline-first sync engine that knows nothing
-about music; `crates/todo`, the demo domain it is exercised with; `crates/ffi`,
-that domain exported over UniFFI; and four peers — two TUIs, an iced window
-(desktop and browser) and an Expo app. `crates/api` and `crates/server` are
-later phases and are not built. Do not start one without being asked.
+A general-purpose, offline-first sync engine that knows nothing about your
+domain. `crates/todo` is the worked example it is exercised with — a to-do list,
+compiled both natively and to wasm, which is what lets `conformance.rs` prove
+those two builds agree.
 
 ## What Petros is
 
@@ -25,9 +23,9 @@ story: no CRDTs, no vector clocks, no merge functions.
 
 ## Invariants. Breaking one makes replicas diverge silently
 
-- `Mutation::apply` must be a pure function of `(transaction state, arguments)`.
-  No clock, no RNG, no network, no filesystem. Explicit `ORDER BY` on every
-  query — SQLite's natural order is not a contract. No floats in control flow.
+- `apply` must be a pure function of `(transaction state, arguments)`. No clock,
+  no RNG, no network, no filesystem. Explicit `ORDER BY` on every query —
+  SQLite's natural order is not a contract. No floats in control flow.
 - All non-determinism goes through `AutoCtx`, in `fill_auto`, exactly once, at
   the originating client. It is then frozen in the log forever.
 - The log is permanent. Never rename or remove a mutation variant, never change
@@ -38,57 +36,57 @@ story: no CRDTs, no vector clocks, no merge functions.
   `Connection::transaction` on a client's connection: the optimistic savepoint
   outlives any single call, so boundaries are raw SQL through `batch_execute`.
 - Petros owns tables prefixed `petros_`. The app owns everything else.
-- `petros::client` and `petros::server` are sans-io: no sockets, no async, no runtime.
-  This is what makes the deterministic simulation tests possible. The transport
-  module is the only place networking lives.
+- `petros::client` and `petros::server` are sans-io: no sockets, no async, no
+  runtime. That is what makes the deterministic simulation tests possible. The
+  transport module is the only place networking lives.
 
 ## Layout
 
 ```
-crates/petros/src/          the engine
-  client.rs              the savepoint rebase — the least obvious code here
-  server.rs              assigns sequence numbers, dedupes, fans out
-  store.rs, schema.rs    the three petros_ tables, as Diesel models
-  transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
-crates/petros/tests/        common/sim.rs is now three lines over petros-testkit
-crates/petros/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
-crates/petros-schema/    the app contract: `mutations!`, the schema it
-                         declares, and the `Host` a mutation sees
-crates/petros-wasm-guest/ `export!` — an app's wasm crate is one line
-crates/petros-wasm-host/ the wasmi side; the phone only. Conformance test here
-crates/petros-codegen/   reads a module's schema section, writes TypeScript
-crates/petros-axum/      one handler; the app keeps its routes and its auth
-crates/petros-testkit/   the seeded in-process network, generic over an app
-crates/todo/             the domain — the ONLY apply
-  domain.rs              `mutations!` — the verbs and their bodies, declared
-                         and dispatched from one place; plus fill_auto
-  storage.rs             that Host over Diesel; what every native peer links
-crates/todo-wasm/        the same domain, Host over three wasm imports
-crates/petros-wasm-host/         the wasmi host — the phone only; conformance test here
-crates/ffi/              the client over UniFFI, for the Expo app
-clients/expo/            the Expo app; src/ is UI and a socket, nothing else
-  modules/petros-todo/      the turbo module — generated, gitignored, not authored
-docs/decisions.md        why everything is the way it is — read this first
+crates/petros/               the engine
+  client.rs                  the savepoint rebase — the least obvious code here
+  server.rs                  assigns sequence numbers, dedupes, fans out
+  store.rs, schema.rs        the three petros_ tables, as Diesel models
+  transport/{ws,web}.rs      thin, replaceable; ws = native, web = browser
+crates/petros-schema/        the app contract: `mutations!`, the schema it
+                             declares, and the `Host` a mutation sees. No deps
+crates/petros-wasm-guest/    `export!` — an app's wasm crate is one line
+crates/petros-wasm-host/     wasmi, for a peer that replaces `apply` at runtime.
+                             Knows nothing about any domain
+crates/petros-codegen/       reads a module's schema section, writes TypeScript
+crates/petros-axum/          one handler; the app keeps its routes and its auth
+crates/petros-testkit/       the seeded in-process network, generic over an app
+crates/todo/                 the worked example: domain.rs, storage.rs, examples
+crates/todo-wasm/            the same domain as wasm — one `export!`
+docs/decisions.md            why everything is the way it is — read this first
 ```
 
 ## Running it
 
 ```
 just              # fmt, lint, test
-just test         # 19 tests + doctests, must stay under 30s
+just test         # must stay under 30s
+just mutators     # rebuild the wasm module and its TypeScript types
 just offline      # a client with no server in existence
 just serve        # one server…
 just peer alice   # …a TUI peer…
 just iced bob     # …a desktop GUI peer…
 just web          # …a browser peer, at localhost:8080
-just mutators     # rebuild the domain and hand it to Metro (0.46s)
-just mutators-watch # …on every save. Leave it running beside `bun start`.
-just ffi-bindings # regenerate the Expo client's TS from crates/ffi, and typecheck
-just expo-android # …and a phone. Needs `nix develop .#android`; see below.
 ```
 
-All five peers share one server. Take any of them offline, mutate on both sides,
-come back — that is the rebase, visible.
+Take any of them offline, mutate on both sides, come back — that is the rebase,
+visible.
+
+## Using it from an app
+
+`../harken` is one. An app declares its domain with `petros_schema::mutations!`,
+gets a wasm build from `petros_wasm_guest::export!`, serves it with
+`petros-axum`, and tests it against a simulated fleet with `petros-testkit`.
+Depend on these by path while they are unpublished:
+
+```toml
+petros = { path = "../petros/crates/petros" }
+```
 
 ## Traps that have each already cost a debugging round
 
@@ -103,53 +101,12 @@ come back — that is the rebase, visible.
 - **iced embeds no font by default.** Without the `fira-sans` feature a browser
   draws no glyphs at all, while widgets and input work — so it looks like a
   renderer bug and is not one.
-- A build that compiles is not evidence anything works. `SystemTime::now()`
-  panics on wasm and only surfaced when a mutation actually ran in a browser.
 - **`default-features = false` has to be said in the workspace entry too.** A
   member cannot subtract what `[workspace.dependencies]` asked for, and nothing
   warns. It put Diesel and SQLite in the wasm graph for weeks.
-
-## The Expo client, in one paragraph
-
-Never write domain logic in TypeScript. `apply` is in `crates/todo/domain.rs`,
-generic over a three-method `Host`. Native peers — server, TUIs, iced — link it
-through the Diesel host and pay nothing; the phone runs the same source compiled
-to wasm and interpreted by `crates/petros-wasm-host`, because that is the only peer where
-a rebuild costs four minutes instead of four seconds.
-`crates/petros-wasm-host/tests/conformance.rs` runs every verb through both builds and
-compares rows and refusals, so the two cannot drift apart unnoticed. `crates/ffi` exports the client with `#[uniffi::export]`
-(there is no UDL file; the Rust is the interface definition) and
-`uniffi-bindgen-react-native` generates `clients/expo/modules/petros-todo/`, which
-is gitignored so it cannot be hand-edited.
-
-Changing a mutation does **not** need a native build: `just mutators` rebuilds
-the module in ~0.5s and rewrites the base64 `.ts` that Metro pushes. Changing
-the *engine* does need one, and that is what EAS is for.
-
-## Traps in the client toolchain
-
-- **The NDK is x86_64-only.** Google publishes no aarch64-linux host toolchain,
-  so on an ARM Linux box the NDK's `clang` cannot execute — binfmt hands it to
-  qemu, which has no x86-64 loader. Build Android on x86_64 or in CI. iOS needs
-  Xcode, so it is a macOS runner. `.github/workflows/expo.yml` does both.
-- **nix does not supply the Android SDK**, on purpose: gradle installs missing
-  SDK components into the SDK directory, and the store is read-only. Bring your
-  own (Android Studio, `sdkmanager`, or a runner image) and export
-  `ANDROID_HOME`; `nix develop .#android` adds `cargo-ndk` and a JDK to it.
-- **Expo Go cannot load this app.** It calls into Rust, so it needs a
-  development build. `ios/` and `android/` are generated by `expo prebuild` and
-  are not in the tree.
-- **`uniffi` is pinned to `=0.31`** because `uniffi-bindgen-react-native` pins
-  it. The generator and the runtime must agree on the metadata format.
-- **`nix develop` sets `TMPDIR`.** The demo databases go to
-  `std::env::temp_dir()`, so a server started inside `nix develop --command`
-  does not share a database with one started under direnv. Fine in normal use;
-  confusing for five minutes if you hit it.
-
-## Not verified
-
-Android and iOS have never been built end to end from this repository — no
-machine here can run either toolchain (see above), so `.github/workflows/expo.yml`
-is written but has not had a green run. What *is* verified is everything up to
-that line: the Rust builds, the bindings generate, and the app typechecks
-against them.
+- A build that compiles is not evidence anything works. `SystemTime::now()`
+  panics on wasm and only surfaced when a mutation actually ran in a browser.
+- **A test can pass for the wrong reason, and three here did.** Each time the
+  assertion was satisfied by a path other than the one under test. Falsify every
+  new test by breaking the thing it claims to check; it costs a minute and has
+  not once been wasted.

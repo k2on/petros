@@ -95,85 +95,17 @@ web: web-build
     @echo "serving on http://localhost:8080"
     cd crates/todo/examples/web && python3 -m http.server 8080
 
-# ---------------------------------------------------------------- the Expo peer
+# ------------------------------------------------------------- the wasm module
 #
-# The domain is defined once, in `crates/todo`. `crates/ffi` wraps it for
-# foreign callers with uniffi, and everything TypeScript sees is generated from
-# that — so there is no second `apply` to keep in step. See docs/decisions.md.
+# `crates/todo` is compiled to wasm as well as linked, so the same `apply` can
+# be checked both ways. `tests/conformance.rs` is what makes that a claim rather
+# than a hope.
 
-expo-dir := "clients/expo"
-# bun hoists a workspace's binaries to the app, not to the library itself.
-ubrn := justfile_directory() / "clients/expo/node_modules/.bin/ubrn"
-ffi-lib := if os() == "macos" { "libpetros_todo_ffi.dylib" } else { "libpetros_todo_ffi.so" }
-
-# ------------------------------------------------------------- hot mutators
-#
-# The domain is a wasm module rather than a symbol inside the app's binary, so
-# changing a mutation does not mean rebuilding for the device. `just mutators`
-# rebuilds it and rewrites the TypeScript file that carries it; Metro is already
-# watching that file, and the app swaps the module when it arrives.
-
-# Build the mutator module and hand it to Metro.
+# Build the module the conformance test runs, and the TypeScript types that
+# come out of it. The `.ts` has no consumer in this repository — an app is what
+# consumes it — but generating it here is what keeps petros-codegen honest.
 mutators:
     cargo build -p todo-wasm --target wasm32-unknown-unknown --profile mutators
-    cargo run -q -p petros-codegen
-
-# Where the time goes in one mutation. Ignored by `just test` because it is a
-# measurement and it is slow; run it when a number is in question.
-latency:
-    cargo test -p petros-todo-ffi --release --test latency -- --ignored --nocapture --test-threads=1
-
-# The loop. Leave this running beside `bun start`, then edit crates/todo-wasm.
-mutators-watch:
-    @echo "watching crates/todo-wasm — save a file and check the phone"
-    watchexec --project-origin . --watch crates/todo-wasm --exts rs \
-        --on-busy-update=restart -- just mutators
-
-# Install the JS side. Run once, and again after changing a dependency.
-expo-install:
-    cd {{expo-dir}} && bun install
-
-# Reads the UniFFI metadata straight back out of a host build of the crate, so
-# it needs no NDK and no Xcode. That is what makes "did my change to the Rust
-# reach the client?" a question you can answer in a couple of seconds — and the
-# `tsc` at the end is what turns "the app still calls the old API" into a
-# compile error rather than a crash on a device.
-#
-# `generate bindings` reads the crate name from `cargo metadata` so it runs at
-# the workspace root; `generate turbo-module` reads the library's package.json
-# so it runs there. Hence the two directories.
-
-# Regenerate the client's TypeScript and C++ from `crates/ffi`.
-ffi-bindings: expo-install
-    cargo build -p petros-todo-ffi
-    {{ubrn}} generate jsi bindings target/debug/{{ffi-lib}} --library --no-format \
-        --ts-dir {{expo-dir}}/modules/petros-todo/src/generated \
-        --cpp-dir {{expo-dir}}/modules/petros-todo/cpp/generated
-    cd {{expo-dir}}/modules/petros-todo && {{ubrn}} generate jsi turbo-module \
-        --config ubrn.config.yaml --native-bindings petros_todo_ffi
-    cd {{expo-dir}} && ./node_modules/.bin/tsc --noEmit
-
-# Needs the SDK and the NDK, which the default shell deliberately does not
-# carry: `nix develop .#android -c just expo-android`. Expo's native projects
-# are generated rather than committed, so `prebuild` runs first and `android/`
-# never enters the tree.
-
-# Build the Rust for Android, regenerate, and run the app.
-expo-android: expo-install
-    cd {{expo-dir}}/modules/petros-todo && {{ubrn}} build android \
-        --config ubrn.config.yaml --and-generate --release
-    cd {{expo-dir}} && bunx expo prebuild --platform android --clean
-    cd {{expo-dir}} && bunx expo run:android
-
-# Needs Xcode, so it only runs on a Mac — in CI that is a macOS runner, see
-# `.github/workflows/expo-ios.yml`.
-
-# The same for iOS.
-expo-ios: expo-install
-    cd {{expo-dir}}/modules/petros-todo && {{ubrn}} build ios \
-        --config ubrn.config.yaml --and-generate --release
-    cd {{expo-dir}} && bunx expo prebuild --platform ios --clean
-    cd {{expo-dir}} && bunx expo run:ios
-
-doc:
-    cargo doc -p petros --no-deps --all-features --open
+    cargo run -q -p petros-codegen -- \
+        target/wasm32-unknown-unknown/mutators/todo_wasm.wasm \
+        crates/todo/mutators.gen.ts
