@@ -12,6 +12,7 @@ ciborium.workspace = true
 # paths and need to find the crate at that name.
 diesel.workspace = true
 petros.workspace = true
+petros-schema = { workspace = true, features = ["serde"] }
 # A pure-Rust wasm interpreter. No JIT, which is what makes it legal on iOS and
 # what lets one module run on a server, in a TUI and on a phone.
 wasmi = "2"
@@ -20,7 +21,7 @@ wasmi = "2"
 # A domain to run. Nothing above this line knows what a to-do is.
 todo = { workspace = true, features = ["storage"] }
 # The tests check the module against the schema it was generated from.
-petros-schema.workspace = true
+petros-schema = { workspace = true, features = ["serde"] }
 serde_json.workspace = true
 # The tests run the real module against a real database.
 diesel = { workspace = true, features = ["sqlite"] }

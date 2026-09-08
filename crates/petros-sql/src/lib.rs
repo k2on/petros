@@ -116,7 +116,7 @@ pub fn exec(input: TokenStream) -> TokenStream {
     // than no check.
     let schema_str = schema.to_string_lossy().into_owned();
     let values = args.iter().map(|a| {
-        quote! { ::petros_schema::Cell::to_value(&(#a)) }
+        quote! { ::petros_schema::Bind::to_value(&(#a)) }
     });
     quote! {{
         const _: &str = ::core::include_str!(#schema_str);
@@ -184,7 +184,7 @@ fn rows(input: TokenStream, single: bool) -> TokenStream {
     let schema_str = schema.to_string_lossy().into_owned();
     let values = args
         .iter()
-        .map(|a| quote! { ::petros_schema::Cell::to_value(&(#a)) });
+        .map(|a| quote! { ::petros_schema::Bind::to_value(&(#a)) });
     let tys = columns.iter().map(|c| c.ty.token());
     let fields = columns.iter().map(|c| {
         let name = syn::Ident::new(&c.name, sql.span());

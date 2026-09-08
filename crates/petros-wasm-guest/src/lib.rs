@@ -48,31 +48,58 @@ macro_rules! export {
 
     // Without this the imports land in a module called `env`, and the host —
     // which names them `petros` — cannot satisfy them.
+    //
+    // Two calls rather than one, because a host function cannot allocate in the
+    // guest without calling back into an instance that is already running.
+    // `__petros_store` leaves its answer with the host and says how long it is;
+    // `__petros_take` copies it into a buffer this side just made.
     (@imports) => {
         #[link(wasm_import_module = "petros")]
         extern "C" {
-            #[link_name = "query_int"]
-            fn __petros_query_int(sql: *const u8, sql_len: u32) -> i64;
-            #[link_name = "query_exists"]
-            fn __petros_query_exists(sql: *const u8, sql_len: u32) -> i32;
-            #[link_name = "exec"]
-            fn __petros_exec(sql: *const u8, sql_len: u32) -> i64;
+            #[link_name = "store"]
+            fn __petros_store(request: *const u8, len: u32) -> u32;
+            #[link_name = "take"]
+            fn __petros_take(into: *mut u8, len: u32);
         }
 
-        /// The host's SQLite, reached across the sandbox boundary.
-        struct PetrosImports;
+        /// The host's database, reached across the sandbox boundary.
+        ///
+        /// Two methods, because the SQL was checked at build time and there is
+        /// nothing left to decide here.
+        struct PetrosStore;
 
-        impl $crate::petros_schema::Host for PetrosImports {
-            fn query_int(&mut self, sql: &str) -> i64 {
-                unsafe { __petros_query_int(sql.as_ptr(), sql.len() as u32) }
-            }
-            fn query_exists(&mut self, sql: &str) -> bool {
-                unsafe { __petros_query_exists(sql.as_ptr(), sql.len() as u32) != 0 }
-            }
-            fn exec(&mut self, sql: &str) {
-                unsafe {
-                    __petros_exec(sql.as_ptr(), sql.len() as u32);
+        impl PetrosStore {
+            fn ask(request: &$crate::petros_schema::Request) -> ::std::vec::Vec<u8> {
+                let encoded = $crate::encode_request(request);
+                let len = unsafe { __petros_store(encoded.as_ptr(), encoded.len() as u32) };
+                let mut answer = ::std::vec![0u8; len as usize];
+                if len > 0 {
+                    unsafe { __petros_take(answer.as_mut_ptr(), len) };
                 }
+                answer
+            }
+        }
+
+        impl $crate::petros_schema::Store for PetrosStore {
+            fn exec(&mut self, sql: &str, params: &[$crate::petros_schema::Value]) {
+                let _ = PetrosStore::ask(&$crate::petros_schema::Request::Exec {
+                    sql: sql.to_string(),
+                    params: params.to_vec(),
+                });
+            }
+
+            fn query(
+                &mut self,
+                sql: &str,
+                params: &[$crate::petros_schema::Value],
+                types: &[$crate::petros_schema::ColumnTy],
+            ) -> ::std::vec::Vec<::std::vec::Vec<$crate::petros_schema::Value>> {
+                let answer = PetrosStore::ask(&$crate::petros_schema::Request::Query {
+                    sql: sql.to_string(),
+                    params: params.to_vec(),
+                    types: types.to_vec(),
+                });
+                $crate::decode_rows(&answer)
             }
         }
     };
@@ -105,7 +132,7 @@ macro_rules! export {
             let outcome = match $crate::decode(payload) {
                 Ok(value) => {
                     use $domain as domain;
-                    domain::apply(&mut PetrosImports, &value, who)
+                    domain::apply(&mut PetrosStore, &value, who)
                 }
                 Err(e) => Err(e),
             };
@@ -187,4 +214,24 @@ pub fn encode(value: &ciborium::value::Value) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     ciborium::into_writer(value, &mut out).ok()?;
     Some(out)
+}
+
+/// A request, as the bytes the host decodes. CBOR, like the log.
+#[doc(hidden)]
+pub fn encode_request(request: &petros_schema::Request) -> Vec<u8> {
+    let mut out = Vec::new();
+    // Nothing here can fail on a well-formed request, and there is no channel
+    // to report it on if it did: an empty request is one the host rejects.
+    let _ = ciborium::into_writer(request, &mut out);
+    out
+}
+
+/// Rows, as the host encoded them. An unreadable answer is no rows, which the
+/// domain already has to handle — a query can legitimately match nothing.
+#[doc(hidden)]
+pub fn decode_rows(bytes: &[u8]) -> Vec<Vec<petros_schema::Value>> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    ciborium::from_reader(bytes).unwrap_or_default()
 }

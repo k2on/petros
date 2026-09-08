@@ -24,7 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod store;
-pub use store::{Cell, ColumnTy, Store, Value};
+pub use store::{Bind, Cell, ColumnTy, Request, Store, Value};
 
 /// Every mutation an app understands.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -139,54 +139,6 @@ impl Ty {
             Ty::Text => "string",
             Ty::Integer => "number",
             Ty::Bool => "boolean",
-        }
-    }
-}
-
-// ------------------------------------------------------- what a mutation sees
-
-/// The database, as much of it as a mutation is allowed to see.
-///
-/// Three methods, and deliberately no more. On wasm this is what the sandbox
-/// enforces — the module imports these and nothing else, so `apply` *cannot*
-/// read a clock, draw a random number, open a socket or touch a file. Natively
-/// the same trait is the only argument `apply` gets, so the rule is the same
-/// one, kept by construction rather than by review.
-pub trait Host {
-    /// First column of the first row, as an integer. Zero for no rows or NULL —
-    /// which is what `MAX(pos)` over an empty table should mean.
-    fn query_int(&mut self, sql: &str) -> i64;
-    /// Whether the query matched anything at all.
-    fn query_exists(&mut self, sql: &str) -> bool;
-    /// Run a statement.
-    fn exec(&mut self, sql: &str);
-}
-
-/// A SQLite literal, escaped the way SQLite defines them.
-///
-/// Values are inlined rather than bound because the wasm side has no way to
-/// bind: it holds a channel to the host's SQLite, not a connection. Both builds
-/// go through here so the SQL is identical either way, which is the property a
-/// conformance test can then check.
-pub enum Lit<'a> {
-    Int(i64),
-    Text(&'a str),
-    Blob(&'a [u8]),
-}
-
-pub fn lit(v: Lit<'_>) -> String {
-    match v {
-        Lit::Int(i) => i.to_string(),
-        // A single quote is escaped by doubling it. That is the whole rule.
-        Lit::Text(s) => format!("'{}'", s.replace('\'', "''")),
-        Lit::Blob(b) => {
-            let mut out = String::with_capacity(b.len() * 2 + 3);
-            out.push_str("X'");
-            for byte in b {
-                out.push_str(&format!("{byte:02x}"));
-            }
-            out.push('\'');
-            out
         }
     }
 }
@@ -425,20 +377,19 @@ pub mod cbor {
 /// `fill_auto` supplies them at the originating client, so a caller neither
 /// chooses them nor should see a type offering the choice.
 ///
+/// Bodies write through a [`Store`], and the SQL in them is checked at build
+/// time by `petros_sql::exec!` and `petros_sql::query!` — which is why they can
+/// be real SQL and still run inside a sandbox with no database in it.
+///
 /// ```
-/// use petros_schema::Host;
 /// petros_schema::mutations! {
 ///     /// Add one.
 ///     Add { text: Text } auto { id: Id } => |host, actor| {
-///         host.exec(&format!("INSERT INTO t VALUES ({}, {}, {})",
-///             petros_schema::lit(petros_schema::Lit::Blob(&id)),
-///             petros_schema::lit(petros_schema::Lit::Text(&text)),
-///             petros_schema::lit(petros_schema::Lit::Text(actor))));
+///         let _ = (host, &id, &text, actor);
 ///         Ok(())
 ///     }
 ///     Clear {} => |host, actor| {
-///         let _ = actor;
-///         host.exec("DELETE FROM t");
+///         let _ = (host, actor);
 ///         Ok(())
 ///     }
 /// }
@@ -461,8 +412,8 @@ macro_rules! mutations {
 
         /// Applying a mutation: `Ok`, or a deterministic refusal every replica
         /// reaches identically.
-        pub fn apply<H: $crate::Host>(
-            host: &mut H,
+        pub fn apply<S: $crate::Store>(
+            host: &mut S,
             mutation: &$crate::cbor::Value,
             actor: &str,
         ) -> ::core::result::Result<(), ::std::string::String> {

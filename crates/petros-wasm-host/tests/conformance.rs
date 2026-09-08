@@ -37,13 +37,9 @@ struct Row {
 
 fn database() -> Connection {
     let mut conn = petros::open_memory().expect("open");
-    conn.batch_execute(
-        "CREATE TABLE todo (
-             id BLOB PRIMARY KEY NOT NULL, text TEXT NOT NULL,
-             done BOOL NOT NULL DEFAULT 0, pos BIGINT NOT NULL,
-             created_ms BIGINT NOT NULL, actor TEXT NOT NULL);",
-    )
-    .expect("migrate");
+    // The app's own schema, not a copy of it — the same file `petros-sql`
+    // checked every statement in the domain against.
+    conn.batch_execute(todo::SCHEMA).expect("migrate");
     conn
 }
 
@@ -53,37 +49,10 @@ fn rows(conn: &mut Connection) -> Vec<Row> {
         .expect("read back")
 }
 
-/// The native side, exactly as `todo::Payload`'s `Mutation::apply` runs it.
-struct Native<'a>(&'a mut Connection);
-
-impl todo::domain::Host for Native<'_> {
-    fn query_int(&mut self, sql: &str) -> i64 {
-        #[derive(QueryableByName)]
-        struct V {
-            #[diesel(sql_type = BigInt)]
-            v: i64,
-        }
-        sql_query(format!("SELECT ({sql}) AS v"))
-            .load::<V>(&mut *self.0)
-            .ok()
-            .and_then(|r| r.first().map(|r| r.v))
-            .unwrap_or(0)
-    }
-    fn query_exists(&mut self, sql: &str) -> bool {
-        #[derive(QueryableByName)]
-        struct V {
-            #[diesel(sql_type = BigInt)]
-            v: i64,
-        }
-        sql_query(format!("SELECT EXISTS({sql}) AS v"))
-            .load::<V>(&mut *self.0)
-            .ok()
-            .and_then(|r| r.first().map(|r| r.v != 0))
-            .unwrap_or(false)
-    }
-    fn exec(&mut self, sql: &str) {
-        let _ = self.0.batch_execute(sql);
-    }
+/// The native side, exactly as `todo::Payload`'s `Mutation::apply` runs it:
+/// the same checked SQL, through a store backed by a real connection.
+fn native_apply(conn: &mut Connection, payload: &todo::Payload, actor: &str) -> Result<(), String> {
+    todo::domain::apply(&mut petros::backend::SqliteStore(conn), &payload.0, actor)
 }
 
 fn encode(p: &todo::Payload) -> Vec<u8> {
@@ -113,7 +82,7 @@ fn both_ways(script: &[(&str, serde_json::Value)]) -> (Vec<Row>, Vec<Row>) {
     let mut native_db = database();
     for p in &payloads {
         // A refusal is a legitimate outcome; both sides must reach the same one.
-        let _ = todo::domain::apply(&mut Native(&mut native_db), &p.0, "alice");
+        let _ = native_apply(&mut native_db, p, "alice");
     }
 
     let module = Mutators::load(MODULE).expect("load the module");
@@ -187,7 +156,7 @@ fn refusals_match_too() {
         <todo::Payload as petros::Mutation>::fill_auto(&mut p, &mut auto);
 
         let mut a = database();
-        let native = todo::domain::apply(&mut Native(&mut a), &p.0, "alice");
+        let native = native_apply(&mut a, &p, "alice");
         let mut b = database();
         let wasm = module
             .apply(&mut b, &encode(&p), "alice")

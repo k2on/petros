@@ -11,4 +11,4 @@ rust-version.workspace = true
 # `Host` contract and the schema section.
 [dependencies]
 ciborium.workspace = true
-petros-schema.workspace = true
+petros-schema = { workspace = true, features = ["cbor", "serde"] }

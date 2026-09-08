@@ -13,11 +13,11 @@
 
 use std::sync::Arc;
 
-use diesel::connection::SimpleConnection;
-use diesel::deserialize::QueryableByName;
-use diesel::sql_types::BigInt;
-use diesel::{sql_query, RunQueryDsl};
+use petros::backend::SqliteStore;
 use petros::{AutoCtx, Connection};
+// `as _` because wasmi also has a `Store`, and this one is only wanted for
+// its methods.
+use petros_schema::{Request, Store as _};
 use wasmi::{Caller, Engine, Linker, Memory, Module, Store, TypedFunc};
 
 /// How much stack one mutation gets.
@@ -60,6 +60,12 @@ struct HostState {
     memory: Option<Memory>,
     alloc: Option<TypedFunc<u32, u32>>,
     failure: Option<String>,
+    /// The answer to the guest's last question, waiting to be copied out.
+    ///
+    /// A host function cannot allocate in the guest without re-entering an
+    /// instance that is already running, so the answer waits here and the guest
+    /// asks for it once it has made room.
+    answer: Vec<u8>,
 }
 
 impl HostState {
@@ -153,13 +159,13 @@ impl Mutators {
                 memory: None,
                 alloc: None,
                 failure: None,
+                answer: Vec::new(),
             },
         );
         let mut linker = Linker::new(&self.engine);
         linker
-            .func_wrap("petros", "query_int", host_query_int)
-            .and_then(|l| l.func_wrap("petros", "query_exists", host_query_exists))
-            .and_then(|l| l.func_wrap("petros", "exec", host_exec))
+            .func_wrap("petros", "store", host_store)
+            .and_then(|l| l.func_wrap("petros", "take", host_take))
             .map_err(|e| format!("could not define the host imports: {e}"))?;
 
         let instance = linker
@@ -267,74 +273,71 @@ fn read_packed(store: &mut Store<HostState>, packed: u64) -> Result<Vec<u8>, Str
 
 // ------------------------------------------------------------- host functions
 
-/// One integer column. Diesel needs a named type even for a scalar.
-#[derive(QueryableByName)]
-struct IntRow {
-    #[diesel(sql_type = BigInt, column_name = v)]
-    v: i64,
+/// Answer one question from the guest, and say how long the answer is.
+///
+/// The SQL inside was checked at build time by `petros-sql`, so there is
+/// nothing to validate here — only to bind and run. A request that will not
+/// decode is a broken module, and it fails the mutation rather than the
+/// process.
+fn host_store(mut caller: Caller<'_, HostState>, request: u32, len: u32) -> u32 {
+    let outcome = read_bytes(&caller, request, len).and_then(|bytes| {
+        let request: Request = ciborium::from_reader(&bytes[..])
+            .map_err(|e| format!("the module sent a request we cannot read: {e}"))?;
+        let conn = caller.data_mut().conn()?;
+        let mut store = SqliteStore(conn);
+        Ok(match request {
+            Request::Exec { sql, params } => {
+                store.exec(&sql, &params);
+                Vec::new()
+            }
+            Request::Query { sql, params, types } => {
+                let rows = store.query(&sql, &params, &types);
+                let mut out = Vec::new();
+                ciborium::into_writer(&rows, &mut out)
+                    .map_err(|e| format!("could not encode the rows: {e}"))?;
+                out
+            }
+        })
+    });
+    match outcome {
+        Ok(answer) => {
+            let len = answer.len() as u32;
+            caller.data_mut().answer = answer;
+            len
+        }
+        Err(e) => {
+            caller.data_mut().failure.get_or_insert(e);
+            0
+        }
+    }
 }
 
-fn read_sql(caller: &Caller<'_, HostState>, ptr: u32, len: u32) -> Result<String, String> {
+/// Copy the waiting answer into a buffer the guest has just made.
+fn host_take(mut caller: Caller<'_, HostState>, into: u32, len: u32) {
+    let answer = std::mem::take(&mut caller.data_mut().answer);
+    if answer.len() != len as usize {
+        caller
+            .data_mut()
+            .failure
+            .get_or_insert_with(|| "the module asked for the wrong number of bytes".into());
+        return;
+    }
+    let Some(memory) = caller.data().memory else {
+        return;
+    };
+    if let Err(e) = memory.write(&mut caller, into as usize, &answer) {
+        caller
+            .data_mut()
+            .failure
+            .get_or_insert(format!("could not write guest memory: {e}"));
+    }
+}
+
+fn read_bytes(caller: &Caller<'_, HostState>, ptr: u32, len: u32) -> Result<Vec<u8>, String> {
     let memory = caller.data().memory.ok_or("no memory yet")?;
     let mut out = vec![0u8; len as usize];
     memory
         .read(caller, ptr as usize, &mut out)
         .map_err(|e| format!("could not read guest memory: {e}"))?;
-    String::from_utf8(out).map_err(|e| format!("the guest sent invalid utf-8: {e}"))
-}
-
-fn host_query_int(mut caller: Caller<'_, HostState>, sql: u32, sql_len: u32) -> i64 {
-    let outcome = read_sql(&caller, sql, sql_len).and_then(|sql| {
-        let conn = caller.data_mut().conn()?;
-        sql_query(format!("SELECT ({sql}) AS v"))
-            .load::<IntRow>(conn)
-            .map(|rows| rows.first().map(|r| r.v).unwrap_or(0))
-            .map_err(|e| format!("{sql}: {e}"))
-    });
-    match outcome {
-        Ok(v) => v,
-        Err(e) => {
-            caller.data_mut().failure.get_or_insert(e);
-            0
-        }
-    }
-}
-
-fn host_query_exists(mut caller: Caller<'_, HostState>, sql: u32, sql_len: u32) -> i32 {
-    let outcome = read_sql(&caller, sql, sql_len).and_then(|sql| {
-        let conn = caller.data_mut().conn()?;
-        sql_query(format!("SELECT EXISTS({sql}) AS v"))
-            .load::<IntRow>(conn)
-            .map(|rows| rows.first().map(|r| r.v).unwrap_or(0) as i32)
-            .map_err(|e| format!("{sql}: {e}"))
-    });
-    match outcome {
-        Ok(v) => v,
-        Err(e) => {
-            caller.data_mut().failure.get_or_insert(e);
-            0
-        }
-    }
-}
-
-fn host_exec(mut caller: Caller<'_, HostState>, sql: u32, sql_len: u32) -> i64 {
-    let outcome = read_sql(&caller, sql, sql_len).and_then(|sql| {
-        let conn = caller.data_mut().conn()?;
-        // `batch_execute` rather than `sql_query(..).execute(..)`: this frame
-        // sits on top of wasmi's, and those frames accumulate for as long as
-        // the guest function runs, so every kilobyte here is paid once per host
-        // call a mutation makes. Diesel's typed query machinery is many layers
-        // of monomorphised generics; the simple path is a fraction of it, and
-        // nothing here wants the row count anyway.
-        conn.batch_execute(&sql)
-            .map(|()| 0i64)
-            .map_err(|e| format!("{sql}: {e}"))
-    });
-    match outcome {
-        Ok(n) => n,
-        Err(e) => {
-            caller.data_mut().failure.get_or_insert(e);
-            -1
-        }
-    }
+    Ok(out)
 }

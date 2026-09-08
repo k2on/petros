@@ -10,16 +10,12 @@
 //! is written once. It used to be written twice — in the schema and again in
 //! whatever field `apply` reached for — and nothing checked the two agreed.
 //!
-//! Everything it can reach is [`Host`]: three methods, no clock, no randomness,
+//! Everything it can reach is a [`Store`](petros_schema::Store): two methods, no clock, no randomness,
 //! no network, no filesystem. On wasm that is enforced by the sandbox, because
 //! the module imports nothing else. Natively it is enforced by this trait being
 //! the only argument `apply` gets.
 
 use petros_schema::cbor::{set, Value};
-
-// The contract, not a copy of it: the same three methods the wasm module
-// imports and the same escaping both builds go through.
-pub use petros_schema::{lit, Host, Lit};
 
 petros_schema::mutations! {
     /// Add a to-do at the end of the list.
@@ -29,25 +25,34 @@ petros_schema::mutations! {
         }
         // The same entry arriving twice is a no-op, which is what makes
         // redelivery safe.
-        if host.query_exists(&format!(
-            "SELECT 1 FROM todo WHERE id = {}",
-            lit(Lit::Blob(&id))
-        )) {
+        let already = petros_sql::query_one!(
+            host,
+            "SELECT 1 AS \"found: Int\" FROM todo WHERE id = ?",
+            id
+        );
+        if already.is_some() {
             return Ok(());
         }
         // `pos` is read out of current state: "put it at the end", an intent,
         // not "put it at 3", a fact. It is what makes the rebase visible when
         // an entry lands underneath yours.
-        let last = host.query_int("SELECT COALESCE(MAX(pos), 0) FROM todo");
-        host.exec(&format!(
-            "INSERT INTO todo (id, text, done, pos, created_ms, actor) \
-             VALUES ({}, {}, 0, {}, {}, {})",
-            lit(Lit::Blob(&id)),
-            lit(Lit::Text(text.trim())),
-            lit(Lit::Int(last + 1)),
-            lit(Lit::Int(created_ms)),
-            lit(Lit::Text(actor)),
-        ));
+        let last = petros_sql::query_one!(
+            host,
+            "SELECT COALESCE(MAX(pos), 0) AS \"last: Int\" FROM todo"
+        )
+        .map(|r| r.last)
+        .unwrap_or(0);
+        let trimmed = text.trim().to_string();
+        petros_sql::exec!(
+            host,
+            "INSERT INTO todo (id, text, done, pos, created_ms, actor)
+             VALUES (?, ?, 0, ?, ?, ?)",
+            id,
+            trimmed,
+            last + 1,
+            created_ms,
+            actor
+        );
         Ok(())
     }
 
@@ -58,7 +63,12 @@ petros_schema::mutations! {
     AddFive {} auto { items: Array, created_ms: Integer } => |host, actor| {
         // Read the end of the list once, then count up. Re-reading between
         // inserts would give the same answer and cost five more round trips.
-        let mut pos = host.query_int("SELECT COALESCE(MAX(pos), 0) FROM todo");
+        let mut pos = petros_sql::query_one!(
+            host,
+            "SELECT COALESCE(MAX(pos), 0) AS \"last: Int\" FROM todo"
+        )
+        .map(|r| r.last)
+        .unwrap_or(0);
         for item in items {
             let Some(id) = petros_schema::cbor::field(item, "id")
                 .and_then(petros_schema::cbor::as_bytes)
@@ -69,31 +79,36 @@ petros_schema::mutations! {
             if text.trim().is_empty() {
                 continue;
             }
-            if host.query_exists(&format!(
-                "SELECT 1 FROM todo WHERE id = {}",
-                lit(Lit::Blob(&id))
-            )) {
+            let already = petros_sql::query_one!(
+                host,
+                "SELECT 1 AS \"found: Int\" FROM todo WHERE id = ?",
+                id
+            );
+            if already.is_some() {
                 continue;
             }
             pos += 1;
-            host.exec(&format!(
-                "INSERT INTO todo (id, text, done, pos, created_ms, actor) \
-                 VALUES ({}, {}, 0, {}, {}, {})",
-                lit(Lit::Blob(&id)),
-                lit(Lit::Text(text.trim())),
-                lit(Lit::Int(pos)),
-                lit(Lit::Int(created_ms)),
-                lit(Lit::Text(actor)),
-            ));
+            let trimmed = text.trim().to_string();
+            petros_sql::exec!(
+                host,
+                "INSERT INTO todo (id, text, done, pos, created_ms, actor)
+                 VALUES (?, ?, 0, ?, ?, ?)",
+                id,
+                trimmed,
+                pos,
+                created_ms,
+                actor
+            );
         }
         Ok(())
     }
 
     /// One entry rather than one per row, so it covers rows another peer added
-    /// in the meantime. That is what makes it an intent.
+    /// in the meantime. That is what makes it an intent — and one statement,
+    /// which is what the checked SQL buys over a typed query builder.
     MarkAllDone {} => |host, actor| {
         let _ = actor;
-        host.exec("UPDATE todo SET done = 1 WHERE done = 0");
+        petros_sql::exec!(host, "UPDATE todo SET done = 1 WHERE done = 0");
         Ok(())
     }
 
@@ -101,20 +116,18 @@ petros_schema::mutations! {
     /// in the log may have removed it.
     SetDone { id: Id, done: Bool } => |host, actor| {
         let _ = actor;
-        host.exec(&format!(
-            "UPDATE todo SET done = {} WHERE id = {}",
-            lit(Lit::Int(done as i64)),
-            lit(Lit::Blob(&id))
-        ));
+        petros_sql::exec!(
+            host,
+            "UPDATE todo SET done = ? WHERE id = ?",
+            done as i64,
+            id
+        );
         Ok(())
     }
 
     Remove { id: Id } => |host, actor| {
         let _ = actor;
-        host.exec(&format!(
-            "DELETE FROM todo WHERE id = {}",
-            lit(Lit::Blob(&id))
-        ));
+        petros_sql::exec!(host, "DELETE FROM todo WHERE id = ?", id);
         Ok(())
     }
 }

@@ -3959,6 +3959,7 @@ dependencies = [
  "iced",
  "petros",
  "petros-schema",
+ "petros-sql",
  "ratatui",
  "serde",
  "serde_json",

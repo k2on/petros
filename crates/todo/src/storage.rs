@@ -6,11 +6,9 @@
 
 use ciborium::value::Value;
 use diesel::connection::SimpleConnection;
-use diesel::deserialize::QueryableByName;
 use diesel::prelude::*;
-use diesel::sql_query;
-use diesel::sql_types::BigInt;
 use diesel::sqlite::Sqlite as SqliteBackend;
+use petros::backend::SqliteStore;
 use petros::{ActorId, App, AutoCtx, Connection, Id, Mutation, MutationError, Transaction};
 use serde::{Deserialize, Serialize};
 
@@ -57,41 +55,8 @@ pub fn list(conn: &mut Connection) -> petros::Result<Vec<Item>> {
 #[serde(transparent)]
 pub struct Payload(pub Value);
 
-/// The database, handed to `apply` and nothing else.
-struct Sqlite<'a>(&'a mut Connection);
-
-impl crate::domain::Host for Sqlite<'_> {
-    fn query_int(&mut self, sql: &str) -> i64 {
-        #[derive(QueryableByName)]
-        struct Row {
-            #[diesel(sql_type = BigInt)]
-            v: i64,
-        }
-        sql_query(format!("SELECT ({sql}) AS v"))
-            .load::<Row>(&mut *self.0)
-            .ok()
-            .and_then(|rows| rows.first().map(|r| r.v))
-            .unwrap_or(0)
-    }
-
-    fn query_exists(&mut self, sql: &str) -> bool {
-        #[derive(QueryableByName)]
-        struct Row {
-            #[diesel(sql_type = BigInt)]
-            v: i64,
-        }
-        sql_query(format!("SELECT EXISTS({sql}) AS v"))
-            .load::<Row>(&mut *self.0)
-            .ok()
-            .and_then(|rows| rows.first().map(|r| r.v != 0))
-            .unwrap_or(false)
-    }
-
-    fn exec(&mut self, sql: &str) {
-        let _ = self.0.batch_execute(sql);
-    }
-}
-
+/// The `petros::App`: this schema, and mutations that write through a checked
+/// store.
 impl Mutation for Payload {
     fn fill_auto(&mut self, ctx: &mut AutoCtx) {
         let uuid = ctx.uuid().as_uuid().as_bytes().to_vec();
@@ -99,7 +64,7 @@ impl Mutation for Payload {
     }
 
     fn apply(&self, tx: &mut Transaction, actor: &ActorId) -> Result<(), MutationError> {
-        crate::domain::apply(&mut Sqlite(tx.conn()), &self.0, actor.as_str())
+        crate::domain::apply(&mut SqliteStore(tx.conn()), &self.0, actor.as_str())
             .map_err(MutationError::rejected)
     }
 }
@@ -111,19 +76,16 @@ impl App for TodoApp {
     type Mutation = Payload;
 
     fn migrate(conn: &mut Connection) -> petros::Result<()> {
-        conn.batch_execute(
-            "CREATE TABLE IF NOT EXISTS todo (
-                 id         BLOB PRIMARY KEY NOT NULL,
-                 text       TEXT NOT NULL,
-                 done       BOOL NOT NULL DEFAULT 0,
-                 pos        BIGINT NOT NULL,
-                 created_ms BIGINT NOT NULL,
-                 actor      TEXT NOT NULL
-             );",
-        )?;
+        conn.batch_execute(SCHEMA)?;
         Ok(())
     }
 }
+
+/// The one description of this app's tables.
+///
+/// `migrate` runs it, and `petros-sql` prepares every statement in the domain
+/// against it at build time. There is no second copy to drift from.
+pub const SCHEMA: &str = include_str!("../schema.sql");
 
 // ------------------------------------------------------------------ authoring
 
