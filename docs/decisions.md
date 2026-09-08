@@ -72,6 +72,34 @@ This started life as a naive implementation that dropped the app's tables and
 replayed the whole log on every change. The savepoint version replaced it with
 the same tests still green, which is the payoff for writing the tests first.
 
+## A tap is one commit, because it used to be two
+
+`mutate` probes the intent against the optimistic view and then records it
+durably. Those were two transactions, and it was not obvious: `RELEASE` on the
+outermost savepoint *is* a commit, so the probe committed on its own when no
+optimistic savepoint was held, `discard_optimistic` committed when one was, and
+`put_pending` then committed again as its own implicit transaction.
+
+At `synchronous = FULL` — SQLite's default, which Exo never overrode — each of
+those fsyncs the WAL, and an fsync is the largest number in the system. Traced
+with `strace`: two `fsync` calls per tap, against 4.0ms for a single fsync of a
+4KiB overwrite on this machine, which is the whole 8.0ms a tap measured.
+
+So the probe and the insert now share one transaction. `probe` nests inside the
+pending savepoint when one is held and opens its own when not; rolling back to
+`pending` empties the transaction of everything except the insert about to
+happen, and one `COMMIT` closes it. One fsync, verified by the same trace, and
+a tap goes from 8.0ms to 4.1ms with no change in what is durable — the probe's
+commit was carrying nothing.
+
+What remains is genuinely one fsync per durable local write, which is the floor
+for surviving power loss. Going below it means changing the *policy* rather
+than the mechanism: `synchronous = NORMAL` risks losing commits since the last
+checkpoint to a power cut or kernel panic, but never to an application crash
+and never to corruption — and while a peer is connected and being acked, the
+server's log is already the durable copy, so a lost local intent is refetched
+by the next `Hello`.
+
 ## Pending intents are committed; the optimistic view is not
 
 The dance above has one wrinkle the sketch does not: a client's pending mutations
