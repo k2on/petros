@@ -284,7 +284,7 @@ fn rows_of(conn: &mut Connection) -> Vec<Row> {
 
 // The declaration the TypeScript types are generated from. Included rather than
 // imported, because `todo-wasm` is a cdylib for another architecture.
-include!("../../todo-wasm/src/verbs.rs");
+include!("../../todo/src/verbs.rs");
 
 /// The declaration is only worth generating types from if it cannot lie.
 ///

@@ -52,9 +52,12 @@ crates/exo/src/          the engine
   transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
 crates/exo/tests/        19 tests; common/sim.rs is a seeded in-process network
 crates/exo/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
-crates/todo-wasm/        the domain — the ONLY apply, compiled to wasm
-crates/todo/             its read model: the table, the row, `list`
-crates/mutators/         the wasm host every peer links; `apply` lives here
+crates/todo/             the domain — the ONLY apply
+  domain.rs              apply + fill_auto, generic over a 3-method `Host`
+  storage.rs             that Host over Diesel; what every native peer links
+  verbs.rs               the verb list as plain data; `include!`d by codegen
+crates/todo-wasm/        the same domain, Host over three wasm imports
+crates/mutators/         the wasmi host — the phone only; conformance test here
 crates/ffi/              the client over UniFFI, for the Expo app
 clients/expo/            the Expo app; src/ is UI and a socket, nothing else
   modules/exo-todo/      the turbo module — generated, gitignored, not authored
@@ -95,13 +98,19 @@ come back — that is the rebase, visible.
   renderer bug and is not one.
 - A build that compiles is not evidence anything works. `SystemTime::now()`
   panics on wasm and only surfaced when a mutation actually ran in a browser.
+- **`default-features = false` has to be said in the workspace entry too.** A
+  member cannot subtract what `[workspace.dependencies]` asked for, and nothing
+  warns. It put Diesel and SQLite in the wasm graph for weeks.
 
 ## The Expo client, in one paragraph
 
-Never write domain logic in TypeScript. `apply` is in `crates/todo-wasm`,
-compiled to a wasm module that every peer interprets through `crates/mutators` —
-the server included, which is what makes a rejection a verdict rather than one
-machine's opinion. `crates/ffi` exports the client with `#[uniffi::export]`
+Never write domain logic in TypeScript. `apply` is in `crates/todo/domain.rs`,
+generic over a three-method `Host`. Native peers — server, TUIs, iced — link it
+through the Diesel host and pay nothing; the phone runs the same source compiled
+to wasm and interpreted by `crates/mutators`, because that is the only peer where
+a rebuild costs four minutes instead of four seconds.
+`crates/mutators/tests/conformance.rs` runs every verb through both builds and
+compares rows and refusals, so the two cannot drift apart unnoticed. `crates/ffi` exports the client with `#[uniffi::export]`
 (there is no UDL file; the Rust is the interface definition) and
 `uniffi-bindgen-react-native` generates `clients/expo/modules/exo-todo/`, which
 is gitignored so it cannot be hand-edited.

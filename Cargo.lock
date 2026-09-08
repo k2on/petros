@@ -1164,7 +1164,6 @@ dependencies = [
  "console_error_panic_hook",
  "crossterm",
  "diesel",
- "exo-mutators",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "iced",
@@ -1193,6 +1192,7 @@ dependencies = [
  "exo",
  "serde",
  "serde_json",
+ "todo",
  "wasmi",
 ]
 
@@ -3874,9 +3874,11 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 name = "todo"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "diesel",
  "exo",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3884,7 +3886,7 @@ name = "todo-wasm"
 version = "0.1.0"
 dependencies = [
  "ciborium",
- "serde",
+ "todo",
 ]
 
 [[package]]

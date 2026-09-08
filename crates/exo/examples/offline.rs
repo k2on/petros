@@ -13,14 +13,12 @@ mod tui;
 use std::time::Duration;
 
 use exo::{AutoCtx, Client};
-use exo_mutators::{self as mutators, WasmTodo};
-use todo::list;
+use todo::{self as mutators, list, TodoApp};
 use tui::{action_for, Action, Status, Tui, Ui};
 
 fn main() -> exo::Result<()> {
     let path = std::env::temp_dir().join("exo-offline-demo.db");
-    mutators::load_bundled().map_err(exo::Error::Protocol)?;
-    let mut client = Client::<WasmTodo>::open(exo::open_path(&path)?, "alice", AutoCtx::system())?;
+    let mut client = Client::<TodoApp>::open(exo::open_path(&path)?, "alice", AutoCtx::system())?;
 
     let mut ui = Ui::new();
     let restored = list(client.conn())?.len();

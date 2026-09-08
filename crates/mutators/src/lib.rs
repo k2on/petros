@@ -16,7 +16,7 @@ use std::sync::RwLock;
 pub mod app;
 pub mod wasm;
 
-pub use app::{add, from_json, from_value, mark_all_done, remove, set_done, Payload, WasmTodo};
+pub use app::{from_json, Payload, WasmTodo};
 pub use wasm::Mutators;
 
 /// The module every peer in this process runs.

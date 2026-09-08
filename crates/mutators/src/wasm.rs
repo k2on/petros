@@ -186,9 +186,16 @@ impl Mutators {
     /// originating client. The host supplies the values; the module decides
     /// where they belong, so that knowledge stays in one place.
     pub fn fill_auto(&self, payload: &[u8], auto: &mut AutoCtx) -> Result<Vec<u8>, String> {
-        let uuid = auto.uuid();
+        let uuid = auto.uuid().as_uuid().as_bytes().to_vec();
         let now = auto.now_ms();
-        let uuid = uuid.as_uuid().as_bytes().to_vec();
+        self.fill_auto_with(payload, &uuid, now)
+    }
+
+    /// As [`fill_auto`](Self::fill_auto), with the two non-deterministic values
+    /// supplied rather than drawn. What a conformance test needs: the seed is
+    /// the input, not the thing under comparison.
+    pub fn fill_auto_with(&self, payload: &[u8], uuid: &[u8], now: i64) -> Result<Vec<u8>, String> {
+        let uuid = uuid.to_vec();
         self.run(None, |store, instance| {
             let p = write_bytes(store, payload)?;
             let u = write_bytes(store, &uuid)?;

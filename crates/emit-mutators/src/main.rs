@@ -14,9 +14,9 @@ use std::io::Write;
 
 // The verb declaration, compiled in rather than parsed. `include!` keeps this
 // crate free of dependencies — which is why it is its own crate — while making
-// `crates/todo-wasm/src/verbs.rs` the single place a verb is named. Change it
-// there and both the module and these types move together.
-include!("../../todo-wasm/src/verbs.rs");
+// `crates/todo/src/verbs.rs` the single place a verb is named. Change it there
+// and the native peers, the wasm module and these types all move together.
+include!("../../todo/src/verbs.rs");
 
 fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);

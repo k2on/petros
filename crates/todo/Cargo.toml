@@ -1,12 +1,21 @@
 [package]
 name = "todo"
 version = "0.1.0"
-description = "The demo to-do domain: one definition of the mutations and the queries, shared by the Rust examples and the FFI bindings."
+description = "The demo to-do domain: apply and fill_auto once, plus the read model and the native host."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# The read model, the Diesel host and the `exo::App` — everything that needs a
+# real SQLite. The wasm build turns this off: it has no SQLite of its own, only
+# a channel to the host's, so it wants `domain` and `verbs` and nothing else.
+default = ["storage"]
+storage = ["dep:diesel", "dep:exo", "dep:serde", "dep:serde_json"]
+
 [dependencies]
-diesel.workspace = true
-exo.workspace = true
-serde.workspace = true
+ciborium.workspace = true
+diesel = { workspace = true, optional = true }
+exo = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }

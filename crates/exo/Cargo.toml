@@ -54,13 +54,12 @@ web-sys = { version = "0.3", optional = true, features = [
 [dev-dependencies]
 # The engine has no opinion about windows; the iced example does.
 iced.workspace = true
-# The wasm host. Every example runs the same module the server and the phone
-# do, which is what keeps `apply` singular.
-exo-mutators.workspace = true
-# The demo domain's read model. A dev-dependency that depends back on this
+# The domain. These are ordinary Rust programs, so they call `apply` directly
+# — no interpreter, no module to load. The phone runs the same source compiled
+# to wasm; `crates/todo/tests/conformance.rs` holds the two builds together. A dev-dependency that depends back on this
 # crate is a cycle cargo allows and resolves — and it is what keeps the
 # examples, the server and the generated FFI bindings running the same `apply`.
-todo.workspace = true
+todo = { workspace = true, features = ["storage"] }
 
 # `cargo build --example` compiles every dev-dependency, so the terminal
 # examples' and the test suite's dependencies would be dragged into a browser

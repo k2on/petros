@@ -17,10 +17,9 @@
 use std::time::Duration;
 
 use exo::{AutoCtx, Client, Id};
-use exo_mutators::{self as mutators, WasmTodo};
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Subscription, Task};
-use todo::{list, Item};
+use todo::{self as mutators, list, Item, TodoApp};
 
 #[cfg(target_arch = "wasm32")]
 use exo::transport::web::Link;
@@ -91,8 +90,8 @@ enum Message {
 }
 
 struct App {
-    client: Client<WasmTodo>,
-    link: Option<Link<mutators::Payload>>,
+    client: Client<TodoApp>,
+    link: Option<Link<todo::Payload>>,
     server: String,
     user: String,
     /// The materialised view and the pending count, refreshed after anything
@@ -110,8 +109,7 @@ struct App {
 impl App {
     fn boot() -> Self {
         let (user, server) = config();
-        mutators::load_bundled().expect("load the mutator module");
-        let client = Client::<WasmTodo>::open(
+        let client = Client::<TodoApp>::open(
             open(&user).expect("open the database"),
             user.clone(),
             AutoCtx::system(),

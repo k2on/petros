@@ -1,47 +1,25 @@
-//! The demo to-do list's *read* model: the table, the row, and how to order it.
+//! The demo to-do list: the table, the rows, and the mutations that produce
+//! them.
 //!
-//! The write model is not here. `apply` — the one thing every replica must
-//! agree on — lives in `crates/todo-wasm` and is compiled to a wasm module that
-//! the server, the terminal peers, the iced window and the phone all interpret.
-//! One artifact, so there is nothing to keep in step.
+//! [`domain`] holds `apply` and `fill_auto` and knows nothing about where it
+//! runs. This module gives it a [`Host`](domain::Host) backed by Diesel, which
+//! is what the server, the terminal peers and the iced window use — they are
+//! ordinary Rust programs and a mutation is an ordinary function call.
 //!
-//! Reads stay in Rust because nothing depends on them being identical
-//! everywhere: a query is a way of looking at state, not a way of producing it.
-//! Diesel's `check_for_backend` still holds this side to the schema, which is
-//! the check the module's hand-written SQL gives up.
+//! The phone is the exception. It loads the same domain compiled to wasm
+//! (`crates/todo-wasm`) so a new mutation reaches it over Metro without a
+//! native build. Two builds of one source, held to that by
+//! `tests/conformance.rs`, which runs the same mutations through both and
+//! compares the rows.
+//!
+//! The `storage` feature is what the wasm build turns off: it has no SQLite of
+//! its own, only a channel to the host's, so it wants the domain and none of
+//! this.
 
-use diesel::prelude::*;
-use diesel::sqlite::Sqlite;
-use exo::{Connection, Id};
+pub mod domain;
+pub mod verbs;
 
-diesel::table! {
-    todo (id) {
-        id -> Binary,
-        text -> Text,
-        done -> Bool,
-        pos -> BigInt,
-        created_ms -> BigInt,
-        actor -> Text,
-    }
-}
-
-/// One row of the materialised view. Read-only: rows are produced by the
-/// module's `apply`, never by this crate.
-#[derive(Debug, Clone, Queryable, Selectable)]
-#[diesel(table_name = todo, check_for_backend(Sqlite))]
-pub struct Item {
-    pub id: Id,
-    pub text: String,
-    pub done: bool,
-    pub pos: i64,
-    pub created_ms: i64,
-    pub actor: String,
-}
-
-/// Always ordered explicitly.
-pub fn list(conn: &mut Connection) -> exo::Result<Vec<Item>> {
-    Ok(todo::table
-        .select(Item::as_select())
-        .order((todo::pos.asc(), todo::id.asc()))
-        .load(conn)?)
-}
+#[cfg(feature = "storage")]
+mod storage;
+#[cfg(feature = "storage")]
+pub use storage::*;

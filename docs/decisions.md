@@ -482,7 +482,7 @@ would put `wasm32-unknown-unknown` and `aarch64-linux-android` in different
 places for no reason. The Android shell adds `cargo-ndk`, not a second
 toolchain.
 
-## `apply` is a wasm module, not a linked symbol
+## `apply` is a linked symbol natively and a wasm module on the phone
 
 The Expo client's feedback loop was measured before it was redesigned, and the
 measurement moved the problem. Editing a mutation and having TypeScript know
@@ -491,15 +491,33 @@ having the *phone* run it took about four minutes, because the domain was
 compiled into the native binary and a native binary has to be rebuilt for two
 ABIs, relinked and reinstalled. UniFFI collapsed both loops into the slower one.
 
-So `crates/todo-wasm` compiles the domain to `wasm32-unknown-unknown`, and
-`crates/mutators` interprets it with `wasmi` — a pure interpreter, no JIT, which
-is what makes it legal on iOS and lets one artifact run on a server, in a TUI,
-in a window and on a phone. `crates/todo` keeps only the read model.
-
-The loop is now:
+A wasm module fixes that, and for a while every peer ran one — server included,
+which is what makes a rejection a verdict rather than one machine's opinion.
+Measuring the result showed what it cost the peers that never had the problem:
 
 ```
-save a .rs   ->  0.46s   cargo, wasm32, `mutators` profile
+one tap, by pending depth (ms, synchronous = NORMAL)
+    pending      via wasmi      linked
+          0          5.9         0.2
+         10         19.6         0.6
+         50        118.5         1.4
+```
+
+The slope is the finding, not the intercept. A tap replays every pending
+mutation, so an interpreter instantiation — each on its own 64MB thread — is
+paid once per pending entry, and ~2.3ms per entry becomes 118ms at a depth an
+offline peer reaches easily. A server rebuild was never the thing that hurt.
+
+So the module is scoped to the caller that needs it. `crates/todo` holds the
+domain generic over a three-method `Host` trait; `crates/todo/storage.rs`
+implements that trait over Diesel for everything that links Rust, and
+`crates/todo-wasm` implements it over three imported functions for the phone.
+One `apply`, two hosts, and the boundary is a trait rather than a copy.
+
+The phone's loop is unchanged:
+
+```
+save a .rs   ->  0.48s   cargo, wasm32, `mutators` profile
              ->  ~0.0s   rewrite mutators.gen.ts (a base64 string)
              ->  ~0.2s   Metro fast refresh pushes 150KB
              ->  1.4ms   wasmi compiles and verifies it
@@ -518,20 +536,50 @@ loop measured in single seconds. `opt-level = "z"` with `codegen-units = 16`
 was both the smallest and the fastest of the combinations tried; the table is
 in `Cargo.toml` next to the profile.
 
-## Determinism became a property instead of a rule
+## The module cannot break determinism; the linked build only promises not to
 
 The invariant at the top of `CLAUDE.md` asks that `apply` never read a clock,
-never call a random number generator, never touch the network or the disk. In a
-module it *cannot*: the host imports `query_int`, `query_exists` and `exec`, and
-nothing else exists to misuse. `fill_auto` runs with no database at all, so it
-cannot even read state.
+never call a random number generator, never touch the network or the disk. In
+the module it *cannot*: the host imports `query_int`, `query_exists` and `exec`,
+and nothing else exists to misuse. `fill_auto` runs with no database at all, so
+it cannot even read state.
 
-What that cost is Diesel. The module has no SQLite, only a channel to the
-host's, so its SQL is written out and its values are inlined as literals rather
-than bound — which gives up `check_for_backend`'s compile-time check that a
-model still matches its table. The tests have to carry that instead.
+The linked build has the whole standard library in reach and keeps the rule by
+convention. That asymmetry is not a reason to link everything through wasm — it
+is a reason the `Host` trait is the only way `domain.rs` touches the world, so
+the surface where a clock could sneak in is three methods wide either way, and
+the conformance test below runs the constrained build against the unconstrained
+one.
 
-## A mutation gets its own stack, and the stack bounds the mutation
+What the module costs is Diesel. It has no SQLite, only a channel to the host's,
+so its SQL is written out and its values are inlined as literals rather than
+bound — which gives up `check_for_backend`'s compile-time check that a model
+still matches its table. Since `domain.rs` is shared, the linked build gives
+that up too; the tests carry it instead.
+
+
+## Two hosts is two chances to diverge, so a test runs both
+
+The whole argument against a TypeScript reimplementation is that two `apply`s
+are two definitions of what a mutation means. Compiling one `apply` twice is a
+much weaker version of the same risk — the source is shared, but the toolchains,
+the integer widths and the SQL round-trip are not — and a drift would be frozen
+into the log by whichever build authored the entry.
+
+`crates/mutators/tests/conformance.rs` runs every declared verb through both
+builds against real SQLite and compares the rows and the refusals.
+
+The first version of it passed while being vacuous. It filled each payload once,
+natively, then applied that filled payload both ways — so it covered `apply` and
+never touched `fill_auto`, which is the half where the non-determinism actually
+lives. Changing the wasm build's generated text and watching the test stay green
+is what surfaced it. `fill_auto_agrees_between_the_two_builds` uses
+`Mutators::fill_auto_with`, which takes the seed as input, so the two builds are
+given the same entropy and compared on what they do with it. Three deliberate
+one-sided changes — a different `pos`, a different generated text, a refusal
+that stops refusing — are each caught.
+
+## A wasm mutation gets its own stack, and the stack bounds the mutation
 
 A host import runs *inside* wasmi's execution loop, so its frames sit on top of
 the interpreter's, and this one then calls Diesel — many layers of deeply nested
@@ -553,9 +601,25 @@ of which only touched pages are resident. `exec` also stopped going through
 `sql_query(..).execute(..)` in favour of `batch_execute`, which is a fraction of
 the frame and wanted no row count anyway.
 
-The thread costs about 2.3ms of the 3.1ms a mutation takes. Worth removing
-eventually — a persistent worker rather than a thread per call — and it is the
-other half of what makes a deep replay slow.
+None of this applies to a linked peer any more, which is most of why the linked
+path is 30x faster. The thread costs about 2.3ms of the 3.1ms a wasm mutation
+takes; removing it — a persistent worker rather than a thread per call — is now
+a phone-only optimisation.
+
+## `default-features = false` needs saying twice
+
+`crates/todo-wasm` declared `todo = { default-features = false }` and got the
+default features anyway, silently, because the *workspace* dependency did not
+say it too: cargo unions the workspace entry's features with the member's, and
+the member's `default-features = false` cannot subtract what the workspace
+entry asked for. Diesel and `libsqlite3-sys` were in a `wasm32-unknown-unknown`
+graph that has no C compiler for them, held up only by the `storage` feature
+never being reachable from the module's own code.
+
+It is worth knowing because nothing reports it. The build succeeded, the module
+worked, and the only visible symptom was a dependency graph with nine entries
+in it that could not possibly be linked. The workspace entry now carries the
+flag and each consumer opts in with `features = ["storage"]`.
 
 ## The mutation type is the payload, not a Rust enum
 

@@ -21,7 +21,11 @@ rust-version = "1.88"
 ciborium = "0.2"
 exo = { path = "crates/exo" }
 exo-mutators = { path = "crates/mutators" }
-todo = { path = "crates/todo" }
+# `default-features = false` here so `crates/todo-wasm` can actually turn the
+# storage half off — a member's `default-features = false` is ignored unless the
+# workspace dependency says so too, silently, which put Diesel and SQLite in a
+# wasm build that has neither.
+todo = { path = "crates/todo", default-features = false }
 # `fira-sans` embeds a default font. Without it iced asks the system for
 # one, which works on a desktop and gets you nothing at all in a browser:
 # wasm has no font access, so every glyph silently fails to draw.

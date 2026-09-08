@@ -12,14 +12,17 @@ ciborium.workspace = true
 # paths and need to find the crate at that name.
 diesel.workspace = true
 exo.workspace = true
+# The domain, for authoring payloads. `apply` here comes from the module, but
+# building a mutation is the same code every peer uses.
+todo = { workspace = true, features = ["storage"] }
 serde.workspace = true
 # Only for the generic entry point, which takes its arguments as JSON because
 # that is what a foreign caller can write without a CBOR encoder.
-serde_json.workspace = true
 # A pure-Rust wasm interpreter. No JIT, which is what makes it legal on iOS and
 # what lets one module run on a server, in a TUI and on a phone.
 wasmi = "2"
 
 [dev-dependencies]
+serde_json.workspace = true
 # The tests run the real module against a real database.
 diesel = { workspace = true, features = ["sqlite"] }

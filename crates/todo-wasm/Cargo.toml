@@ -1,7 +1,7 @@
 [package]
 name = "todo-wasm"
 version = "0.1.0"
-description = "The to-do domain compiled to wasm: the mutations and queries, hot-swappable at runtime."
+description = "The to-do domain compiled to wasm: the same apply the native peers link, as a file the phone can reload."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -11,4 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ciborium.workspace = true
-serde.workspace = true
+# `default-features = false` drops the read model, Diesel and `exo`: there is no
+# SQLite in here, only a channel to the host's. What is left is `apply`,
+# `fill_auto` and the verb declaration — which is the whole point.
+todo = { workspace = true, default-features = false }
