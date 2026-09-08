@@ -24,7 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod store;
-pub use store::{Backend, Cell, Column, ColumnTy, Store, Table, TableDef, Value, Write};
+pub use store::{Cell, ColumnTy, Store, Value};
 
 /// Every mutation an app understands.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

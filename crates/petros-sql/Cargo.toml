@@ -15,7 +15,10 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+# `column_decltype` is the feature that makes this possible at all: it exposes
+# what SQLite declares each result column to be, which is where the field types
+# in `query!` come from.
+rusqlite = { version = "0.32", features = ["bundled", "column_decltype"] }
 syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]

@@ -120,9 +120,231 @@ pub fn exec(input: TokenStream) -> TokenStream {
     });
     quote! {{
         const _: &str = ::core::include_str!(#schema_str);
-        ::petros_schema::Store::exec(&mut #store, #sql, &[#(#values),*])
+        // A method call rather than `Store::exec(&mut store, ..)`, so this
+        // works whether the caller holds a store or a `&mut` to one.
+        #[allow(unused_imports)]
+        use ::petros_schema::Store as _;
+        #store.exec(#sql, &[#(#values),*])
     }}
     .into()
+}
+
+/// Read rows, as a `Vec` of an anonymous struct with a field per column.
+///
+/// Field types come from SQLite: at build time the statement is prepared and
+/// each column's declared type is read back. An expression has no declared type
+/// — `COUNT(*)` is not a column — so those need naming, which is the same
+/// annotation sqlx asks for and for the same reason:
+///
+/// ```ignore
+/// let rows = petros_sql::query!(
+///     store,
+///     "SELECT id, title, COALESCE(MAX(pos), 0) AS \"last: Int\" FROM song WHERE artist = ?",
+///     artist
+/// );
+/// for row in rows { row.id; row.title; row.last; }
+/// ```
+///
+/// Add `?` — `"last?: Int"` — for a column that can be null, and the field is
+/// an `Option`.
+#[proc_macro]
+pub fn query(input: TokenStream) -> TokenStream {
+    rows(input, false)
+}
+
+/// As [`query!`], for a statement that returns at most one row.
+#[proc_macro]
+pub fn query_one(input: TokenStream) -> TokenStream {
+    rows(input, true)
+}
+
+fn rows(input: TokenStream, single: bool) -> TokenStream {
+    let Stmt { store, sql, args } = syn::parse_macro_input!(input as Stmt);
+    let text = sql.value();
+
+    let schema = match schema_path() {
+        Ok(path) => path,
+        Err(message) => return error(&sql, &message),
+    };
+    let ddl = match std::fs::read_to_string(&schema) {
+        Ok(ddl) => ddl,
+        Err(e) => {
+            return error(
+                &sql,
+                &format!("cannot read the schema at {}: {e}", schema.display()),
+            )
+        }
+    };
+
+    let columns = match describe(&ddl, &text, args.len()) {
+        Ok(columns) => columns,
+        Err(message) => return error(&sql, &message),
+    };
+
+    let schema_str = schema.to_string_lossy().into_owned();
+    let values = args
+        .iter()
+        .map(|a| quote! { ::petros_schema::Cell::to_value(&(#a)) });
+    let tys = columns.iter().map(|c| c.ty.token());
+    let fields = columns.iter().map(|c| {
+        let name = syn::Ident::new(&c.name, sql.span());
+        let rust = c.ty.rust();
+        if c.nullable {
+            quote! { pub #name: ::core::option::Option<#rust> }
+        } else {
+            quote! { pub #name: #rust }
+        }
+    });
+    let reads = columns.iter().enumerate().map(|(i, c)| {
+        let name = syn::Ident::new(&c.name, sql.span());
+        let rust = c.ty.rust();
+        if c.nullable {
+            quote! {
+                #name: match row.get(#i) {
+                    ::core::option::Option::Some(::petros_schema::Value::Null)
+                    | ::core::option::Option::None => ::core::option::Option::None,
+                    ::core::option::Option::Some(v) =>
+                        <#rust as ::petros_schema::Cell>::from_value(v),
+                }
+            }
+        } else {
+            quote! {
+                #name: row
+                    .get(#i)
+                    .and_then(<#rust as ::petros_schema::Cell>::from_value)
+                    .unwrap_or_default()
+            }
+        }
+    });
+    let take = if single {
+        quote! { __rows.into_iter().next() }
+    } else {
+        quote! { __rows }
+    };
+
+    quote! {{
+        const _: &str = ::core::include_str!(#schema_str);
+        #[derive(Debug, Clone, PartialEq)]
+        struct __Row { #(#fields),* }
+        #[allow(unused_imports)]
+        use ::petros_schema::Store as _;
+        let __raw = #store.query(#sql, &[#(#values),*], &[#(#tys),*]);
+        let __rows: ::std::vec::Vec<__Row> = __raw
+            .iter()
+            .map(|row| __Row { #(#reads),* })
+            .collect();
+        #take
+    }}
+    .into()
+}
+
+/// One result column, as the checker worked it out.
+struct Col {
+    name: String,
+    ty: Kind,
+    nullable: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Blob,
+    Text,
+    Int,
+    Bool,
+}
+
+impl Kind {
+    fn parse(name: &str) -> Option<Kind> {
+        match name.trim().to_ascii_uppercase().as_str() {
+            "BLOB" => Some(Kind::Blob),
+            "TEXT" => Some(Kind::Text),
+            "INT" | "INTEGER" | "BIGINT" => Some(Kind::Int),
+            "BOOL" | "BOOLEAN" => Some(Kind::Bool),
+            _ => None,
+        }
+    }
+    fn token(self) -> proc_macro2::TokenStream {
+        match self {
+            Kind::Blob => quote! { ::petros_schema::ColumnTy::Blob },
+            Kind::Text => quote! { ::petros_schema::ColumnTy::Text },
+            Kind::Int => quote! { ::petros_schema::ColumnTy::Int },
+            Kind::Bool => quote! { ::petros_schema::ColumnTy::Bool },
+        }
+    }
+    fn rust(self) -> proc_macro2::TokenStream {
+        match self {
+            Kind::Blob => quote! { ::std::vec::Vec<u8> },
+            Kind::Text => quote! { ::std::string::String },
+            Kind::Int => quote! { i64 },
+            Kind::Bool => quote! { bool },
+        }
+    }
+}
+
+/// Prepare the statement and ask SQLite what comes back.
+fn describe(ddl: &str, sql: &str, args: usize) -> Result<Vec<Col>, String> {
+    let conn = rusqlite::Connection::open_in_memory()
+        .map_err(|e| format!("could not open a database to check against: {e}"))?;
+    conn.execute_batch(ddl)
+        .map_err(|e| format!("the schema does not apply: {e}"))?;
+    let stmt = conn.prepare(sql).map_err(|e| format!("{e}"))?;
+
+    let wanted = stmt.parameter_count();
+    if wanted != args {
+        return Err(format!(
+            "this statement has {wanted} placeholder{} and was given {args} value{}",
+            if wanted == 1 { "" } else { "s" },
+            if args == 1 { "" } else { "s" },
+        ));
+    }
+    if stmt.column_count() == 0 {
+        return Err("this statement returns no columns; `exec!` is for writes".into());
+    }
+
+    let mut out = Vec::new();
+    for column in stmt.columns() {
+        let raw = column.name().to_string();
+        // `AS "last: Int"` or `AS "last?: Int"` — the annotation, when SQLite
+        // has nothing to declare.
+        let (name, annotated) = match raw.split_once(':') {
+            Some((left, right)) => (left.trim().to_string(), Kind::parse(right)),
+            None => (raw.clone(), None),
+        };
+        let nullable = name.ends_with('?');
+        let name = name.trim_end_matches('?').to_string();
+
+        let ty = match annotated {
+            Some(kind) => kind,
+            None => match column.decl_type().and_then(Kind::parse) {
+                Some(kind) => kind,
+                // SQLite declares nothing for an expression, and guessing here
+                // would be a type error that only shows up as a wrong value.
+                None => {
+                    // The column's own name is only a usable suggestion when it
+                    // is already an identifier; `COUNT(*)` is not.
+                    let suggestion = if !name.is_empty()
+                        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        name.clone()
+                    } else {
+                        "value".to_string()
+                    };
+                    return Err(format!(
+                        "column `{raw}` is an expression, so SQLite has no declared type for it — \
+                         name it, as in `AS \"{suggestion}: Int\"` \
+                         (Blob, Text, Int or Bool; add `?` for a column that can be null)"
+                    ));
+                }
+            },
+        };
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') || name.is_empty() {
+            return Err(format!(
+                "column `{raw}` is not a usable field name — give it one with `AS`"
+            ));
+        }
+        out.push(Col { name, ty, nullable });
+    }
+    Ok(out)
 }
 
 fn schema_path() -> Result<PathBuf, String> {
