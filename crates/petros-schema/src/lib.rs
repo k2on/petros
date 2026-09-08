@@ -23,6 +23,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod store;
+pub use store::{Backend, Cell, Column, ColumnTy, Store, Table, TableDef, Value, Write};
+
 /// Every mutation an app understands.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
