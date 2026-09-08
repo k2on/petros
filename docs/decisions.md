@@ -729,6 +729,40 @@ guest forgets every buffer it hands out, which is sound only because the host
 gives each call a fresh `Store` and drops the whole linear memory with it.
 `ABI_VERSION` is the thing that has to move if a host ever reuses an instance.
 
+## The web server gets a handler, not a server
+
+`petros::Server` owns no socket, no runtime and no thread, so putting it behind
+HTTP is an adapter rather than a port. `petros-axum` is that adapter and it is
+deliberately the smaller half: the app keeps its own `Router`, its own path and
+its own middleware, and mounts `get(sync::<App>)` wherever it likes.
+
+That shape is not only taste. Nothing in Petros authenticates — a client asserts
+its own actor inside each entry and the engine takes it at face value — so
+anything that matters has to be enforced above. A handler you mount sits behind
+whatever layer you put in front of it; a server you start does not.
+
+The routing runs inline under a `std::sync::Mutex` rather than on a blocking
+pool, with nothing awaited while the lock is held. That is a measured decision
+and not a hopeful one: a native mutation is about 0.03ms, so the executor thread
+is held for tens of microseconds. If a domain ever does real work per mutation
+this becomes a `spawn_blocking`.
+
+## A test that passed with the feature deliberately broken
+
+The first version of `two_peers_on_an_axum_server_see_each_other` connected two
+peers, had one mutate, and waited for the other to see it. It passed with
+fan-out restricted to the sending connection — because a peer that is still
+catching up learns about entries by *asking*: its `Hello` is answered with a
+`Batch`, whether or not the server ever pushes to anyone.
+
+So the test now settles both peers first, asserts there is nothing to catch up
+on, and only then mutates — after which the second peer sends nothing at all, so
+anything reaching it is a push. Falsified the same way, it fails.
+
+Worth stating as a rule, because this is the second time in this codebase a
+test has been vacuous in exactly this shape: a test of a *push* has to establish
+that a *pull* could not have produced the same result.
+
 ## Android is built by EAS
 
 `.eas/build/rust.yml` installs Rust from `rust-toolchain.toml` — still the one

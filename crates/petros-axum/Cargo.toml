@@ -1,0 +1,18 @@
+[package]
+name = "petros-axum"
+version = "0.1.0"
+description = "Mount a Petros server into an axum Router: one handler, and the app keeps its own routes and auth."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+petros.workspace = true
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+petros = { workspace = true, features = ["ws"] }
+todo = { workspace = true, features = ["storage"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/petros",
+    "crates/petros-axum",
     "crates/petros-schema",
     "crates/petros-wasm-guest",
     "crates/todo",

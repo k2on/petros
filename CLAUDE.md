@@ -57,6 +57,7 @@ crates/petros-schema/    the app contract: the schema, and the `Host` a
 crates/petros-wasm-guest/ `export!` — an app's wasm crate is one line
 crates/petros-wasm-host/ the wasmi side; the phone only. Conformance test here
 crates/petros-codegen/   reads a module's schema section, writes TypeScript
+crates/petros-axum/      one handler; the app keeps its routes and its auth
 crates/todo/             the domain — the ONLY apply
   domain.rs              apply + fill_auto, generic over a 3-method `Host`
   storage.rs             that Host over Diesel; what every native peer links
