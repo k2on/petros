@@ -40,6 +40,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
+use std::cell::RefCell;
 use std::path::PathBuf;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
@@ -283,68 +284,92 @@ impl Kind {
 
 /// Prepare the statement and ask SQLite what comes back.
 fn describe(ddl: &str, sql: &str, args: usize) -> Result<Vec<Col>, String> {
-    let conn = rusqlite::Connection::open_in_memory()
-        .map_err(|e| format!("could not open a database to check against: {e}"))?;
-    conn.execute_batch(ddl)
-        .map_err(|e| format!("the schema does not apply: {e}"))?;
-    let stmt = conn.prepare(sql).map_err(|e| format!("{e}"))?;
+    with_schema(ddl, |conn| {
+        let stmt = conn.prepare(sql).map_err(|e| format!("{e}"))?;
 
-    let wanted = stmt.parameter_count();
-    if wanted != args {
-        return Err(format!(
-            "this statement has {wanted} placeholder{} and was given {args} value{}",
-            if wanted == 1 { "" } else { "s" },
-            if args == 1 { "" } else { "s" },
-        ));
-    }
-    if stmt.column_count() == 0 {
-        return Err("this statement returns no columns; `exec!` is for writes".into());
-    }
+        placeholders(&stmt, args)?;
+        if stmt.column_count() == 0 {
+            return Err("this statement returns no columns; `exec!` is for writes".into());
+        }
 
-    let mut out = Vec::new();
-    for column in stmt.columns() {
-        let raw = column.name().to_string();
-        // `AS "last: Int"` or `AS "last?: Int"` — the annotation, when SQLite
-        // has nothing to declare.
-        let (name, annotated) = match raw.split_once(':') {
-            Some((left, right)) => (left.trim().to_string(), Kind::parse(right)),
-            None => (raw.clone(), None),
-        };
-        let nullable = name.ends_with('?');
-        let name = name.trim_end_matches('?').to_string();
+        let mut out = Vec::new();
+        for column in stmt.columns() {
+            let raw = column.name().to_string();
+            // `AS "last: Int"` or `AS "last?: Int"` — the annotation, when SQLite
+            // has nothing to declare.
+            let (name, annotated) = match raw.split_once(':') {
+                Some((left, right)) => (left.trim().to_string(), Kind::parse(right)),
+                None => (raw.clone(), None),
+            };
+            let nullable = name.ends_with('?');
+            let name = name.trim_end_matches('?').to_string();
 
-        let ty = match annotated {
-            Some(kind) => kind,
-            None => match column.decl_type().and_then(Kind::parse) {
+            let ty = match annotated {
                 Some(kind) => kind,
-                // SQLite declares nothing for an expression, and guessing here
-                // would be a type error that only shows up as a wrong value.
-                None => {
-                    // The column's own name is only a usable suggestion when it
-                    // is already an identifier; `COUNT(*)` is not.
-                    let suggestion = if !name.is_empty()
-                        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                    {
-                        name.clone()
-                    } else {
-                        "value".to_string()
-                    };
-                    return Err(format!(
+                None => match column.decl_type().and_then(Kind::parse) {
+                    Some(kind) => kind,
+                    // SQLite declares nothing for an expression, and guessing here
+                    // would be a type error that only shows up as a wrong value.
+                    None => {
+                        // The column's own name is only a usable suggestion when it
+                        // is already an identifier; `COUNT(*)` is not.
+                        let suggestion = if !name.is_empty()
+                            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            name.clone()
+                        } else {
+                            "value".to_string()
+                        };
+                        return Err(format!(
                         "column `{raw}` is an expression, so SQLite has no declared type for it — \
                          name it, as in `AS \"{suggestion}: Int\"` \
                          (Blob, Text, Int or Bool; add `?` for a column that can be null)"
                     ));
-                }
-            },
-        };
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') || name.is_empty() {
-            return Err(format!(
-                "column `{raw}` is not a usable field name — give it one with `AS`"
-            ));
+                    }
+                },
+            };
+            if !name.chars().all(|c| c.is_alphanumeric() || c == '_') || name.is_empty() {
+                return Err(format!(
+                    "column `{raw}` is not a usable field name — give it one with `AS`"
+                ));
+            }
+            out.push(Col { name, ty, nullable });
         }
-        out.push(Col { name, ty, nullable });
-    }
-    Ok(out)
+        Ok(out)
+    })
+}
+
+thread_local! {
+    /// The database every statement in this compilation is checked against.
+    ///
+    /// A proc macro runs once per crate, not once per call site, so opening
+    /// SQLite and applying the schema for each `exec!` was most of what this
+    /// cost: twelve invocations in one domain, twelve schemas applied. Keyed by
+    /// the DDL so two schemas in one crate still work.
+    static CHECKER: RefCell<Option<(String, rusqlite::Connection)>> = const { RefCell::new(None) };
+}
+
+/// Run `f` against a database holding `ddl`, opening one only if needed.
+fn with_schema<T>(
+    ddl: &str,
+    f: impl FnOnce(&rusqlite::Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    CHECKER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let fresh = match slot.as_ref() {
+            Some((cached, _)) => cached != ddl,
+            None => true,
+        };
+        if fresh {
+            let conn = rusqlite::Connection::open_in_memory()
+                .map_err(|e| format!("could not open a database to check against: {e}"))?;
+            conn.execute_batch(ddl)
+                .map_err(|e| format!("the schema does not apply: {e}"))?;
+            *slot = Some((ddl.to_string(), conn));
+        }
+        let (_, conn) = slot.as_ref().expect("just filled");
+        f(conn)
+    })
 }
 
 fn schema_path() -> Result<PathBuf, String> {
@@ -358,13 +383,20 @@ fn schema_path() -> Result<PathBuf, String> {
 
 /// Prepare the statement against the schema, and say what SQLite says.
 fn check(ddl: &str, sql: &str, args: usize) -> Result<(), String> {
-    let conn = rusqlite::Connection::open_in_memory()
-        .map_err(|e| format!("could not open a database to check against: {e}"))?;
-    conn.execute_batch(ddl)
-        .map_err(|e| format!("the schema does not apply: {e}"))?;
+    with_schema(ddl, |conn| {
+        let stmt = conn.prepare(sql).map_err(|e| format!("{e}"))?;
+        placeholders(&stmt, args)?;
+        // A `SELECT` here would run and discard its rows. That is never what
+        // was meant, and it is the sort of thing that looks like it works.
+        if stmt.readonly() {
+            return Err("this statement reads and writes nothing; `exec!` is for writes".into());
+        }
+        Ok(())
+    })
+}
 
-    let stmt = conn.prepare(sql).map_err(|e| format!("{e}"))?;
-
+/// The statement's `?` count has to match what the call site passed.
+fn placeholders(stmt: &rusqlite::Statement<'_>, args: usize) -> Result<(), String> {
     let wanted = stmt.parameter_count();
     if wanted != args {
         return Err(format!(
@@ -372,11 +404,6 @@ fn check(ddl: &str, sql: &str, args: usize) -> Result<(), String> {
             if wanted == 1 { "" } else { "s" },
             if args == 1 { "" } else { "s" },
         ));
-    }
-    // A `SELECT` here would run and discard its rows. That is never what was
-    // meant, and it is the sort of thing that looks like it works.
-    if stmt.readonly() {
-        return Err("this statement reads and writes nothing; `exec!` is for writes".into());
     }
     Ok(())
 }
