@@ -1067,6 +1067,9 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 [[package]]
 name = "emit-mutators"
 version = "0.1.0"
+dependencies = [
+ "petros-schema",
+]
 
 [[package]]
 name = "endi"
@@ -2762,10 +2765,18 @@ dependencies = [
  "ciborium",
  "diesel",
  "petros",
+ "petros-schema",
  "serde",
  "serde_json",
  "todo",
  "wasmi",
+]
+
+[[package]]
+name = "petros-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -3877,6 +3888,7 @@ dependencies = [
  "ciborium",
  "diesel",
  "petros",
+ "petros-schema",
  "serde",
  "serde_json",
 ]
@@ -3886,6 +3898,7 @@ name = "todo-wasm"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "petros-schema",
  "todo",
 ]
 

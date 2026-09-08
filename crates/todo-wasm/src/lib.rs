@@ -48,6 +48,13 @@ impl Host for Imports {
     }
 }
 
+// Carry the schema in a custom section, so a tool holding only this file knows
+// what the module accepts. `emit-mutators` reads it from here rather than
+// linking `todo`, which is not a stylistic preference: linking the domain into
+// the generator put 0.31s on a 0.45s loop, because it then relinks whenever
+// `apply` changes.
+petros_schema::embed!(todo::schema::SCHEMA_TEXT);
+
 // ------------------------------------------------------------------- the ABI
 
 /// Give the host a buffer in our linear memory.

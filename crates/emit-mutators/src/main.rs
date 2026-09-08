@@ -12,11 +12,7 @@
 
 use std::io::Write;
 
-// The verb declaration, compiled in rather than parsed. `include!` keeps this
-// crate free of dependencies — which is why it is its own crate — while making
-// `crates/todo/src/verbs.rs` the single place a verb is named. Change it there
-// and the native peers, the wasm module and these types all move together.
-include!("../../todo/src/verbs.rs");
+use petros_schema::AppSchema;
 
 fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -28,6 +24,10 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|| "clients/expo/src/mutators.gen.ts".to_string());
 
     let bytes = std::fs::read(&wasm)?;
+    // Out of the artifact, not out of the domain crate. Linking `todo` here to
+    // get the same information cost 0.31s on a 0.45s loop, because this binary
+    // then relinks on every edit to `apply`.
+    let schema = petros_schema::from_wasm(&bytes).map_err(std::io::Error::other)?;
     let encoded = base64(&bytes);
 
     let body = format!(
@@ -47,7 +47,7 @@ fn main() -> std::io::Result<()> {
         encoded.len(),
         encoded,
         fingerprint(&bytes),
-        typescript(),
+        typescript(&schema),
     );
 
     // Write only on change: an identical file still wakes Metro, and a reload
@@ -62,7 +62,11 @@ fn main() -> std::io::Result<()> {
     let tmp = format!("{out}.tmp");
     std::fs::File::create(&tmp)?.write_all(body.as_bytes())?;
     std::fs::rename(&tmp, &out)?;
-    eprintln!("mutators: {} bytes wasm -> {out}", bytes.len());
+    eprintln!(
+        "mutators: {} bytes wasm, {} verbs -> {out}",
+        bytes.len(),
+        schema.verbs.len()
+    );
     Ok(())
 }
 
@@ -73,7 +77,7 @@ fn main() -> std::io::Result<()> {
 /// native build. This is the other half of that bargain: the names are unknown
 /// at runtime and known at compile time, from the same declaration the module
 /// dispatches on.
-fn typescript() -> String {
+fn typescript(schema: &AppSchema) -> String {
     let mut lines: Vec<String> = vec![
         String::new(),
         "/** A log entry's identity: the canonical 8-4-4-4-12 form. Sixteen bytes on".into(),
@@ -82,12 +86,12 @@ fn typescript() -> String {
         String::new(),
         "/** Every verb the module understands, and what authoring one takes.".into(),
         " *".into(),
-        " *  Generated from crates/todo-wasm/src/verbs.rs. Auto-filled fields — ids,".into(),
+        " *  Read out of the module itself. Auto-filled fields — ids,".into(),
         " *  timestamps — are absent on purpose: the caller does not choose them,".into(),
         " *  the module does. */".into(),
         "export type MutationArgs = {".into(),
     ];
-    for verb in VERBS {
+    for verb in &schema.verbs {
         if verb.args.is_empty() {
             // `Record<string, never>` rather than `{}`, which in TypeScript
             // means "anything except null" and would check nothing at all.

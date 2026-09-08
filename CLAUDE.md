@@ -52,10 +52,11 @@ crates/petros/src/          the engine
   transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
 crates/petros/tests/        19 tests; common/sim.rs is a seeded in-process network
 crates/petros/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
+crates/petros-schema/    what an app IS, as data — the bottom of the graph
 crates/todo/             the domain — the ONLY apply
   domain.rs              apply + fill_auto, generic over a 3-method `Host`
   storage.rs             that Host over Diesel; what every native peer links
-  verbs.rs               the verb list as plain data; `include!`d by codegen
+  schema.rs              the verbs, via `petros_schema::declare!`
 crates/todo-wasm/        the same domain, Host over three wasm imports
 crates/mutators/         the wasmi host — the phone only; conformance test here
 crates/ffi/              the client over UniFFI, for the Expo app

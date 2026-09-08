@@ -1,0 +1,21 @@
+[package]
+name = "petros-schema"
+version = "0.1.0"
+description = "What a Petros app is, as data: the verbs, their arguments, their types."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Deliberately at the bottom of the dependency graph, and deliberately almost
+# empty. Four things read this: the domain crate that declares one, the wasm
+# module compiled from it, the host that runs the module, and the code
+# generator that turns it into TypeScript. Anything heavier here would be paid
+# by all four, including the one compiled to `wasm32-unknown-unknown`.
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+# Off by default: a schema only needs serialising when it travels — out of a
+# built module, or over a wire. The declaration itself does not.
+default = []
+serde = ["dep:serde"]

@@ -168,7 +168,8 @@ pub fn apply<H: Host>(host: &mut H, mutation: &Value, actor: &str) -> Result<(),
         // variants are only added, so this is a peer newer than us. Saying what
         // this one *does* know turns "why did nothing happen" into an answer.
         other => {
-            let known: Vec<&str> = crate::verbs::VERBS.iter().map(|v| v.name).collect();
+            let schema = crate::schema::schema();
+            let known = schema.names();
             Err(format!(
                 "unknown mutation \"{other}\"; this build knows {}",
                 known.join(", ")

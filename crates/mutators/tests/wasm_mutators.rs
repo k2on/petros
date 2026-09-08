@@ -282,13 +282,33 @@ fn rows_of(conn: &mut Connection) -> Vec<Row> {
     rows(conn)
 }
 
-// The declaration the TypeScript types are generated from. Included rather than
-// imported, because `todo-wasm` is a cdylib for another architecture.
-include!("../../todo/src/verbs.rs");
+use petros_schema::Ty;
+
+/// The module carries a schema; it has to be the one the domain declares.
+///
+/// Everything downstream reads the carried copy — `emit-mutators` generates the
+/// TypeScript from it without linking the domain at all — so if the two ever
+/// drift, the types describe a module nobody is running and `tsc` blesses call
+/// sites that will fail on a device.
+#[test]
+fn the_module_carries_the_schema_the_domain_declares() {
+    let carried = petros_schema::from_wasm(MODULE).expect("the module carries a schema");
+    assert_eq!(carried, todo::schema::schema());
+}
+
+/// And a module without one says so, rather than generating nothing quietly.
+#[test]
+fn a_module_with_no_schema_is_an_error_not_an_empty_one() {
+    // A minimal, valid, schema-less module: the eight-byte header alone.
+    let bare = b"\0asm\x01\0\0\0";
+    let err = petros_schema::from_wasm(bare).expect_err("no section");
+    assert!(err.contains("petros_schema"), "{err}");
+    assert!(petros_schema::from_wasm(b"not wasm at all").is_err());
+}
 
 /// The declaration is only worth generating types from if it cannot lie.
 ///
-/// Every verb named in `verbs.rs` has to be one `apply` actually handles —
+/// Every verb the schema names has to be one `apply` actually handles —
 /// otherwise the app gets a green `tsc` and a phone that says "unknown
 /// mutation", which is precisely the failure the declaration exists to prevent.
 #[test]
@@ -296,21 +316,21 @@ fn every_declared_verb_is_one_the_module_handles() {
     let mutators = Mutators::load(MODULE).expect("load");
     let mut conn = database();
 
-    for verb in VERBS {
+    for verb in &todo::schema::schema().verbs {
         // Minimal, and deliberately not always valid: a verb may refuse these
         // arguments. What it may not do is fail to recognise the name.
         let mut fields = vec![(
             ciborium::value::Value::from("t"),
-            ciborium::value::Value::from(verb.name),
+            ciborium::value::Value::from(verb.name.as_str()),
         )];
-        for arg in verb.args {
+        for arg in &verb.args {
             let value = match arg.ty {
                 Ty::Id => ciborium::value::Value::Bytes(vec![7u8; 16]),
                 Ty::Text => "something".into(),
                 Ty::Integer => ciborium::value::Value::Integer(1.into()),
                 Ty::Bool => ciborium::value::Value::Bool(true),
             };
-            fields.push((ciborium::value::Value::from(arg.name), value));
+            fields.push((ciborium::value::Value::from(arg.name.as_str()), value));
         }
         let mut payload = Vec::new();
         ciborium::into_writer(&ciborium::value::Value::Map(fields), &mut payload).unwrap();
@@ -321,7 +341,7 @@ fn every_declared_verb_is_one_the_module_handles() {
         if let Err(reason) = outcome {
             assert!(
                 !reason.contains("unknown mutation"),
-                "verbs.rs declares `{}`, which generates a TypeScript type, but \
+                "the schema declares `{}`, which generates a TypeScript type, but \
                  the module does not handle it: {reason}",
                 verb.name
             );
@@ -347,9 +367,9 @@ fn an_unknown_verb_says_what_the_module_does_know() {
         .expect("the host ran")
         .expect_err("Frobnicate is not a verb");
     assert!(reason.contains("Frobnicate"), "{reason}");
-    for verb in VERBS {
+    for verb in &todo::schema::schema().verbs {
         assert!(
-            reason.contains(verb.name),
+            reason.contains(&verb.name),
             "should list {}: {reason}",
             verb.name
         );

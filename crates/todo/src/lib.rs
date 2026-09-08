@@ -17,7 +17,7 @@
 //! this.
 
 pub mod domain;
-pub mod verbs;
+pub mod schema;
 
 #[cfg(feature = "storage")]
 mod storage;

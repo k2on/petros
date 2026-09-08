@@ -675,6 +675,36 @@ old arrangement could not — serde failed to decode the unknown variant and the
 client could not apply that batch at all, so an old peer was stuck until someone
 shipped it a new binary through an app store.
 
+## The module carries its own schema, because linking the domain cost the loop
+
+A verb was declared in a dependency-free `crates/todo/src/verbs.rs` that
+`emit-mutators` pulled in with `include!` — textual sharing, chosen so the code
+generator could stay free of dependencies. It broke once on a `//!` comment and
+would have broken again.
+
+The obvious fix is for the generator to depend on the domain crate like a normal
+program. Measured, that costs 0.31s on a 0.45s edit-to-device loop: `todo`
+changes whenever `apply` does, so the generator relinks on every save. A
+dependency on `petros-schema` alone costs 0.06s, because that crate does not
+change when the domain does — the distinction is not "how many dependencies"
+but "which of them move when you are working".
+
+So the schema travels as data in the artifact. `petros_schema::declare!` expands
+to both a typed `schema()` and a `SCHEMA_TEXT` constant from one set of tokens,
+and `petros_schema::embed!` puts that text in a `petros_schema` custom section
+of the wasm. The generator walks the section table — no interpreter, no domain
+crate, 0.47s loop restored.
+
+Two things had to be checked rather than assumed. `#[link_section]` survives the
+`mutators` profile's `strip = true`, and in fact leaves the schema as the only
+custom section in the module. And what the module carries has to be what the
+domain declares, or the generated types describe a module nobody is running:
+`the_module_carries_the_schema_the_domain_declares` asserts exactly that, and
+was falsified by adding a verb to the declaration without rebuilding.
+
+A module with no section is an error naming the missing macro, not an empty
+schema — an empty one would silently generate types that reject every call site.
+
 ## Android is built by EAS
 
 `.eas/build/rust.yml` installs Rust from `rust-toolchain.toml` — still the one
