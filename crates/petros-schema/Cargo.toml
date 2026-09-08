@@ -12,6 +12,7 @@ rust-version.workspace = true
 # generator that turns it into TypeScript. Anything heavier here would be paid
 # by all four, including the one compiled to `wasm32-unknown-unknown`.
 [dependencies]
+ciborium = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
 [features]
@@ -19,3 +20,7 @@ serde = { workspace = true, optional = true }
 # built module, or over a wire. The declaration itself does not.
 default = []
 serde = ["dep:serde"]
+# `mutations!` and the CBOR accessors it decodes through. Wanted by a domain
+# crate and by nothing else — the code generator reads schemas, it never
+# decodes a payload, and paying for ciborium there would put it in the loop.
+cbor = ["dep:ciborium"]

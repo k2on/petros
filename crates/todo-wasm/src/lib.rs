@@ -11,4 +11,4 @@
 //!
 //! [`Host`]: petros_schema::Host
 
-petros_wasm_guest::export!(todo::domain, todo::schema::SCHEMA_TEXT);
+petros_wasm_guest::export!(todo::domain, todo::domain::SCHEMA_TEXT);

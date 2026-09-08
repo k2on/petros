@@ -332,3 +332,171 @@ pub fn parse(text: &str) -> Result<AppSchema, String> {
     }
     Ok(AppSchema { verbs })
 }
+
+// ----------------------------------------------------- declaring the whole app
+
+/// The CBOR a mutation is, and the few accessors every domain needs.
+#[cfg(feature = "cbor")]
+pub mod cbor {
+    pub use ciborium::value::Value;
+
+    pub fn field<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
+        v.as_map()?
+            .iter()
+            .find(|(k, _)| k.as_text() == Some(name))
+            .map(|(_, v)| v)
+    }
+
+    /// Set a field, replacing it if it is already there. What `fill_auto` uses
+    /// to hoist a value in exactly once.
+    pub fn set(v: &mut Value, name: &str, to: Value) {
+        if let Value::Map(entries) = v {
+            for (k, existing) in entries.iter_mut() {
+                if k.as_text() == Some(name) {
+                    *existing = to;
+                    return;
+                }
+            }
+            entries.push((Value::Text(name.to_string()), to));
+        }
+    }
+
+    pub fn as_text(v: &Value) -> Option<String> {
+        v.as_text().map(str::to_string)
+    }
+
+    pub fn as_bytes(v: &Value) -> Option<Vec<u8>> {
+        v.as_bytes().cloned()
+    }
+
+    pub fn as_int(v: &Value) -> Option<i64> {
+        v.as_integer().and_then(|i| i128::from(i).try_into().ok())
+    }
+
+    // Each of these is what one declared type decodes to. Required arguments
+    // say which mutation and which field is missing, because that error reaches
+    // a person; the rest take the empty value, because a field a caller left off
+    // means the same thing on every replica and refusing it is the domain's
+    // decision to make, not the decoder's.
+    #[doc(hidden)]
+    pub fn need_id(m: &Value, verb: &str, name: &str) -> Result<Vec<u8>, String> {
+        field(m, name)
+            .and_then(as_bytes)
+            .ok_or_else(|| format!("{verb} has no {name}"))
+    }
+
+    #[doc(hidden)]
+    pub fn need_array<'a>(m: &'a Value, verb: &str, name: &str) -> Result<&'a [Value], String> {
+        match field(m, name) {
+            Some(Value::Array(items)) => Ok(items),
+            _ => Err(format!("{verb} has no {name}")),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn opt_text(m: &Value, name: &str) -> String {
+        field(m, name).and_then(as_text).unwrap_or_default()
+    }
+
+    #[doc(hidden)]
+    pub fn opt_int(m: &Value, name: &str) -> i64 {
+        field(m, name).and_then(as_int).unwrap_or(0)
+    }
+
+    #[doc(hidden)]
+    pub fn opt_bool(m: &Value, name: &str) -> bool {
+        matches!(field(m, name), Some(Value::Bool(true)))
+    }
+}
+
+/// Declare a domain: its verbs, their arguments, and what each one does.
+///
+/// This exists because the alternative had a hole in it. The schema said
+/// `Add { text: Text }` and `apply` reached for a field it named itself, and
+/// nothing checked the two agreed — so renaming an argument on one side
+/// generated TypeScript describing a module nobody was running, and the call
+/// site type-checked all the way to a device. Here the name is written once and
+/// both the schema entry and the binding come from it.
+///
+/// `auto` arguments are decoded like any other but never enter the schema:
+/// `fill_auto` supplies them at the originating client, so a caller neither
+/// chooses them nor should see a type offering the choice.
+///
+/// ```
+/// use petros_schema::Host;
+/// petros_schema::mutations! {
+///     /// Add one.
+///     Add { text: Text } auto { id: Id } => |host, actor| {
+///         host.exec(&format!("INSERT INTO t VALUES ({}, {}, {})",
+///             petros_schema::lit(petros_schema::Lit::Blob(&id)),
+///             petros_schema::lit(petros_schema::Lit::Text(&text)),
+///             petros_schema::lit(petros_schema::Lit::Text(actor))));
+///         Ok(())
+///     }
+///     Clear {} => |host, actor| {
+///         let _ = actor;
+///         host.exec("DELETE FROM t");
+///         Ok(())
+///     }
+/// }
+/// // The schema carries what a caller passes, and not what `fill_auto` does.
+/// assert_eq!(schema().names(), ["Add", "Clear"]);
+/// assert_eq!(schema().verb("Add").unwrap().args.len(), 1);
+/// ```
+#[cfg(feature = "cbor")]
+#[macro_export]
+macro_rules! mutations {
+    (
+        $(
+            $(#[$meta:meta])*
+            $verb:ident { $($arg:ident : $ty:ident),* $(,)? }
+            $(auto { $($aarg:ident : $aty:ident),* $(,)? })?
+            => |$host:ident, $actor:ident| $body:block
+        )*
+    ) => {
+        $crate::declare! { $( $verb { $($arg : $ty),* } )* }
+
+        /// Applying a mutation: `Ok`, or a deterministic refusal every replica
+        /// reaches identically.
+        pub fn apply<H: $crate::Host>(
+            host: &mut H,
+            mutation: &$crate::cbor::Value,
+            actor: &str,
+        ) -> ::core::result::Result<(), ::std::string::String> {
+            let tag = $crate::cbor::field(mutation, "t")
+                .and_then($crate::cbor::as_text)
+                .unwrap_or_default();
+            match tag.as_str() {
+                $(
+                    stringify!($verb) => {
+                        // The names the body asked for. Bound here rather than
+                        // in the signature because a signature is written once
+                        // and these are per-arm.
+                        let $host = &mut *host;
+                        let $actor: &str = actor;
+                        $( let $arg = $crate::mutations!(@get $ty, mutation, stringify!($verb), stringify!($arg)); )*
+                        $($( let $aarg = $crate::mutations!(@get $aty, mutation, stringify!($verb), stringify!($aarg)); )*)?
+                        $body
+                    }
+                )*
+                // A variant this build has never heard of. The log is permanent
+                // and variants are only ever added, so this is a peer newer
+                // than us. Saying what this one *does* know turns "why did
+                // nothing happen" into an answer.
+                other => ::core::result::Result::Err(::std::format!(
+                    "unknown mutation \"{}\"; this build knows {}",
+                    other,
+                    schema().names().join(", ")
+                )),
+            }
+        }
+    };
+
+    // Required, because a missing one means the payload is malformed.
+    (@get Id, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::need_id($m, $verb, $name)? };
+    (@get Array, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::need_array($m, $verb, $name)? };
+    // Optional, because an absent one is a value every replica agrees on.
+    (@get Text, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::opt_text($m, $name) };
+    (@get Integer, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::opt_int($m, $name) };
+    (@get Bool, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::opt_bool($m, $name) };
+}

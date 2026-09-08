@@ -52,16 +52,16 @@ crates/petros/src/          the engine
   transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
 crates/petros/tests/        19 tests; common/sim.rs is a seeded in-process network
 crates/petros/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
-crates/petros-schema/    the app contract: the schema, and the `Host` a
-                         mutation sees. The bottom of the graph, no deps
+crates/petros-schema/    the app contract: `mutations!`, the schema it
+                         declares, and the `Host` a mutation sees
 crates/petros-wasm-guest/ `export!` — an app's wasm crate is one line
 crates/petros-wasm-host/ the wasmi side; the phone only. Conformance test here
 crates/petros-codegen/   reads a module's schema section, writes TypeScript
 crates/petros-axum/      one handler; the app keeps its routes and its auth
 crates/todo/             the domain — the ONLY apply
-  domain.rs              apply + fill_auto, generic over a 3-method `Host`
+  domain.rs              `mutations!` — the verbs and their bodies, declared
+                         and dispatched from one place; plus fill_auto
   storage.rs             that Host over Diesel; what every native peer links
-  schema.rs              the verbs, via `petros_schema::declare!`
 crates/todo-wasm/        the same domain, Host over three wasm imports
 crates/petros-wasm-host/         the wasmi host — the phone only; conformance test here
 crates/ffi/              the client over UniFFI, for the Expo app

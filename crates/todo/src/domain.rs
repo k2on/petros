@@ -6,139 +6,116 @@
 //! implementations, and `tests/conformance.rs` holds it to that by driving the
 //! same mutations through both and comparing the rows.
 //!
+//! The verbs are declared and dispatched by one macro, so an argument's name
+//! is written once. It used to be written twice — in the schema and again in
+//! whatever field `apply` reached for — and nothing checked the two agreed.
+//!
 //! Everything it can reach is [`Host`]: three methods, no clock, no randomness,
 //! no network, no filesystem. On wasm that is enforced by the sandbox, because
 //! the module imports nothing else. Natively it is enforced by this trait being
 //! the only argument `apply` gets.
 
-use ciborium::value::Value;
+use petros_schema::cbor::{set, Value};
 
 // The contract, not a copy of it: the same three methods the wasm module
 // imports and the same escaping both builds go through.
 pub use petros_schema::{lit, Host, Lit};
 
-/// Applying a mutation: `Ok` or a deterministic refusal every replica reaches.
-pub fn apply<H: Host>(host: &mut H, mutation: &Value, actor: &str) -> Result<(), String> {
-    let tag = field(mutation, "t").and_then(as_text).unwrap_or_default();
-    match tag.as_str() {
-        "Add" => {
-            let id = field(mutation, "id")
-                .and_then(as_bytes)
-                .ok_or("Add has no id")?;
-            let text = field(mutation, "text")
-                .and_then(as_text)
-                .unwrap_or_default();
-            let created_ms = field(mutation, "created_ms").and_then(as_int).unwrap_or(0);
+petros_schema::mutations! {
+    /// Add a to-do at the end of the list.
+    Add { text: Text } auto { id: Id, created_ms: Integer } => |host, actor| {
+        if text.trim().is_empty() {
+            return Err("a to-do needs some text".into());
+        }
+        // The same entry arriving twice is a no-op, which is what makes
+        // redelivery safe.
+        if host.query_exists(&format!(
+            "SELECT 1 FROM todo WHERE id = {}",
+            lit(Lit::Blob(&id))
+        )) {
+            return Ok(());
+        }
+        // `pos` is read out of current state: "put it at the end", an intent,
+        // not "put it at 3", a fact. It is what makes the rebase visible when
+        // an entry lands underneath yours.
+        let last = host.query_int("SELECT COALESCE(MAX(pos), 0) FROM todo");
+        host.exec(&format!(
+            "INSERT INTO todo (id, text, done, pos, created_ms, actor) \
+             VALUES ({}, {}, 0, {}, {}, {})",
+            lit(Lit::Blob(&id)),
+            lit(Lit::Text(text.trim())),
+            lit(Lit::Int(last + 1)),
+            lit(Lit::Int(created_ms)),
+            lit(Lit::Text(actor)),
+        ));
+        Ok(())
+    }
+
+    /// Five to-dos as one entry.
+    ///
+    /// The ids are already in the payload — `fill_auto` put them there at the
+    /// originating client — so this is as deterministic as any other apply.
+    AddFive {} auto { items: Array, created_ms: Integer } => |host, actor| {
+        // Read the end of the list once, then count up. Re-reading between
+        // inserts would give the same answer and cost five more round trips.
+        let mut pos = host.query_int("SELECT COALESCE(MAX(pos), 0) FROM todo");
+        for item in items {
+            let Some(id) = petros_schema::cbor::field(item, "id")
+                .and_then(petros_schema::cbor::as_bytes)
+            else {
+                return Err("an item has no id".into());
+            };
+            let text = petros_schema::cbor::opt_text(item, "text");
             if text.trim().is_empty() {
-                return Err("a to-do needs some text".into());
+                continue;
             }
-            // `on_conflict_do_nothing`: the same entry arriving twice is a
-            // no-op, which is what makes redelivery safe.
             if host.query_exists(&format!(
                 "SELECT 1 FROM todo WHERE id = {}",
                 lit(Lit::Blob(&id))
             )) {
-                return Ok(());
+                continue;
             }
-            // `pos` is read out of current state: "put it at the end", an
-            // intent, not "put it at 3", a fact. It is what makes the rebase
-            // visible when an entry lands underneath yours.
-            let last = host.query_int("SELECT COALESCE(MAX(pos), 0) FROM todo");
+            pos += 1;
             host.exec(&format!(
                 "INSERT INTO todo (id, text, done, pos, created_ms, actor) \
                  VALUES ({}, {}, 0, {}, {}, {})",
                 lit(Lit::Blob(&id)),
                 lit(Lit::Text(text.trim())),
-                lit(Lit::Int(last + 1)),
+                lit(Lit::Int(pos)),
                 lit(Lit::Int(created_ms)),
                 lit(Lit::Text(actor)),
             ));
-            Ok(())
         }
+        Ok(())
+    }
 
-        // Five to-dos as one entry. The ids are already in the payload —
-        // `fill_auto` put them there at the originating client — so this is as
-        // deterministic as any other apply.
-        "AddFive" => {
-            let Some(Value::Array(items)) = field(mutation, "items") else {
-                return Err("AddFive has no items".into());
-            };
-            let created_ms = field(mutation, "created_ms").and_then(as_int).unwrap_or(0);
-            // Read the end of the list once, then count up. Re-reading between
-            // inserts would give the same answer and cost five more round trips.
-            let mut pos = host.query_int("SELECT COALESCE(MAX(pos), 0) FROM todo");
-            for item in items {
-                let Some(id) = field(item, "id").and_then(as_bytes) else {
-                    return Err("an item has no id".into());
-                };
-                let text = field(item, "text").and_then(as_text).unwrap_or_default();
-                if text.trim().is_empty() {
-                    continue;
-                }
-                if host.query_exists(&format!(
-                    "SELECT 1 FROM todo WHERE id = {}",
-                    lit(Lit::Blob(&id))
-                )) {
-                    continue;
-                }
-                pos += 1;
-                host.exec(&format!(
-                    "INSERT INTO todo (id, text, done, pos, created_ms, actor) \
-                     VALUES ({}, {}, 0, {}, {}, {})",
-                    lit(Lit::Blob(&id)),
-                    lit(Lit::Text(text.trim())),
-                    lit(Lit::Int(pos)),
-                    lit(Lit::Int(created_ms)),
-                    lit(Lit::Text(actor)),
-                ));
-            }
-            Ok(())
-        }
+    /// One entry rather than one per row, so it covers rows another peer added
+    /// in the meantime. That is what makes it an intent.
+    MarkAllDone {} => |host, actor| {
+        let _ = actor;
+        host.exec("UPDATE todo SET done = 1 WHERE done = 0");
+        Ok(())
+    }
 
-        // One entry rather than one per row, so it covers rows another peer
-        // added in the meantime. That is what makes it an intent.
-        "MarkAllDone" => {
-            host.exec("UPDATE todo SET done = 1 WHERE done = 0");
-            Ok(())
-        }
+    /// Updating a row that is gone is a no-op, not an error: an entry earlier
+    /// in the log may have removed it.
+    SetDone { id: Id, done: Bool } => |host, actor| {
+        let _ = actor;
+        host.exec(&format!(
+            "UPDATE todo SET done = {} WHERE id = {}",
+            lit(Lit::Int(done as i64)),
+            lit(Lit::Blob(&id))
+        ));
+        Ok(())
+    }
 
-        // Updating a row that is gone is a no-op, not an error: an entry
-        // earlier in the log may have removed it.
-        "SetDone" => {
-            let id = field(mutation, "id")
-                .and_then(as_bytes)
-                .ok_or("SetDone has no id")?;
-            let done = matches!(field(mutation, "done"), Some(Value::Bool(true)));
-            host.exec(&format!(
-                "UPDATE todo SET done = {} WHERE id = {}",
-                lit(Lit::Int(done as i64)),
-                lit(Lit::Blob(&id))
-            ));
-            Ok(())
-        }
-
-        "Remove" => {
-            let id = field(mutation, "id")
-                .and_then(as_bytes)
-                .ok_or("Remove has no id")?;
-            host.exec(&format!(
-                "DELETE FROM todo WHERE id = {}",
-                lit(Lit::Blob(&id))
-            ));
-            Ok(())
-        }
-
-        // A variant this build has never heard of. The log is permanent and
-        // variants are only added, so this is a peer newer than us. Saying what
-        // this one *does* know turns "why did nothing happen" into an answer.
-        other => {
-            let schema = crate::schema::schema();
-            let known = schema.names();
-            Err(format!(
-                "unknown mutation \"{other}\"; this build knows {}",
-                known.join(", ")
-            ))
-        }
+    Remove { id: Id } => |host, actor| {
+        let _ = actor;
+        host.exec(&format!(
+            "DELETE FROM todo WHERE id = {}",
+            lit(Lit::Blob(&id))
+        ));
+        Ok(())
     }
 }
 
@@ -149,7 +126,10 @@ pub fn apply<H: Host>(host: &mut H, mutation: &Value, actor: &str) -> Result<(),
 /// it is allowed to have. Which fields they belong in is decided here, so that
 /// knowledge lives with the mutation rather than with the engine.
 pub fn fill_auto(mutation: &mut Value, uuid: Vec<u8>, now_ms: i64) {
-    match field(mutation, "t").and_then(as_text).as_deref() {
+    match petros_schema::cbor::field(mutation, "t")
+        .and_then(petros_schema::cbor::as_text)
+        .as_deref()
+    {
         Some("Add") => {
             set(mutation, "id", Value::Bytes(uuid));
             set(mutation, "created_ms", Value::Integer(now_ms.into()));
@@ -215,37 +195,4 @@ impl Seed {
         out.extend_from_slice(&b.to_be_bytes());
         out
     }
-}
-
-// ------------------------------------------------------------ CBOR accessors
-
-pub fn field<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
-    v.as_map()?
-        .iter()
-        .find(|(k, _)| k.as_text() == Some(name))
-        .map(|(_, v)| v)
-}
-
-pub fn set(v: &mut Value, name: &str, to: Value) {
-    if let Value::Map(entries) = v {
-        for (k, existing) in entries.iter_mut() {
-            if k.as_text() == Some(name) {
-                *existing = to;
-                return;
-            }
-        }
-        entries.push((Value::Text(name.to_string()), to));
-    }
-}
-
-pub fn as_text(v: &Value) -> Option<String> {
-    v.as_text().map(str::to_string)
-}
-
-pub fn as_bytes(v: &Value) -> Option<Vec<u8>> {
-    v.as_bytes().cloned()
-}
-
-pub fn as_int(v: &Value) -> Option<i64> {
-    v.as_integer().and_then(|i| i128::from(i).try_into().ok())
 }

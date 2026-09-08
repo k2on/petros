@@ -293,7 +293,7 @@ use petros_schema::Ty;
 #[test]
 fn the_module_carries_the_schema_the_domain_declares() {
     let carried = petros_schema::from_wasm(MODULE).expect("the module carries a schema");
-    assert_eq!(carried, todo::schema::schema());
+    assert_eq!(carried, todo::domain::schema());
 }
 
 /// And a module without one says so, rather than generating nothing quietly.
@@ -316,7 +316,7 @@ fn every_declared_verb_is_one_the_module_handles() {
     let mutators = Mutators::load(MODULE).expect("load");
     let mut conn = database();
 
-    for verb in &todo::schema::schema().verbs {
+    for verb in &todo::domain::schema().verbs {
         // Minimal, and deliberately not always valid: a verb may refuse these
         // arguments. What it may not do is fail to recognise the name.
         let mut fields = vec![(
@@ -349,6 +349,96 @@ fn every_declared_verb_is_one_the_module_handles() {
     }
 }
 
+/// An argument the schema names has to be the field `apply` actually reads.
+///
+/// This is the hole the declaration used to have. The schema said
+/// `Add { text: Text }` and `apply` reached for a field it named itself; if the
+/// two drifted, `petros-codegen` emitted TypeScript describing a module nobody
+/// was running and the call site type-checked all the way to a device. Nothing
+/// caught it — `every_declared_verb_is_one_the_module_handles` only asserts the
+/// verb is not *unknown*, which an argument rename does not change.
+///
+/// `mutations!` makes it structural: the name is written once. This asserts the
+/// property anyway, so that going back to hand-written dispatch fails here
+/// rather than on someone's phone.
+#[test]
+fn a_renamed_argument_changes_what_the_module_does() {
+    let mutators = Mutators::load(MODULE).expect("load");
+
+    for verb in &todo::domain::schema().verbs {
+        for arg in &verb.args {
+            // A payload the module would accept, with its auto fields already
+            // hoisted in — the same route a real client takes.
+            let mut fields = vec![(
+                ciborium::value::Value::from("t"),
+                ciborium::value::Value::from(verb.name.as_str()),
+            )];
+            for a in &verb.args {
+                let value = match a.ty {
+                    Ty::Id => ciborium::value::Value::Bytes(vec![9u8; 16]),
+                    Ty::Text => "a real to-do".into(),
+                    Ty::Integer => ciborium::value::Value::Integer(1.into()),
+                    Ty::Bool => ciborium::value::Value::Bool(true),
+                };
+                fields.push((ciborium::value::Value::from(a.name.as_str()), value));
+            }
+            let mut raw = Vec::new();
+            ciborium::into_writer(&ciborium::value::Value::Map(fields), &mut raw).unwrap();
+            let filled = mutators
+                .fill_auto_with(&raw, &[3u8; 16], 1_700_000_000)
+                .unwrap();
+
+            let straight = outcome(&mutators, &filled);
+            let renamed = outcome(&mutators, &rename(&filled, &arg.name));
+            assert_ne!(
+                straight, renamed,
+                "the schema declares `{}.{}`, but renaming it changed nothing — \
+                 `apply` is reading some other field, and the generated \
+                 TypeScript is describing a module that does not exist",
+                verb.name, arg.name
+            );
+        }
+    }
+}
+
+/// Apply one payload to a fresh database: the verdict, and what it left behind,
+/// rendered so two runs can be compared.
+fn outcome(mutators: &Mutators, payload: &[u8]) -> String {
+    let mut conn = database();
+    // A row with the id the payloads carry. Without it `SetDone` and `Remove`
+    // match nothing and both spellings leave an empty table behind, which made
+    // this test pass for the wrong reason the first time it ran.
+    diesel::connection::SimpleConnection::batch_execute(
+        &mut conn,
+        "INSERT INTO todo (id, text, done, pos, created_ms, actor) \
+         VALUES (X'09090909090909090909090909090909', 'already here', 0, 1, 0, 'bob')",
+    )
+    .expect("seed");
+    let verdict = mutators
+        .apply(&mut conn, payload, "alice")
+        .expect("the host ran");
+    let rows: Vec<String> = rows_of(&mut conn)
+        .iter()
+        .map(|r| format!("{}|{}|{}|{}", r.text, r.pos, r.actor, r.done))
+        .collect();
+    format!("{verdict:?} {}", rows.join(","))
+}
+
+/// The same payload with one key spelled differently.
+fn rename(payload: &[u8], field: &str) -> Vec<u8> {
+    let mut value: ciborium::value::Value = ciborium::from_reader(payload).unwrap();
+    if let ciborium::value::Value::Map(entries) = &mut value {
+        for (k, _) in entries.iter_mut() {
+            if k.as_text() == Some(field) {
+                *k = ciborium::value::Value::Text(format!("not_{field}"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).unwrap();
+    out
+}
+
 /// And the error a *genuinely* unknown verb produces should say what is known,
 /// because "nothing happened" is the worst possible answer on a device.
 #[test]
@@ -367,7 +457,7 @@ fn an_unknown_verb_says_what_the_module_does_know() {
         .expect("the host ran")
         .expect_err("Frobnicate is not a verb");
     assert!(reason.contains("Frobnicate"), "{reason}");
-    for verb in &todo::schema::schema().verbs {
+    for verb in &todo::domain::schema().verbs {
         assert!(
             reason.contains(&verb.name),
             "should list {}: {reason}",

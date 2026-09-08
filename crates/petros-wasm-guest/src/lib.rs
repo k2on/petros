@@ -8,7 +8,7 @@
 //! So it is one macro:
 //!
 //! ```ignore
-//! petros_wasm_guest::export!(todo::domain, todo::schema::SCHEMA_TEXT);
+//! petros_wasm_guest::export!(todo::domain, todo::domain::SCHEMA_TEXT);
 //! ```
 //!
 //! # What crosses the boundary

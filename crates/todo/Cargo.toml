@@ -15,7 +15,7 @@ storage = ["dep:diesel", "dep:petros", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 ciborium.workspace = true
-petros-schema.workspace = true
+petros-schema = { workspace = true, features = ["cbor"] }
 diesel = { workspace = true, optional = true }
 petros = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }

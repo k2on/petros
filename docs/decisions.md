@@ -763,6 +763,38 @@ Worth stating as a rule, because this is the second time in this codebase a
 test has been vacuous in exactly this shape: a test of a *push* has to establish
 that a *pull* could not have produced the same result.
 
+## An argument's name is written once, because twice had a hole in it
+
+The schema said `Add { text: Text }`. `apply` reached for a field it named
+itself. Nothing checked the two agreed.
+
+Renaming one side was therefore invisible: `petros-codegen` would emit
+TypeScript describing a module nobody was running, `tsc` would bless the call
+site, and the failure arrived on a device.
+`every_declared_verb_is_one_the_module_handles` did not catch it, because it
+only asserts the verb is not *unknown*, which an argument rename does not
+change.
+
+`petros_schema::mutations!` declares the verb, its arguments and its body
+together, and generates the schema entry, the dispatch arm and the decode from
+the same tokens. `auto` arguments are decoded like any other but never enter the
+schema — `fill_auto` supplies them at the originating client, so a caller
+neither chooses them nor should see a type offering the choice.
+
+Macro hygiene turned out to close it harder than intended: a body cannot name
+the payload at all, so it cannot read a field the declaration did not mention.
+Trying to write that falsification failed to compile, which is a better answer
+than a failing assertion.
+
+`a_renamed_argument_changes_what_the_module_does` asserts the property anyway,
+so that going back to hand-written dispatch fails in CI rather than on a phone.
+It needed two corrections before it meant anything. It compared outcomes against
+an empty database, where `SetDone` and `Remove` match nothing and every spelling
+leaves the same nothing behind — so it now seeds the row the payloads address.
+And the first attempt to falsify it was mangled by shell quoting, so it "failed"
+by not compiling; redone properly, pointing one decode at a field the schema
+does not declare, it fails on the assertion it is supposed to fail on.
+
 ## Android is built by EAS
 
 `.eas/build/rust.yml` installs Rust from `rust-toolchain.toml` — still the one
