@@ -66,6 +66,10 @@
               # when bun installs and runs them, so both are here.
               bun
               nodejs_22
+              # Rebuilds the mutator module on save. The whole hot-reload loop
+              # is this plus Metro, which is already watching for the .ts it
+              # writes.
+              watchexec
               sqlite
               pkg-config
               # For the audio server's transcoding (phase 3).

@@ -3,7 +3,11 @@
 default: fmt lint test
 
 # Run the whole suite. Must stay under 30 seconds.
-test:
+#
+# `mutators` first because `crates/ffi/tests/wasm_mutators.rs` runs the real
+# module — `include_bytes!` of an artifact that does not exist yet is a build
+# error, not a skipped test.
+test: mutators
     cargo nextest run --workspace --all-features
     cargo test --workspace --all-features --doc
 
@@ -101,6 +105,24 @@ expo-dir := "clients/expo"
 # bun hoists a workspace's binaries to the app, not to the library itself.
 ubrn := justfile_directory() / "clients/expo/node_modules/.bin/ubrn"
 ffi-lib := if os() == "macos" { "libexo_todo_ffi.dylib" } else { "libexo_todo_ffi.so" }
+
+# ------------------------------------------------------------- hot mutators
+#
+# The domain is a wasm module rather than a symbol inside the app's binary, so
+# changing a mutation does not mean rebuilding for the device. `just mutators`
+# rebuilds it and rewrites the TypeScript file that carries it; Metro is already
+# watching that file, and the app swaps the module when it arrives.
+
+# Build the mutator module and hand it to Metro.
+mutators:
+    cargo build -p todo-wasm --target wasm32-unknown-unknown --profile mutators
+    cargo run -q -p exo-todo-ffi --bin emit-mutators
+
+# The loop. Leave this running beside `bun start`, then edit crates/todo-wasm.
+mutators-watch:
+    @echo "watching crates/todo-wasm — save a file and check the phone"
+    watchexec --project-origin . --watch crates/todo-wasm --exts rs \
+        --on-busy-update=restart -- just mutators
 
 # Install the JS side. Run once, and again after changing a dependency.
 expo-install:

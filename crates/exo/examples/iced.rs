@@ -17,9 +17,10 @@
 use std::time::Duration;
 
 use exo::{AutoCtx, Client, Id};
+use exo_mutators::{self as mutators, WasmTodo};
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Subscription, Task};
-use todo::{list, Item, Todo, TodoApp};
+use todo::{list, Item};
 
 #[cfg(target_arch = "wasm32")]
 use exo::transport::web::Link;
@@ -90,8 +91,8 @@ enum Message {
 }
 
 struct App {
-    client: Client<TodoApp>,
-    link: Option<Link<Todo>>,
+    client: Client<WasmTodo>,
+    link: Option<Link<mutators::Payload>>,
     server: String,
     user: String,
     /// The materialised view and the pending count, refreshed after anything
@@ -109,7 +110,8 @@ struct App {
 impl App {
     fn boot() -> Self {
         let (user, server) = config();
-        let client = Client::<TodoApp>::open(
+        mutators::load_bundled().expect("load the mutator module");
+        let client = Client::<WasmTodo>::open(
             open(&user).expect("open the database"),
             user.clone(),
             AutoCtx::system(),
@@ -195,10 +197,16 @@ impl App {
             }
             Message::Add => {
                 let text = std::mem::take(&mut self.input);
-                self.client.mutate(Todo::add(&text)).map(|_| ())
+                self.client.mutate(mutators::add(&text)).map(|_| ())
             }
-            Message::Toggle(id, done) => self.client.mutate(Todo::SetDone { id, done }).map(|_| ()),
-            Message::Remove(id) => self.client.mutate(Todo::Remove { id }).map(|_| ()),
+            Message::Toggle(id, done) => self
+                .client
+                .mutate(mutators::set_done(id.as_uuid().as_bytes(), done))
+                .map(|_| ()),
+            Message::Remove(id) => self
+                .client
+                .mutate(mutators::remove(id.as_uuid().as_bytes()))
+                .map(|_| ()),
             Message::ToggleLink => {
                 match self.link {
                     Some(_) => {

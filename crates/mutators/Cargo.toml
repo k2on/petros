@@ -1,0 +1,22 @@
+[package]
+name = "exo-mutators"
+version = "0.1.0"
+description = "Running the domain from a wasm module: the host side of crates/todo-wasm, shared by every peer and the server."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ciborium.workspace = true
+# Direct, not through `exo`'s re-export: Diesel's derives generate `::diesel`
+# paths and need to find the crate at that name.
+diesel.workspace = true
+exo.workspace = true
+serde.workspace = true
+# A pure-Rust wasm interpreter. No JIT, which is what makes it legal on iOS and
+# what lets one module run on a server, in a TUI and on a phone.
+wasmi = "2"
+
+[dev-dependencies]
+# The tests run the real module against a real database.
+diesel = { workspace = true, features = ["sqlite"] }

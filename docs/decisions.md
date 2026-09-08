@@ -481,3 +481,83 @@ Not in the Android shell. That file is the one place a target is named, read by
 would put `wasm32-unknown-unknown` and `aarch64-linux-android` in different
 places for no reason. The Android shell adds `cargo-ndk`, not a second
 toolchain.
+
+## `apply` is a wasm module, not a linked symbol
+
+The Expo client's feedback loop was measured before it was redesigned, and the
+measurement moved the problem. Editing a mutation and having TypeScript know
+about it took 3.2s — cargo, `ubrn generate`, `tsc`. Editing a mutation and
+having the *phone* run it took about four minutes, because the domain was
+compiled into the native binary and a native binary has to be rebuilt for two
+ABIs, relinked and reinstalled. UniFFI collapsed both loops into the slower one.
+
+So `crates/todo-wasm` compiles the domain to `wasm32-unknown-unknown`, and
+`crates/mutators` interprets it with `wasmi` — a pure interpreter, no JIT, which
+is what makes it legal on iOS and lets one artifact run on a server, in a TUI,
+in a window and on a phone. `crates/todo` keeps only the read model.
+
+The loop is now:
+
+```
+save a .rs   ->  0.46s   cargo, wasm32, `mutators` profile
+             ->  ~0.0s   rewrite mutators.gen.ts (a base64 string)
+             ->  ~0.2s   Metro fast refresh pushes 150KB
+             ->  1.4ms   wasmi compiles and verifies it
+```
+
+Metro carries the module because Metro's fast refresh moves *modules*, not
+assets: the wasm becomes a base64 string in a generated `.ts`, and the channel
+already pushing component edits pushes `apply`. No asset pipeline, no fetch, no
+dev server of our own.
+
+## The profile was chosen by measuring, not by reflex
+
+`codegen-units = 1` is the usual reflex for a small wasm artifact, and here it
+is the wrong call: it buys 17KB nobody notices over a LAN and costs 0.38s on a
+loop measured in single seconds. `opt-level = "z"` with `codegen-units = 16`
+was both the smallest and the fastest of the combinations tried; the table is
+in `Cargo.toml` next to the profile.
+
+## Determinism became a property instead of a rule
+
+The invariant at the top of `CLAUDE.md` asks that `apply` never read a clock,
+never call a random number generator, never touch the network or the disk. In a
+module it *cannot*: the host imports `query_int`, `query_exists` and `exec`, and
+nothing else exists to misuse. `fill_auto` runs with no database at all, so it
+cannot even read state.
+
+What that cost is Diesel. The module has no SQLite, only a channel to the
+host's, so its SQL is written out and its values are inlined as literals rather
+than bound — which gives up `check_for_backend`'s compile-time check that a
+model still matches its table. The tests have to carry that instead.
+
+## A mutation gets its own stack
+
+A host import runs *inside* wasmi's execution loop, so its frames sit on top of
+the interpreter's, and this one then calls Diesel — many layers of deeply nested
+generics. Together they overflowed a default 2MB thread stack, which is how this
+was found; iOS gives React Native's JS thread about half of that. So each
+mutation runs on a scoped thread with 8MB rather than borrowing whichever stack
+called in.
+
+It costs about 2.3ms of the 3.1ms a mutation takes. Worth removing eventually —
+a persistent worker rather than a thread per call — and not worth removing
+before something needs it.
+
+## The mutation type is the payload, not a Rust enum
+
+`Payload` is the CBOR the log stores, held as a `ciborium::value::Value` and
+handed to the module verbatim. No Rust enum mirrors it, and that is the point:
+a peer that has never heard of a variant still carries it through the log
+intact, and applies it as soon as it has a module that knows what it means. The
+old arrangement could not — serde failed to decode the unknown variant and the
+client could not apply that batch at all, so an old peer was stuck until someone
+shipped it a new binary through an app store.
+
+## Android is built by EAS
+
+`.eas/build/rust.yml` installs Rust from `rust-toolchain.toml` — still the one
+place a version or a target is named — then builds the module, the engine and
+the turbo module before Expo's own prebuild and gradle steps. This should run
+rarely by design: changing a mutation does not need a build, only changing the
+engine does.

@@ -1,0 +1,14 @@
+[package]
+name = "todo-wasm"
+version = "0.1.0"
+description = "The to-do domain compiled to wasm: the mutations and queries, hot-swappable at runtime."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ciborium.workspace = true
+serde.workspace = true

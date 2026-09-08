@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use exo::transport::ws::{serve, Link};
 use exo::{AutoCtx, Client, Server};
-use todo::{list, Todo, TodoApp};
+use exo_mutators::{self as mutators, WasmTodo};
+use todo::list;
 use tui::{action_for, Action, Status, Tui, Ui};
 
 fn main() -> exo::Result<()> {
@@ -39,20 +40,33 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.get(i + 1).cloned()
 }
 
+/// Load the mutator module this build carries. A peer that has not done this
+/// cannot apply anything — which is the failure you want, rather than one that
+/// quietly runs a stale `apply`.
+fn install() -> exo::Result<()> {
+    mutators::load_bundled().map_err(exo::Error::Protocol)?;
+    Ok(())
+}
+
 fn db(name: &str) -> exo::Result<exo::Connection> {
     exo::open_path(std::env::temp_dir().join(format!("exo-demo-{name}.db")))
 }
 
 /// The server has no UI: it is a log and a socket.
 fn run_server(addr: &str) -> exo::Result<()> {
-    let server = Server::<TodoApp>::open(db("server")?)?;
+    // The server applies every mutation before it appends it, so it runs the
+    // same module the peers do. That is what makes a rejection a verdict rather
+    // than one machine's opinion.
+    install()?;
+    let server = Server::<WasmTodo>::open(db("server")?)?;
     let listener = TcpListener::bind(addr)?;
     println!("exo server on ws://{addr} (head {})", server.head());
     serve(listener, Arc::new(Mutex::new(server)))
 }
 
 fn run_peer(user: &str, addr: &str) -> exo::Result<()> {
-    let mut client = Client::<TodoApp>::open(db(user)?, user, AutoCtx::system())?;
+    install()?;
+    let mut client = Client::<WasmTodo>::open(db(user)?, user, AutoCtx::system())?;
     let mut ui = Ui::new();
     let mut link = connect(&mut client, addr, &mut ui);
 
@@ -95,21 +109,18 @@ fn run_peer(user: &str, addr: &str) -> exo::Result<()> {
         match action_for(key, &mut ui, items.len()) {
             Action::Quit => return Ok(()),
             Action::Add(text) => {
-                if let Err(e) = client.mutate(Todo::add(&text)) {
+                if let Err(e) = client.mutate(mutators::add(&text)) {
                     ui.note(format!("refused: {e}"));
                 }
             }
             Action::ToggleDone => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(Todo::SetDone {
-                        id: item.id,
-                        done: !item.done,
-                    })?;
+                    client.mutate(mutators::set_done(item.id.as_uuid().as_bytes(), !item.done))?;
                 }
             }
             Action::Delete => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(Todo::Remove { id: item.id })?;
+                    client.mutate(mutators::remove(item.id.as_uuid().as_bytes()))?;
                 }
             }
             Action::ToggleLink => {
@@ -128,7 +139,11 @@ fn run_peer(user: &str, addr: &str) -> exo::Result<()> {
 
 /// Connect and say hello. A failure is not fatal: the peer keeps working
 /// offline, which is rather the point.
-fn connect(client: &mut Client<TodoApp>, addr: &str, ui: &mut Ui) -> Option<Link<Todo>> {
+fn connect(
+    client: &mut Client<WasmTodo>,
+    addr: &str,
+    ui: &mut Ui,
+) -> Option<Link<mutators::Payload>> {
     match Link::connect(&format!("ws://{addr}")) {
         Ok(link) => {
             let _ = client.connected();

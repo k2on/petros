@@ -13,12 +13,14 @@ mod tui;
 use std::time::Duration;
 
 use exo::{AutoCtx, Client};
-use todo::{list, Todo, TodoApp};
+use exo_mutators::{self as mutators, WasmTodo};
+use todo::list;
 use tui::{action_for, Action, Status, Tui, Ui};
 
 fn main() -> exo::Result<()> {
     let path = std::env::temp_dir().join("exo-offline-demo.db");
-    let mut client = Client::<TodoApp>::open(exo::open_path(&path)?, "alice", AutoCtx::system())?;
+    mutators::load_bundled().map_err(exo::Error::Protocol)?;
+    let mut client = Client::<WasmTodo>::open(exo::open_path(&path)?, "alice", AutoCtx::system())?;
 
     let mut ui = Ui::new();
     let restored = list(client.conn())?.len();
@@ -50,21 +52,18 @@ fn main() -> exo::Result<()> {
             Action::Add(text) => {
                 // A mutation the app itself refuses never reaches the pending
                 // queue, and would never have reached a log either.
-                if let Err(e) = client.mutate(Todo::add(&text)) {
+                if let Err(e) = client.mutate(mutators::add(&text)) {
                     ui.note(format!("refused: {e}"));
                 }
             }
             Action::ToggleDone => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(Todo::SetDone {
-                        id: item.id,
-                        done: !item.done,
-                    })?;
+                    client.mutate(mutators::set_done(item.id.as_uuid().as_bytes(), !item.done))?;
                 }
             }
             Action::Delete => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(Todo::Remove { id: item.id })?;
+                    client.mutate(mutators::remove(item.id.as_uuid().as_bytes()))?;
                 }
             }
             Action::ToggleLink | Action::Nothing => {}

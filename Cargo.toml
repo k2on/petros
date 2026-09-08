@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/exo", "crates/todo", "crates/ffi"]
+members = [
+    "crates/exo",
+    "crates/todo",
+    "crates/todo-wasm",
+    "crates/mutators",
+    "crates/ffi",
+]
 
 [workspace.package]
 edition = "2021"
@@ -13,6 +19,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 ciborium = "0.2"
 exo = { path = "crates/exo" }
+exo-mutators = { path = "crates/mutators" }
 todo = { path = "crates/todo" }
 # `fira-sans` embeds a default font. Without it iced asks the system for
 # one, which works on a desktop and gets you nothing at all in a browser:
@@ -36,6 +43,15 @@ uuid = { version = "1", features = ["serde"] }
 [profile.test]
 opt-level = 1
 
+# wasmi's interpreter is stack-hungry when it is not optimised — enough that the
+# mutator tests overflowed a default 2MB thread stack before this line existed.
+# That is a property of the build, not of the module: the same wasm runs in a
+# fraction of the stack once the interpreter is optimised, which is what every
+# real peer ships. Optimising dependencies here keeps the tests honest about
+# what the phone will actually do.
+[profile.test.package."*"]
+opt-level = 2
+
 # `just iced` runs a `dev` build, and iced is not a library you only compile:
 # every frame goes through its text shaping and its rasteriser. Unoptimised,
 # that is slow enough to feel while scrolling. Dependencies change rarely, so
@@ -43,3 +59,25 @@ opt-level = 1
 # an edit still rebuilds in a second.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The mutator module: rebuilt on every save, pushed over Metro, interpreted on
+# the other end. Measured across the profile space on this machine, three
+# incremental rebuilds each:
+#
+#     opt   cgu    rebuild     size
+#     "z"    1      0.84s    149,140     smallest, but nearly twice the wait
+#     "z"   16      0.46s    166,355  <- both, so this one
+#     "s"   16      0.48s    184,701
+#       1   16      0.46s    210,360
+#       2   16      0.52s    190,768
+#
+# `codegen-units = 1` is the usual reflex for a small wasm artifact and it is
+# the wrong call here: it buys 17KB nobody will notice over a LAN and costs
+# 0.38s on a loop measured in single seconds. `lto` is off for the same reason.
+[profile.mutators]
+inherits = "release"
+opt-level = "z"
+lto = false
+panic = "abort"
+codegen-units = 16
+strip = true

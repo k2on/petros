@@ -1,0 +1,220 @@
+//! The domain, run from a `.wasm` file against a real SQLite connection.
+//!
+//! A build that compiles is not evidence anything works, and a wasm module that
+//! loads is not evidence it can write a row. This applies real mutations, reads
+//! the table back, and times the parts of the loop that happen on the device.
+
+use std::time::Instant;
+
+use diesel::connection::SimpleConnection;
+use diesel::deserialize::QueryableByName;
+use diesel::sql_types::{BigInt, Text};
+use diesel::{sql_query, RunQueryDsl};
+use exo::{AutoCtx, Connection};
+use exo_mutators::Mutators;
+
+const MODULE: &[u8] = exo_mutators::BUNDLED;
+
+#[derive(QueryableByName, Debug)]
+struct Row {
+    #[diesel(sql_type = Text)]
+    text: String,
+    #[diesel(sql_type = BigInt)]
+    pos: i64,
+    #[diesel(sql_type = Text)]
+    actor: String,
+    #[diesel(sql_type = BigInt)]
+    done: i64,
+}
+
+fn database() -> Connection {
+    let mut conn = exo::open_memory().expect("open");
+    conn.batch_execute(
+        "CREATE TABLE todo (
+             id BLOB PRIMARY KEY NOT NULL, text TEXT NOT NULL,
+             done BOOL NOT NULL DEFAULT 0, pos BIGINT NOT NULL,
+             created_ms BIGINT NOT NULL, actor TEXT NOT NULL);",
+    )
+    .expect("migrate");
+    conn
+}
+
+fn rows(conn: &mut Connection) -> Vec<Row> {
+    sql_query("SELECT text, pos, actor, done FROM todo ORDER BY pos, id")
+        .load(conn)
+        .expect("read back")
+}
+
+/// An `Add` as the log stores it: the placeholder id and timestamp that
+/// `fill_auto` replaces.
+fn add(text: &str) -> Vec<u8> {
+    let value = ciborium::value::Value::Map(vec![
+        ("t".into(), "Add".into()),
+        ("id".into(), ciborium::value::Value::Bytes(vec![0u8; 16])),
+        ("text".into(), text.into()),
+        (
+            "created_ms".into(),
+            ciborium::value::Value::Integer(0.into()),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).unwrap();
+    out
+}
+
+/// `fill_auto` runs before there is anything to read, so it needs no database —
+/// which is also why a module cannot smuggle a query into it.
+fn authored(mutators: &Mutators, auto: &mut AutoCtx, text: &str) -> Vec<u8> {
+    mutators.fill_auto(&add(text), auto).expect("fill_auto")
+}
+
+#[test]
+fn a_wasm_module_applies_mutations_to_a_real_database() {
+    let mutators = Mutators::load(MODULE).expect("load the module");
+    let mut conn = database();
+    let mut auto = AutoCtx::seeded(7);
+
+    for text in ["buy milk", "buy oats"] {
+        let payload = authored(&mutators, &mut auto, text);
+        mutators
+            .apply(&mut conn, &payload, "alice")
+            .expect("the host ran")
+            .expect("the module accepted it");
+    }
+
+    let rows = rows(&mut conn);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].text, "buy milk");
+    assert_eq!(rows[0].actor, "alice");
+    // `pos` came from `COALESCE(MAX(pos), 0) + 1`, read inside the sandbox.
+    assert_eq!((rows[0].pos, rows[1].pos), (1, 2));
+}
+
+#[test]
+fn a_refusal_crosses_the_boundary_as_a_refusal() {
+    let mutators = Mutators::load(MODULE).expect("load");
+    let mut conn = database();
+    let mut auto = AutoCtx::seeded(1);
+
+    let payload = authored(&mutators, &mut auto, "   ");
+    let refusal = mutators
+        .apply(&mut conn, &payload, "alice")
+        .expect("the host ran")
+        .expect_err("blank text is refused");
+    assert_eq!(refusal, "a to-do needs some text");
+    assert!(rows(&mut conn).is_empty(), "a refusal writes nothing");
+}
+
+#[test]
+fn fill_auto_freezes_the_id_and_the_clock_in_the_payload() {
+    let mutators = Mutators::load(MODULE).expect("load");
+    let mut auto = AutoCtx::seeded(42);
+
+    let filled = authored(&mutators, &mut auto, "once");
+    let value: ciborium::value::Value = ciborium::from_reader(filled.as_slice()).unwrap();
+    let map = value.as_map().unwrap();
+    let id = map.iter().find(|(k, _)| k.as_text() == Some("id")).unwrap();
+    let at = map
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("created_ms"))
+        .unwrap();
+
+    assert_ne!(
+        id.1.as_bytes().unwrap(),
+        &vec![0u8; 16],
+        "the id was filled"
+    );
+    assert_eq!(
+        i128::from(at.1.as_integer().unwrap()),
+        1_577_836_800_000,
+        "the seeded clock, frozen into the payload"
+    );
+}
+
+#[test]
+fn redelivery_of_the_same_entry_is_a_no_op() {
+    let mutators = Mutators::load(MODULE).expect("load");
+    let mut conn = database();
+    let mut auto = AutoCtx::seeded(3);
+
+    let payload = authored(&mutators, &mut auto, "once only");
+    for _ in 0..3 {
+        mutators.apply(&mut conn, &payload, "bob").unwrap().unwrap();
+    }
+    assert_eq!(rows(&mut conn).len(), 1);
+}
+
+#[test]
+fn a_module_without_the_abi_is_refused_at_load() {
+    // A valid wasm module that exports none of what the host calls.
+    let empty = wat_minimal();
+    let err = Mutators::load(&empty).expect_err("should not load");
+    assert!(err.contains("does not export"), "got: {err}");
+    assert!(Mutators::load(b"not wasm at all").is_err());
+}
+
+/// `(module)` — the smallest valid wasm binary.
+fn wat_minimal() -> Vec<u8> {
+    vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+}
+
+#[test]
+fn swapping_the_module_keeps_the_peer_running() {
+    let mut mutators = Mutators::load(MODULE).expect("load");
+    let mut conn = database();
+    let mut auto = AutoCtx::seeded(9);
+
+    let first = authored(&mutators, &mut auto, "before the swap");
+    mutators.apply(&mut conn, &first, "alice").unwrap().unwrap();
+
+    assert_eq!(mutators.generation, 1);
+    mutators.swap(MODULE).expect("hot swap");
+    assert_eq!(mutators.generation, 2, "the generation moves");
+
+    // The database is untouched by the swap, and the new module carries on.
+    let second = authored(&mutators, &mut auto, "after the swap");
+    mutators
+        .apply(&mut conn, &second, "alice")
+        .unwrap()
+        .unwrap();
+
+    let rows = rows(&mut conn);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].text, "after the swap");
+    assert_eq!(rows[1].pos, 2, "state carried across the swap");
+    assert_eq!(rows[0].done, 0);
+}
+
+/// Not an assertion so much as a number worth having: this is the part of the
+/// hot-reload loop that happens on the device.
+#[test]
+fn report_the_on_device_costs() {
+    let bytes = MODULE;
+    let t = Instant::now();
+    let mutators = Mutators::load(bytes).expect("load");
+    let compile = t.elapsed();
+
+    let mut conn = database();
+    let mut auto = AutoCtx::seeded(5);
+    let payload = authored(&mutators, &mut auto, "warm");
+    mutators
+        .apply(&mut conn, &payload, "alice")
+        .unwrap()
+        .unwrap();
+
+    let n = 200;
+    let t = Instant::now();
+    for i in 0..n {
+        let p = authored(&mutators, &mut auto, &format!("item {i}"));
+        mutators.apply(&mut conn, &p, "alice").unwrap().unwrap();
+    }
+    let each = t.elapsed() / n;
+
+    println!(
+        "\n  module          {} KB\n  compile+verify  {:?}\n  per mutation    {:?}  (instantiate + fill_auto + apply + SQL)\n",
+        bytes.len() / 1024,
+        compile,
+        each
+    );
+    assert!(compile.as_millis() < 2000, "compile was {compile:?}");
+}

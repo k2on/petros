@@ -1,20 +1,18 @@
-//! The demo to-do list: nothing clever, and deliberately dull. The point is
-//! that Exo has never heard of any of it.
+//! The demo to-do list's *read* model: the table, the row, and how to order it.
 //!
-//! This is the *one* definition of the domain. The mutations and the queries
-//! below are what the terminal examples run, what the iced window runs, what
-//! the server applies before it appends — and, through `crates/ffi`, what the
-//! Expo client runs too. A second implementation in another language would be
-//! a second `apply`, and two `apply`s that disagree make replicas diverge
-//! silently, which is the one failure this design exists to rule out. So the
-//! foreign bindings are generated from this file rather than written against
-//! it.
+//! The write model is not here. `apply` — the one thing every replica must
+//! agree on — lives in `crates/todo-wasm` and is compiled to a wasm module that
+//! the server, the terminal peers, the iced window and the phone all interpret.
+//! One artifact, so there is nothing to keep in step.
+//!
+//! Reads stay in Rust because nothing depends on them being identical
+//! everywhere: a query is a way of looking at state, not a way of producing it.
+//! Diesel's `check_for_backend` still holds this side to the schema, which is
+//! the check the module's hand-written SQL gives up.
 
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sqlite::Sqlite;
-use exo::{ActorId, App, AutoCtx, Connection, Id, Mutation, MutationError, Transaction};
-use serde::{Deserialize, Serialize};
+use exo::{Connection, Id};
 
 diesel::table! {
     todo (id) {
@@ -27,8 +25,9 @@ diesel::table! {
     }
 }
 
-/// The model. One struct describes the row for both reading and writing.
-#[derive(Debug, Clone, Queryable, Selectable, Insertable)]
+/// One row of the materialised view. Read-only: rows are produced by the
+/// module's `apply`, never by this crate.
+#[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = todo, check_for_backend(Sqlite))]
 pub struct Item {
     pub id: Id,
@@ -37,106 +36,6 @@ pub struct Item {
     pub pos: i64,
     pub created_ms: i64,
     pub actor: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "t")]
-pub enum Todo {
-    Add {
-        id: Id,
-        text: String,
-        created_ms: i64,
-    },
-    SetDone {
-        id: Id,
-        done: bool,
-    },
-    Remove {
-        id: Id,
-    },
-}
-
-impl Todo {
-    /// `id` and `created_ms` are placeholders until `fill_auto` runs.
-    pub fn add(text: &str) -> Self {
-        Todo::Add {
-            id: Id::nil(),
-            text: text.to_string(),
-            created_ms: 0,
-        }
-    }
-}
-
-impl Mutation for Todo {
-    fn fill_auto(&mut self, ctx: &mut AutoCtx) {
-        if let Todo::Add { id, created_ms, .. } = self {
-            *id = ctx.uuid();
-            *created_ms = ctx.now_ms();
-        }
-    }
-
-    fn apply(&self, tx: &mut Transaction, actor: &ActorId) -> Result<(), MutationError> {
-        let conn = tx.conn();
-        match self {
-            Todo::Add {
-                id,
-                text,
-                created_ms,
-            } => {
-                if text.trim().is_empty() {
-                    return Err(MutationError::rejected("a to-do needs some text"));
-                }
-                // `pos` is read out of current state: this is "put it at the
-                // end", an intent, not "put it at 3", a fact. It is also what
-                // makes the rebase visible in the demo.
-                let last: Option<i64> = todo::table
-                    .select(diesel::dsl::max(todo::pos))
-                    .first(conn)?;
-                diesel::insert_into(todo::table)
-                    .values(Item {
-                        id: *id,
-                        text: text.trim().to_string(),
-                        done: false,
-                        pos: last.unwrap_or(0) + 1,
-                        created_ms: *created_ms,
-                        actor: actor.as_str().to_string(),
-                    })
-                    .on_conflict_do_nothing()
-                    .execute(conn)?;
-            }
-            // Updating a row that is gone is a no-op, not an error: an entry
-            // earlier in the log may have removed it.
-            Todo::SetDone { id, done } => {
-                diesel::update(todo::table.find(id))
-                    .set(todo::done.eq(done))
-                    .execute(conn)?;
-            }
-            Todo::Remove { id } => {
-                diesel::delete(todo::table.find(id)).execute(conn)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-pub struct TodoApp;
-
-impl App for TodoApp {
-    type Mutation = Todo;
-
-    fn migrate(conn: &mut Connection) -> exo::Result<()> {
-        conn.batch_execute(
-            "CREATE TABLE IF NOT EXISTS todo (
-                 id         BLOB PRIMARY KEY NOT NULL,
-                 text       TEXT NOT NULL,
-                 done       BOOL NOT NULL DEFAULT 0,
-                 pos        BIGINT NOT NULL,
-                 created_ms BIGINT NOT NULL,
-                 actor      TEXT NOT NULL
-             );",
-        )?;
-        Ok(())
-    }
 }
 
 /// Always ordered explicitly.

@@ -52,8 +52,10 @@ crates/exo/src/          the engine
   transport/{ws,web}.rs  thin, replaceable; ws = native, web = browser
 crates/exo/tests/        19 tests; common/sim.rs is a seeded in-process network
 crates/exo/examples/     offline (TUI), multiplayer (TUI), iced (GUI, native+web)
-crates/todo/             the demo domain — the ONLY apply, shared by every peer
-crates/ffi/              crates/todo over UniFFI, for the Expo client
+crates/todo-wasm/        the domain — the ONLY apply, compiled to wasm
+crates/todo/             its read model: the table, the row, `list`
+crates/mutators/         the wasm host every peer links; `apply` lives here
+crates/ffi/              the client over UniFFI, for the Expo app
 clients/expo/            the Expo app; src/ is UI and a socket, nothing else
   modules/exo-todo/      the turbo module — generated, gitignored, not authored
 docs/decisions.md        why everything is the way it is — read this first
@@ -69,6 +71,8 @@ just serve        # one server…
 just peer alice   # …a TUI peer…
 just iced bob     # …a desktop GUI peer…
 just web          # …a browser peer, at localhost:8080
+just mutators     # rebuild the domain and hand it to Metro (0.46s)
+just mutators-watch # …on every save. Leave it running beside `bun start`.
 just ffi-bindings # regenerate the Expo client's TS from crates/ffi, and typecheck
 just expo-android # …and a phone. Needs `nix develop .#android`; see below.
 ```
@@ -94,13 +98,17 @@ come back — that is the rebase, visible.
 
 ## The Expo client, in one paragraph
 
-Never write domain logic in TypeScript. `crates/todo` holds the mutations and
-the queries; `crates/ffi` exports them with `#[uniffi::export]` (there is no UDL
-file — the Rust is the interface definition); `uniffi-bindgen-react-native`
-generates `clients/expo/modules/exo-todo/`, which is gitignored precisely so it
-cannot be hand-edited. `just ffi-bindings` regenerates and runs `tsc`, which
-turns a stale call site into a compile error. It reads the metadata out of a
-*host* build, so it needs no NDK and no Xcode and takes seconds.
+Never write domain logic in TypeScript. `apply` is in `crates/todo-wasm`,
+compiled to a wasm module that every peer interprets through `crates/mutators` —
+the server included, which is what makes a rejection a verdict rather than one
+machine's opinion. `crates/ffi` exports the client with `#[uniffi::export]`
+(there is no UDL file; the Rust is the interface definition) and
+`uniffi-bindgen-react-native` generates `clients/expo/modules/exo-todo/`, which
+is gitignored so it cannot be hand-edited.
+
+Changing a mutation does **not** need a native build: `just mutators` rebuilds
+the module in ~0.5s and rewrites the base64 `.ts` that Metro pushes. Changing
+the *engine* does need one, and that is what EAS is for.
 
 ## Traps in the client toolchain
 
