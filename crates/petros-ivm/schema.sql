@@ -16,3 +16,8 @@ CREATE TABLE IF NOT EXISTS other (
 CREATE TABLE IF NOT EXISTS note (
     id BLOB NOT NULL, song_id BLOB NOT NULL REFERENCES song(id),
     text TEXT NOT NULL, PRIMARY KEY (id));
+-- A third level, so nesting is tested rather than asserted: a song has notes
+-- and a note has authors. `Song::note` then `Note::author`.
+CREATE TABLE IF NOT EXISTS author (
+    id BLOB NOT NULL, note_id BLOB NOT NULL REFERENCES note(id),
+    name TEXT NOT NULL, PRIMARY KEY (id));

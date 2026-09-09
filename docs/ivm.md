@@ -144,6 +144,24 @@ maintained: hearting a song does not add, remove or edit any *song*, and yet a
 library view has to move. The alternative — remove the row and add it back — is
 a flicker and a lost scroll position.
 
+**Nesting**, to any depth. `Child` carries the relationship's name and another
+`Delta`, so a change two levels down arrives as a child of a child. A
+`Pipeline` composes:
+
+```rust
+Pipeline::of(songs)
+    .related(Song::note, Pipeline::of(notes)
+        .related(Note::author, Pipeline::of(authors)))
+```
+
+The child side is an operator rather than a plan, which is what makes that
+work — and it is why `Fetch` carries a constraint. The `IN` covering a page of
+parents has to travel *through* the child's own filter and limit, or every
+level costs a statement per parent.
+
+**A client that uses it.** `Client::take_changes()`, and the desktop client
+holds a `View` instead of re-reading the list on every tap.
+
 ## One thing I got wrong about the shape
 
 Zero wires operators with output pointers: an operator holds the next one and
@@ -170,6 +188,25 @@ the new row part of the window before anything seeks past it.
 
 Six hand-written tests all passed with this bug present. A two-thousand-step
 random session against a re-run of the same query found it at step 26.
+
+## Two things a test that checks the answer cannot see
+
+Twice now, deliberately breaking the code failed nothing:
+
+- an append past a full window was admitted and then evicted — same answer,
+  wasted work. Fixed by having `push` return how many changes reached the view.
+- the constraint never reaching the child pipeline, and the limit never reaching
+  the statement — same answer, whole tables read. Fixed by a `Store` wrapper in
+  the tests that counts pulls and rows.
+
+The second one found a real bug rather than only proving a claim: `Take` was
+fetching its input entire and truncating, so hydrating a view of the top twenty
+of a hundred thousand rows read a hundred thousand. It now asks for twenty, and
+a refill asks for one.
+
+The lesson is the same both times. An incremental view is a *cost* argument, and
+a test that only compares rows passes against a pipeline doing all the work it
+was built to avoid.
 
 ## What the return-value shape bought a second time
 
@@ -208,12 +245,21 @@ is a real case and does not need an orphan to exist.
 3. ~~The operators:~~ filter, take and join, all done. Filter was trivial and
    take was where the design was tested, exactly as expected.
 4. ~~Relationships~~ — `select_with` reads one, `View::related` maintains one.
-5. **Wire a view into a client.** Nothing uses this yet: harken's `library()`
-   still runs on every read. A client holds a `View`, hands it
-   `store.take_changes()` after each entry, and renders from it — and the
-   rebase makes that interesting, because a replay is a great many changes at
-   once and the view should coalesce rather than churn.
-6. **Aggregates**, which is where the flat comparison below stops being kind to
+5. ~~Wire a view into a client~~ — `Client::take_changes()` and the desktop
+   client. The rebase turned out to be the interesting part: it rolls the
+   optimistic view back, and a rollback reports nothing, so no list of changes
+   describes it. `Changes::Rebuilt` says so instead of lying, and costs one
+   query in the case where the server speaks while something of ours is
+   pending.
+6. **A typed accessor for a nested view.** `with::<C>()` reads one relationship;
+   deeper than that is `nodes()`, which is untyped. A type describing arbitrary
+   nesting is real type-level work in `tables!` and is not worth it until a
+   screen wants one.
+7. **Per-partition take state.** A limit on a *child* relationship means "this
+   many per parent", which one statement cannot say. `select_with` refuses it
+   and a constrained `Take` does not cache. Zero keys take state by partition;
+   this would too.
+8. **Aggregates**, which is where the flat comparison below stops being kind to
    the re-run: `COUNT` and `MAX` over a table are O(n) every time, and O(1) to
    maintain.
 

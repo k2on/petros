@@ -53,10 +53,14 @@ pub type Row = Vec<Value>;
 /// Every stage deals in these, even the ones with no relationship in them,
 /// where `related` is simply empty. One item type rather than two means an
 /// operator does not have to know whether there is a join below it.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// The children are themselves trees, and they are *named*, because a row can
+/// have more than one relationship — a song with its favourite and its notes —
+/// and something has to say which of them a change is about.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Tree {
     pub row: Row,
-    pub related: Vec<Row>,
+    pub related: Vec<(&'static str, Vec<Tree>)>,
 }
 
 impl Tree {
@@ -66,6 +70,24 @@ impl Tree {
             row,
             related: Vec::new(),
         }
+    }
+
+    /// One named relationship's children.
+    pub fn children(&self, name: &str) -> &[Tree] {
+        self.related
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(&[], |(_, kids)| kids.as_slice())
+    }
+
+    /// The same, to write into. Created empty if this is the first the node has
+    /// heard of the relationship.
+    fn children_mut(&mut self, name: &'static str) -> &mut Vec<Tree> {
+        if let Some(at) = self.related.iter().position(|(n, _)| *n == name) {
+            return &mut self.related[at].1;
+        }
+        self.related.push((name, Vec::new()));
+        &mut self.related.last_mut().expect("just pushed").1
     }
 }
 
@@ -77,9 +99,10 @@ impl Tree {
 /// "something beneath this row changed" is to remove the row and add it back,
 /// which is a screen flicker and a lost scroll position.
 ///
-/// Zero's is recursive because its trees nest arbitrarily. This one is not,
-/// because [`Join`] nests one level — the same level `select_with` reads — and
-/// a recursive type that can only ever be one deep is a lie about the design.
+/// `Child` is recursive, and carries the relationship's name, because trees
+/// nest: a note edited under a song under an album is a `Child` of the album
+/// whose inner change is a `Child` of the song. Depth is a property of the
+/// query rather than of this type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Delta {
     Add(Tree),
@@ -91,16 +114,10 @@ pub enum Delta {
     },
     Child {
         parent: Row,
-        change: ChildChange,
+        /// Which relationship of the parent moved.
+        name: &'static str,
+        change: Box<Delta>,
     },
-}
-
-/// What happened underneath a row.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ChildChange {
-    Add(Row),
-    Remove(Row),
-    Edit { old: Row, new: Row },
 }
 
 impl Delta {
@@ -114,17 +131,63 @@ impl Delta {
     }
 }
 
+/// What a pull asks for.
+///
+/// `constraint` is what makes nesting work. A join fetches the children of a
+/// whole page of parents at once — `song_id IN (…)` — and that has to travel
+/// *through* the child's own pipeline, filter and all, or every level of
+/// nesting costs a statement per parent. Zero calls the same thing a
+/// multi-constraint, and it is why its `fetch` takes one.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Fetch<'a> {
+    /// Seek past this row, in the pipeline's order. A whole row, in table
+    /// order, the same thing [`Plan::start`] carries.
+    pub start: Option<&'a [Value]>,
+    /// An extra condition, on top of whatever the query already said.
+    pub constraint: Option<&'a Node>,
+    /// At most this many rows, when the caller knows it cannot use more.
+    ///
+    /// A `Take` hydrating its window wants twenty rows and not the table; a
+    /// refill wants exactly one. Without this the limit is applied after the
+    /// rows arrive, and a view of the top twenty of a hundred thousand reads a
+    /// hundred thousand — which a row counter in the tests caught and an
+    /// assertion about the answer never would.
+    pub limit: Option<u32>,
+}
+
+impl<'a> Fetch<'a> {
+    pub fn after(start: &'a [Value]) -> Self {
+        Fetch {
+            start: Some(start),
+            ..Fetch::default()
+        }
+    }
+
+    pub fn where_(constraint: &'a Node) -> Self {
+        Fetch {
+            constraint: Some(constraint),
+            ..Fetch::default()
+        }
+    }
+
+    pub fn at_most(self, limit: usize) -> Self {
+        Fetch {
+            limit: Some(limit as u32),
+            ..self
+        }
+    }
+}
+
 /// One stage of a pipeline.
 ///
 /// Both directions: `fetch` pulls nodes, `push` reacts to a change. An operator
 /// that only pushed could not maintain a limit.
 pub trait Operator {
-    /// Pull nodes, in the pipeline's order, starting after `start`.
+    /// Pull nodes, in the pipeline's order.
     ///
-    /// `start` is a cursor, not an offset: it is the last row already seen — a
-    /// whole row, in table order, the same thing [`Plan::start`] carries — and
-    /// it exists so that a seek is a seek rather than a scan and a skip.
-    fn fetch(&mut self, store: &mut dyn Store, start: Option<&[Value]>) -> Vec<Tree>;
+    /// The cursor in [`Fetch`] is why a limit can be maintained at all: a seek
+    /// past a known row rather than a scan and a skip.
+    fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree>;
 
     /// React to a change to the database.
     ///
@@ -139,8 +202,8 @@ pub trait Operator {
 /// A boxed operator is an operator, so a pipeline can be assembled at runtime
 /// from a plan that only says at build time which stages it has.
 impl Operator for Box<dyn Operator> {
-    fn fetch(&mut self, store: &mut dyn Store, start: Option<&[Value]>) -> Vec<Tree> {
-        (**self).fetch(store, start)
+    fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree> {
+        (**self).fetch(store, req)
     }
 
     fn push(&mut self, store: &mut dyn Store, change: &Change) -> Vec<Delta> {
@@ -166,9 +229,21 @@ impl Source {
 }
 
 impl Operator for Source {
-    fn fetch(&mut self, store: &mut dyn Store, start: Option<&[Value]>) -> Vec<Tree> {
+    fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree> {
         let mut plan = self.plan.clone();
-        plan.start = start.map(|s| s.to_vec());
+        plan.start = req.start.map(|s| s.to_vec());
+        if let Some(constraint) = req.constraint {
+            // Into the statement, not applied to the rows it returns. This is
+            // the whole point: one query for a page of parents' children.
+            plan.filter = Some(and(plan.filter.take(), constraint.clone()));
+        }
+        // A constrained pull is many parents' children at once, so the caller's
+        // limit is per parent and cannot be applied to the whole statement.
+        plan.limit = if req.constraint.is_some() {
+            None
+        } else {
+            req.limit
+        };
         store.fetch(&plan).into_iter().map(Tree::leaf).collect()
     }
 
@@ -218,8 +293,8 @@ impl<I: Operator> Filter<I> {
 }
 
 impl<I: Operator> Operator for Filter<I> {
-    fn fetch(&mut self, store: &mut dyn Store, start: Option<&[Value]>) -> Vec<Tree> {
-        self.input.fetch(store, start)
+    fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree> {
+        self.input.fetch(store, req)
     }
 
     fn push(&mut self, store: &mut dyn Store, change: &Change) -> Vec<Delta> {
@@ -253,69 +328,67 @@ impl<I: Operator> Operator for Filter<I> {
 
 /// A relationship, maintained: a row with its children hanging off it.
 ///
-/// The parent side comes from `input`. The child side does not come from
-/// anywhere below — a change to the child table is nothing to the parent's
-/// source — so this operator reads the raw change on its way down and decides
-/// for itself. That is the second thing the return-value shape buys.
+/// The child side is a *pipeline*, not a plan, which is what makes nesting
+/// work: a song's notes can themselves carry their author, and each level is
+/// an operator like any other. It is also why [`Fetch`] carries a constraint —
+/// the `IN` covering a whole page of parents has to travel through the child's
+/// own filter and limit rather than be applied outside them.
 ///
-/// Children are fetched for a whole page at once, with `IN`, rather than one
-/// statement per parent. The same batched fetch `select_with` does.
-pub struct Join<I> {
+/// The parent side comes from `input`. The child side does not come from below
+/// — a change to the child table is nothing to the parent's source — so the raw
+/// change goes to the child pipeline separately, and whatever it makes of it,
+/// including a deeper `Child`, is attributed to the parent it belongs under.
+pub struct Join<I, C> {
     input: I,
+    child: C,
+    /// The relationship's name, which is what a `Child` change carries so a
+    /// row with two of them can tell which one moved.
+    name: &'static str,
     /// The parent's column the child points at, as a position.
     from: usize,
     /// The child's column that points back, by name and by position.
     to: (String, usize),
-    child: Plan,
-    child_def: TableDef,
     /// The parent's own plan, for finding the parent a changed child points at.
     parent: Plan,
     from_column: String,
 }
 
-impl<I: Operator> Join<I> {
-    pub fn new<P: Table, C: Table>(
+impl<I: Operator, C: Operator> Join<I, C> {
+    pub fn new<P: Table, K: Table>(
         input: I,
         parent: Plan,
-        rel: Relation<P, C>,
-        children: petros_schema::Query<C>,
+        name: &'static str,
+        rel: Relation<P, K>,
+        child: C,
     ) -> Self {
-        let child = children.into_plan();
         Join {
             from: position(P::DEF.columns, rel.from),
-            to: (rel.to.to_string(), position(C::DEF.columns, rel.to)),
+            to: (rel.to.to_string(), position(K::DEF.columns, rel.to)),
             input,
             child,
-            child_def: C::DEF,
+            name,
             parent,
             from_column: rel.from.to_string(),
         }
     }
 
-    /// Every child of these parents, in one statement, grouped.
-    fn children_of(&mut self, store: &mut dyn Store, parents: &[Row]) -> Vec<Vec<Row>> {
+    /// Every child of these parents, in one pull through the child pipeline,
+    /// grouped by the parent each belongs to.
+    fn children_of(&mut self, store: &mut dyn Store, parents: &[Row]) -> Vec<Vec<Tree>> {
         let keys: Vec<Value> = parents.iter().map(|p| p[self.from].clone()).collect();
         if keys.is_empty() {
             return Vec::new();
         }
-        let mut plan = self.child.clone();
-        plan.filter = Some(and(
-            plan.filter.take(),
-            Node::In {
-                column: self.to.0.clone(),
-                values: keys,
-            },
-        ));
-        // A limit here would mean "this many children per parent", which one
-        // statement cannot say. `select_with` refuses it for the same reason.
-        plan.limit = None;
-
-        let rows = store.fetch(&plan);
+        let constraint = Node::In {
+            column: self.to.0.clone(),
+            values: keys,
+        };
+        let kids = self.child.fetch(store, Fetch::where_(&constraint));
         parents
             .iter()
             .map(|parent| {
-                rows.iter()
-                    .filter(|child| child[self.to.1] == parent[self.from])
+                kids.iter()
+                    .filter(|kid| kid.row[self.to.1] == parent[self.from])
                     .cloned()
                     .collect()
             })
@@ -326,19 +399,14 @@ impl<I: Operator> Join<I> {
         let related = self.children_of(store, &rows);
         rows.into_iter()
             .zip(related)
-            .map(|(row, related)| Tree { row, related })
+            .map(|(row, kids)| Tree {
+                row,
+                related: vec![(self.name, kids)],
+            })
             .collect()
     }
 
-    /// Does this child belong in the relationship at all?
-    fn admits(&self, child: &Row) -> bool {
-        self.child
-            .filter
-            .as_ref()
-            .is_none_or(|node| matches(node, child, self.child_def.columns))
-    }
-
-    /// The parent a child points at, if there is one the view would hold.
+    /// The parent a child row points at, if there is one this view would hold.
     ///
     /// The parent plan's own filter is kept, so hearting a song the view
     /// excludes reports nothing rather than a change to a row that is not
@@ -356,13 +424,21 @@ impl<I: Operator> Join<I> {
         plan.limit = Some(1);
         store.fetch(&plan).into_iter().next()
     }
+
+    fn under(&self, parent: Row, change: Delta) -> Delta {
+        Delta::Child {
+            parent,
+            name: self.name,
+            change: Box::new(change),
+        }
+    }
 }
 
-impl<I: Operator> Operator for Join<I> {
-    fn fetch(&mut self, store: &mut dyn Store, start: Option<&[Value]>) -> Vec<Tree> {
+impl<I: Operator, C: Operator> Operator for Join<I, C> {
+    fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree> {
         let rows: Vec<Row> = self
             .input
-            .fetch(store, start)
+            .fetch(store, req)
             .into_iter()
             .map(|tree| tree.row)
             .collect();
@@ -378,8 +454,11 @@ impl<I: Operator> Operator for Join<I> {
         for delta in self.input.push(store, change) {
             match delta {
                 Delta::Add(tree) => {
-                    let hydrated = self.hydrate(store, vec![tree.row]);
-                    out.extend(hydrated.into_iter().map(Delta::Add));
+                    out.extend(
+                        self.hydrate(store, vec![tree.row])
+                            .into_iter()
+                            .map(Delta::Add),
+                    );
                 }
                 Delta::Edit { old, new } => {
                     let mut hydrated = self.hydrate(store, vec![new.row]);
@@ -392,67 +471,34 @@ impl<I: Operator> Operator for Join<I> {
             }
         }
 
-        // The child side, which nothing below this can see: a change to the
-        // child table is not a change to any parent row, and yet the view has
-        // to move. This is the case `Child` exists for.
-        if table_of(change) != self.child.table {
-            return out;
-        }
-        match change.clone() {
-            Change::Add { row, .. } => {
-                if self.admits(&row) {
-                    if let Some(parent) = self.parent_of(store, &row) {
-                        out.push(Delta::Child {
-                            parent,
-                            change: ChildChange::Add(row),
-                        });
+        // The child side, which nothing below this can see. Note that the
+        // change goes to the child *pipeline*, so what comes back may itself be
+        // a `Child` from a level deeper — and it is attributed the same way.
+        for delta in self.child.push(store, change) {
+            match delta {
+                Delta::Edit { old, new } => {
+                    // A child can be edited onto a different parent. That is a
+                    // remove from one and an add to the other; passing it
+                    // through whole would leave the old parent holding it.
+                    let from = self.parent_of(store, &old);
+                    let to = self.parent_of(store, &new.row);
+                    match (from, to) {
+                        (Some(a), Some(b)) if a == b => {
+                            out.push(self.under(a, Delta::Edit { old, new }))
+                        }
+                        (from, to) => {
+                            if let Some(parent) = from {
+                                out.push(self.under(parent, Delta::Remove(old)));
+                            }
+                            if let Some(parent) = to {
+                                out.push(self.under(parent, Delta::Add(new)));
+                            }
+                        }
                     }
                 }
-            }
-            Change::Remove { row, .. } => {
-                if self.admits(&row) {
-                    if let Some(parent) = self.parent_of(store, &row) {
-                        out.push(Delta::Child {
-                            parent,
-                            change: ChildChange::Remove(row),
-                        });
-                    }
-                }
-            }
-            Change::Edit { old, new, .. } => {
-                // A child can be edited across the relationship's own filter,
-                // or onto a different parent. Both are a remove from one place
-                // and an add to another, and treating them as an edit would
-                // leave the old parent holding a child it no longer has.
-                let (was, is) = (self.admits(&old), self.admits(&new));
-                let from = if was {
-                    self.parent_of(store, &old)
-                } else {
-                    None
-                };
-                let to = if is {
-                    self.parent_of(store, &new)
-                } else {
-                    None
-                };
-                match (from, to) {
-                    (Some(a), Some(b)) if a == b => out.push(Delta::Child {
-                        parent: a,
-                        change: ChildChange::Edit { old, new },
-                    }),
-                    (from, to) => {
-                        if let Some(parent) = from {
-                            out.push(Delta::Child {
-                                parent,
-                                change: ChildChange::Remove(old),
-                            });
-                        }
-                        if let Some(parent) = to {
-                            out.push(Delta::Child {
-                                parent,
-                                change: ChildChange::Add(new),
-                            });
-                        }
+                other => {
+                    if let Some(parent) = self.parent_of(store, &other.row().clone()) {
+                        out.push(self.under(parent, other));
                     }
                 }
             }
@@ -505,7 +551,12 @@ impl<I: Operator> Take<I> {
     /// Pull the node that comes after the window, to replace one that left it.
     fn refill(&mut self, store: &mut dyn Store) -> Option<Tree> {
         let bound = self.bound();
-        self.input.fetch(store, bound.as_deref()).into_iter().next()
+        let req = match &bound {
+            Some(row) => Fetch::after(row),
+            None => Fetch::default(),
+        };
+        // Exactly one: this replaces a single row that left the window.
+        self.input.fetch(store, req.at_most(1)).into_iter().next()
     }
 
     fn insert(&mut self, tree: Tree) {
@@ -517,13 +568,23 @@ impl<I: Operator> Take<I> {
 }
 
 impl<I: Operator> Operator for Take<I> {
-    fn fetch(&mut self, store: &mut dyn Store, start: Option<&[Value]>) -> Vec<Tree> {
+    fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree> {
+        // A constraint means a different partition — the top N *of these
+        // parents' children*, not of everything — and the cached window is
+        // about the unconstrained one. Zero keys take state per partition; this
+        // simply does not cache the constrained case, which is correct and
+        // costs a seek of `limit` rows rather than of the table.
+        if req.constraint.is_some() {
+            let mut rows = self.input.fetch(store, req);
+            rows.truncate(self.limit);
+            return rows;
+        }
         if !self.hydrated {
-            self.window = self.input.fetch(store, None);
+            self.window = self.input.fetch(store, req.at_most(self.limit));
             self.window.truncate(self.limit);
             self.hydrated = true;
         }
-        match start {
+        match req.start {
             None => self.window.clone(),
             Some(start) => self
                 .window
@@ -593,19 +654,116 @@ impl<I: Operator> Operator for Take<I> {
                     // window's shape is unchanged — but the copy it holds has
                     // to be updated too, or the next refill hands the view a
                     // node with stale children.
-                    Delta::Child { parent, change } => {
+                    Delta::Child {
+                        parent,
+                        name,
+                        change,
+                    } => {
                         let Some(held) = self.window.iter_mut().find(|held| held.row == parent)
                         else {
                             continue;
                         };
-                        apply_child(&mut held.related, &change, &self.order);
-                        out.push(Delta::Child { parent, change });
+                        apply_child(held, name, &change);
+                        out.push(Delta::Child {
+                            parent,
+                            name,
+                            change,
+                        });
                     }
                     Delta::Edit { .. } => unreachable!("split above"),
                 }
             }
         }
         out
+    }
+}
+
+// --------------------------------------------------------------- the pipeline
+
+/// A pipeline under construction.
+///
+/// It exists so that relationships can nest. `View::related` is the one-level
+/// convenience; two levels are two `related` calls, and there is no depth this
+/// type knows about.
+///
+/// ```text
+/// Pipeline::of(albums)
+///     .related(Album::song, Pipeline::of(songs)
+///         .related(Song::note, Pipeline::of(notes)))
+/// ```
+///
+/// The limit is held back rather than applied as it goes, so the `Take` ends up
+/// *above* the joins. Not for correctness — this join nests rather than
+/// flattening, so there is no product and either position counts parents — but
+/// because the window then holds whole nodes. A child that moves under a row in
+/// the window updates the copy held there, and a later pull is answered from
+/// memory instead of re-reading the children.
+pub struct Pipeline {
+    top: Box<dyn Operator>,
+    order: Vec<(usize, Dir)>,
+    limit: Option<u32>,
+    /// This level's plan, which the join above needs to find the parent a
+    /// changed child points at.
+    plan: Plan,
+}
+
+impl Pipeline {
+    /// Start one from a query.
+    ///
+    /// The filter goes in twice on purpose: into the source, where it becomes
+    /// SQL and makes a pull one statement, and into a [`Filter`], which judges
+    /// rows that arrive as changes. One `Node`, read two ways.
+    pub fn of<T: Table + 'static>(query: petros_schema::Query<T>) -> Self {
+        let plan = query.into_plan();
+        let def = T::DEF;
+        let order = order_of(&plan, &def);
+
+        let mut source = plan.clone();
+        source.limit = None;
+        source.start = None;
+        let mut top: Box<dyn Operator> = Box::new(Source::new(source));
+        if let Some(node) = plan.filter.clone() {
+            top = Box::new(Filter::new(top, node, def.columns));
+        }
+
+        let mut bare = plan.clone();
+        bare.limit = None;
+        bare.start = None;
+        Pipeline {
+            top,
+            order,
+            limit: plan.limit,
+            plan: bare,
+        }
+    }
+
+    /// Hang a child pipeline off each row.
+    ///
+    /// The relationship is named after the child's table, which is the name
+    /// `tables!` gives the constant it generates — so `Song::favorite` and
+    /// `with::<Favorite>()` agree without anyone writing the string.
+    pub fn related<P: Table, C: Table + 'static>(
+        mut self,
+        rel: Relation<P, C>,
+        child: Pipeline,
+    ) -> Self {
+        let parent = self.plan.clone();
+        self.top = Box::new(Join::new(
+            self.top,
+            parent,
+            C::DEF.name,
+            rel,
+            child.finish(),
+        ));
+        self
+    }
+
+    /// Put the take on top, where it counts parents.
+    fn finish(self) -> Box<dyn Operator> {
+        match self.limit {
+            Some(limit) => Box::new(Take::new(self.top, limit as usize, self.order)),
+            None => self.top,
+        }
     }
 }
 
@@ -618,79 +776,42 @@ pub struct View<P: Table> {
     top: Box<dyn Operator>,
     nodes: Vec<Tree>,
     order: Vec<(usize, Dir)>,
-    child_order: Vec<(usize, Dir)>,
     hydrated: bool,
     marker: std::marker::PhantomData<fn() -> P>,
 }
 
 impl<P: Table + 'static> View<P> {
-    /// Compile a query into a pipeline.
-    ///
-    /// The filter goes in twice on purpose: into the source, where it becomes
-    /// SQL and makes the hydrate one statement, and into a [`Filter`], where it
-    /// judges rows that arrive as changes. The limit becomes a [`Take`].
-    pub fn new(query: petros_schema::Query<P>) -> Self {
-        Self::build(query, |top| top, Vec::new())
-    }
-
-    /// The same, with a relationship hanging off each row — the maintained
-    /// counterpart of `select_with`, and the same arguments in the same order.
-    pub fn related<C: Table + 'static>(
-        query: petros_schema::Query<P>,
-        rel: Relation<P, C>,
-        children: petros_schema::Query<C>,
-    ) -> Self {
-        let child_order = order_of(children.plan(), &C::DEF);
-        let parent = {
-            let mut plan = query.plan().clone();
-            plan.limit = None;
-            plan.start = None;
-            plan
-        };
-        Self::build(
-            query,
-            move |top| Box::new(Join::new(top, parent, rel, children)) as Box<dyn Operator>,
-            child_order,
-        )
-    }
-
-    fn build(
-        query: petros_schema::Query<P>,
-        join: impl FnOnce(Box<dyn Operator>) -> Box<dyn Operator>,
-        child_order: Vec<(usize, Dir)>,
-    ) -> Self {
-        let plan = query.into_plan();
-        let def = P::DEF;
-        let order = order_of(&plan, &def);
-
-        let mut source = plan.clone();
-        source.limit = None;
-        source.start = None;
-        let mut top: Box<dyn Operator> = Box::new(Source::new(source));
-        if let Some(node) = plan.filter.clone() {
-            top = Box::new(Filter::new(top, node, def.columns));
-        }
-        // The join sits above the filter and below the take: a parent the
-        // filter refused has no children worth fetching, and the take must
-        // count parents rather than rows of a product.
-        top = join(top);
-        if let Some(limit) = plan.limit {
-            top = Box::new(Take::new(top, limit as usize, order.clone()));
-        }
-
+    /// A view over any pipeline, however deep.
+    pub fn over(pipeline: Pipeline) -> Self {
+        let order = pipeline.order.clone();
         View {
-            top,
+            top: pipeline.finish(),
             nodes: Vec::new(),
             order,
-            child_order,
             hydrated: false,
             marker: std::marker::PhantomData,
         }
     }
 
+    /// A flat query, maintained.
+    pub fn new(query: petros_schema::Query<P>) -> Self {
+        Self::over(Pipeline::of(query))
+    }
+
+    /// One relationship hanging off each row — the maintained counterpart of
+    /// `select_with`, and the same arguments in the same order. For more than
+    /// one level, build a [`Pipeline`] and use [`View::over`].
+    pub fn related<C: Table + 'static>(
+        query: petros_schema::Query<P>,
+        rel: Relation<P, C>,
+        children: petros_schema::Query<C>,
+    ) -> Self {
+        Self::over(Pipeline::of(query).related(rel, Pipeline::of(children)))
+    }
+
     /// Run the query once, to have something to maintain.
     pub fn hydrate(&mut self, store: &mut dyn Store) {
-        self.nodes = self.top.fetch(store, None);
+        self.nodes = self.top.fetch(store, Fetch::default());
         self.hydrated = true;
     }
 
@@ -728,9 +849,13 @@ impl<P: Table + 'static> View<P> {
                         .partition_point(|held| compare(&held.row, &new.row, &self.order).is_lt());
                     self.nodes.insert(at, new);
                 }
-                Delta::Child { parent, change } => {
+                Delta::Child {
+                    parent,
+                    name,
+                    change,
+                } => {
                     if let Some(held) = self.nodes.iter_mut().find(|held| held.row == parent) {
-                        apply_child(&mut held.related, &change, &self.child_order);
+                        apply_child(held, name, &change);
                     }
                 }
             }
@@ -752,19 +877,30 @@ impl<P: Table + 'static> View<P> {
             .collect()
     }
 
-    /// The answer with its relationship, for a view built by [`View::related`].
-    /// The same shape `select_with` returns, so a screen reads one or the other
-    /// without knowing which.
+    /// The answer with one relationship, for a view that has one. The same
+    /// shape `select_with` returns, so a screen reads one or the other without
+    /// knowing which is maintained.
     pub fn with<C: Table>(&self) -> Vec<With<P, C>> {
         self.nodes
             .iter()
             .filter_map(|node| {
                 Some(With {
                     row: P::from_row(&node.row)?,
-                    related: node.related.iter().filter_map(|r| C::from_row(r)).collect(),
+                    related: node
+                        .children(C::DEF.name)
+                        .iter()
+                        .filter_map(|kid| C::from_row(&kid.row))
+                        .collect(),
                 })
             })
             .collect()
+    }
+
+    /// The whole tree, for a view deeper than one relationship. Untyped,
+    /// because a type that describes arbitrary nesting is a bigger thing than
+    /// this and is not needed until a screen wants one.
+    pub fn nodes(&self) -> &[Tree] {
+        &self.nodes
     }
 
     pub fn len(&self) -> usize {
@@ -798,24 +934,38 @@ fn and(existing: Option<Node>, extra: Node) -> Node {
     }
 }
 
-/// One child change, against the list a node holds.
-fn apply_child(related: &mut Vec<Row>, change: &ChildChange, order: &[(usize, Dir)]) {
+/// One change, against the children a node holds under `name`.
+///
+/// Recursive: a `Child` inside a `Child` walks down another level, which is how
+/// a note edited under a song under an album reaches the note.
+///
+/// The children arrive from the child pipeline already in its order, and a new
+/// one is appended rather than sorted in — the pipeline decides the order, and
+/// re-deriving it here would be a second opinion about it. A view that needs
+/// the child order maintained across inserts pulls the relationship again;
+/// that is the next thing to sharpen if it matters.
+fn apply_child(node: &mut Tree, name: &'static str, change: &Delta) {
+    let kids = node.children_mut(name);
     match change {
-        ChildChange::Add(row) => {
-            let at = related.partition_point(|held| compare(held, row, order).is_lt());
-            related.insert(at, row.clone());
-        }
-        ChildChange::Remove(row) => {
-            if let Some(at) = related.iter().position(|held| held == row) {
-                related.remove(at);
+        Delta::Add(tree) => kids.push(tree.clone()),
+        Delta::Remove(row) => {
+            if let Some(at) = kids.iter().position(|held| held.row == *row) {
+                kids.remove(at);
             }
         }
-        ChildChange::Edit { old, new } => {
-            if let Some(at) = related.iter().position(|held| held == old) {
-                related.remove(at);
+        Delta::Edit { old, new } => {
+            if let Some(at) = kids.iter().position(|held| held.row == *old) {
+                kids[at] = new.clone();
             }
-            let at = related.partition_point(|held| compare(held, new, order).is_lt());
-            related.insert(at, new.clone());
+        }
+        Delta::Child {
+            parent,
+            name: inner,
+            change,
+        } => {
+            if let Some(kid) = kids.iter_mut().find(|held| held.row == *parent) {
+                apply_child(kid, inner, change);
+            }
         }
     }
 }
