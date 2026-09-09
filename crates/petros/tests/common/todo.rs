@@ -1,6 +1,5 @@
 //! A shared to-do list, expressed as intents rather than facts.
 
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sqlite::Sqlite;
 use petros::{ActorId, App, AutoCtx, Connection, Id, Mutation, MutationError, Transaction};
@@ -178,20 +177,15 @@ pub struct Todo;
 impl App for Todo {
     type Mutation = TodoMutation;
 
-    fn migrate(conn: &mut Connection) -> petros::Result<()> {
-        conn.batch_execute(
-            "CREATE TABLE IF NOT EXISTS todo (
-                 id         BLOB PRIMARY KEY NOT NULL,
-                 text       TEXT NOT NULL,
-                 done       BOOL NOT NULL DEFAULT 0,
-                 pos        BIGINT NOT NULL,
-                 created_ms BIGINT NOT NULL,
-                 actor      TEXT NOT NULL,
-                 claimed_by TEXT
-             );",
-        )?;
-        Ok(())
-    }
+    const SCHEMA: &'static str = "CREATE TABLE IF NOT EXISTS todo (
+             id         BLOB PRIMARY KEY NOT NULL,
+             text       TEXT NOT NULL,
+             done       BOOL NOT NULL DEFAULT 0,
+             pos        BIGINT NOT NULL,
+             created_ms BIGINT NOT NULL,
+             actor      TEXT NOT NULL,
+             claimed_by TEXT
+         );";
 }
 
 /// Always `ORDER BY` explicitly: SQLite's natural order is not a contract.

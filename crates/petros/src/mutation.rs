@@ -115,9 +115,20 @@ pub trait App: 'static {
     /// The app's mutation enum.
     type Mutation: Mutation;
 
-    /// Create the app's tables. Must be idempotent: Petros calls it on every open.
+    /// The app's tables, as DDL.
     ///
-    /// Diesel's `table!` describes a schema rather than creating one, so this is
-    /// where the DDL that `table!` mirrors actually runs.
-    fn migrate(conn: &mut Connection) -> Result<()>;
+    /// Petros runs this on every open, so every statement has to be idempotent
+    /// — `CREATE TABLE IF NOT EXISTS`, and the same for indexes.
+    ///
+    /// Usually `include_str!("../schema.sql")`, which is also the file
+    /// `petros-sql` prepares the app's statements against at build time. One
+    /// description of the tables, checked and run from the same place.
+    const SCHEMA: &'static str;
+
+    /// Create the app's tables. The default runs [`SCHEMA`](App::SCHEMA), which
+    /// is what an app wants; override it only for a migration that DDL cannot
+    /// express.
+    fn migrate(conn: &mut Connection) -> Result<()> {
+        crate::batch(conn, Self::SCHEMA)
+    }
 }

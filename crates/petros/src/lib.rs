@@ -39,11 +39,7 @@
 //! # struct Notes;
 //! # impl App for Notes {
 //! #     type Mutation = M;
-//! #     fn migrate(conn: &mut Connection) -> petros::Result<()> {
-//! #         diesel::connection::SimpleConnection::batch_execute(
-//! #             conn, "CREATE TABLE IF NOT EXISTS note (text TEXT NOT NULL)")?;
-//! #         Ok(())
-//! #     }
+//! #     const SCHEMA: &'static str = "CREATE TABLE IF NOT EXISTS note (text TEXT NOT NULL)";
 //! # }
 //! let mut client = Client::<Notes>::open(open_memory()?, "alice", AutoCtx::seeded(1))?;
 //! client.mutate(M::Note { text: "buy milk".into() })?;
@@ -85,6 +81,18 @@ use diesel::connection::SimpleConnection;
 use diesel::Connection as _;
 
 /// An in-memory database, for tests and examples.
+/// Run one or more statements that take no parameters — DDL, pragmas.
+///
+/// Here so an app can create its tables without depending on Diesel. Petros
+/// owns the database library; nothing above it should have to name one.
+///
+/// Not for anything with a value in it. A statement with a value wants
+/// `petros_sql::exec!`, which checks it and binds rather than interpolating.
+pub fn batch(conn: &mut Connection, sql: &str) -> Result<()> {
+    diesel::connection::SimpleConnection::batch_execute(conn, sql)?;
+    Ok(())
+}
+
 pub fn open_memory() -> Result<Connection> {
     let mut conn = Connection::establish(":memory:")?;
     tune(&mut conn)?;

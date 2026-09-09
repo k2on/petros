@@ -5,7 +5,6 @@
 //! [`domain`](crate::domain) and none of this.
 
 use ciborium::value::Value;
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sqlite::Sqlite as SqliteBackend;
 use petros::backend::SqliteStore;
@@ -74,11 +73,7 @@ pub struct TodoApp;
 
 impl App for TodoApp {
     type Mutation = Payload;
-
-    fn migrate(conn: &mut Connection) -> petros::Result<()> {
-        conn.batch_execute(SCHEMA)?;
-        Ok(())
-    }
+    const SCHEMA: &'static str = SCHEMA;
 }
 
 /// The one description of this app's tables.
