@@ -424,18 +424,25 @@ fn host_store(mut caller: Caller<'_, HostState>, request: u32, len: u32) -> u32 
         let request: Request = ciborium::from_reader(&bytes[..])
             .map_err(|e| format!("the module sent a request we cannot read: {e}"))?;
         let conn = caller.data_mut().conn()?;
-        let mut store = SqliteStore(conn);
+        let mut store = SqliteStore::new(conn);
+        let encode = |rows: Vec<Vec<petros_schema::Value>>| -> Result<Vec<u8>, String> {
+            let mut out = Vec::new();
+            ciborium::into_writer(&rows, &mut out)
+                .map_err(|e| format!("could not encode the rows: {e}"))?;
+            Ok(out)
+        };
         Ok(match request {
-            Request::Exec { sql, params } => {
-                store.exec(&sql, &params);
+            Request::Query { sql, params, types } => encode(store.query(&sql, &params, &types))?,
+            Request::Get { table, key } => {
+                encode(store.get_row(&table, &key).into_iter().collect())?
+            }
+            Request::Put { table, row } => {
+                store.put_row(&table, &row);
                 Vec::new()
             }
-            Request::Query { sql, params, types } => {
-                let rows = store.query(&sql, &params, &types);
-                let mut out = Vec::new();
-                ciborium::into_writer(&rows, &mut out)
-                    .map_err(|e| format!("could not encode the rows: {e}"))?;
-                out
+            Request::Delete { table, key } => {
+                store.delete_row(&table, &key);
+                Vec::new()
             }
         })
     });

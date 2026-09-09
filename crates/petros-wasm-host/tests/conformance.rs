@@ -51,7 +51,11 @@ fn rows(conn: &mut Connection) -> Vec<Row> {
 /// The native side, exactly as `todo::Payload`'s `Mutation::apply` runs it:
 /// the same checked SQL, through a store backed by a real connection.
 fn native_apply(conn: &mut Connection, payload: &todo::Payload, actor: &str) -> Result<(), String> {
-    todo::apply(&mut petros::backend::SqliteStore(conn), &payload.0, actor)
+    todo::apply(
+        &mut petros::backend::SqliteStore::new(conn),
+        &payload.0,
+        actor,
+    )
 }
 
 fn encode(p: &todo::Payload) -> Vec<u8> {

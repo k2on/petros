@@ -123,7 +123,7 @@ impl<A: App> Client<A> {
     /// A query is generic over `Store` so it can run inside the sandbox as well
     /// as here; this saves every call site wrapping the connection itself.
     pub fn store(&mut self) -> crate::backend::SqliteStore<'_> {
-        crate::backend::SqliteStore(&mut self.conn)
+        crate::backend::SqliteStore::new(&mut self.conn)
     }
 
     pub fn actor(&self) -> &ActorId {

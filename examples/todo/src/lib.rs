@@ -13,13 +13,11 @@
 //! the rest.
 
 pub mod functions;
-/// The model. Only where there is a database: the sandbox applies mutations and
-/// never reads a row back.
-#[cfg(feature = "storage")]
+/// The model. The row types are wanted by both builds — a mutation writes them
+/// — so only the read model's view row inside is behind `storage`.
 pub mod schema;
 
 pub use functions::*;
-#[cfg(feature = "storage")]
 pub use schema::*;
 
 // The module a peer loads, and the whole of what a separate `todo-wasm` crate

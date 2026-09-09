@@ -1,12 +1,12 @@
-//! Raw SQL in a mutation, verified before it ships.
-//!
-//! Reads and writes both, which is the point: one mechanism, and SQLite is the
-//! thing that checks it. There is no second typed surface to keep in step.
+//! Reads are SQL, verified before they ship. Writes are typed, and say what
+//! they changed.
 
 use diesel::connection::SimpleConnection;
 use petros::backend::SqliteStore;
+use petros_schema::{Change, Rows, Store, Value};
 
 const SCHEMA: &str = include_str!("../schema.sql");
+petros_sql::tables!();
 
 fn db() -> petros::Connection {
     let mut conn = petros::open_memory().unwrap();
@@ -14,147 +14,106 @@ fn db() -> petros::Connection {
     conn
 }
 
-fn add(store: &mut SqliteStore, id: u8, title: &str, pos: i64) {
-    let id = vec![id; 16];
-    let title = title.to_string();
-    petros_sql::exec!(
-        store,
-        "INSERT INTO song (id, title, artist, pos) VALUES (?, ?, 'Bicep', ?)",
-        id,
-        title,
-        pos
-    );
-}
-
-/// A row comes back as a struct with a field per column, typed from what
-/// SQLite says the column is declared as.
-#[test]
-fn a_query_returns_typed_rows() {
-    let mut conn = db();
-    let mut store = SqliteStore(&mut conn);
-    add(&mut store, 1, "Glue", 1);
-    add(&mut store, 2, "Opal", 2);
-
-    let songs = petros_sql::query!(store, "SELECT id, title, pos FROM song ORDER BY pos, id");
-    assert_eq!(songs.len(), 2);
-    // `title` is a String and `pos` an i64 because the schema declares them so.
-    let titles: Vec<&str> = songs.iter().map(|s| s.title.as_str()).collect();
-    assert_eq!(titles, vec!["Glue", "Opal"]);
-    assert_eq!(songs[0].pos, 1);
-    assert_eq!(songs[0].id, vec![1u8; 16]);
-}
-
-/// An expression has no declared type, so it is named at the call site — the
-/// same annotation sqlx asks for, for the same reason.
-#[test]
-fn an_expression_is_typed_by_its_alias() {
-    let mut conn = db();
-    let mut store = SqliteStore(&mut conn);
-    add(&mut store, 1, "Glue", 7);
-
-    let last = petros_sql::query_one!(
-        store,
-        "SELECT COALESCE(MAX(pos), 0) AS \"last: Int\" FROM song"
-    )
-    .map(|r| r.last)
-    .unwrap_or(0);
-    assert_eq!(last, 7);
-
-    // And over nothing at all it is zero, which is what `MAX(pos) + 1` wants.
-    let mut empty = db();
-    let mut store = SqliteStore(&mut empty);
-    let none = petros_sql::query_one!(
-        store,
-        "SELECT COALESCE(MAX(pos), 0) AS \"last: Int\" FROM song"
-    )
-    .map(|r| r.last)
-    .unwrap_or(0);
-    assert_eq!(none, 0);
-}
-
-/// A left join makes a column nullable and SQLite will not say so, so `?` does.
-#[test]
-fn a_nullable_column_is_an_option() {
-    let mut conn = db();
-    let mut store = SqliteStore(&mut conn);
-    add(&mut store, 1, "Glue", 1);
-    add(&mut store, 2, "Opal", 2);
-    let id = vec![1u8; 16];
-    petros_sql::exec!(
-        store,
-        "INSERT INTO favorite (song_id, pos, favorited_ms, actor) VALUES (?, 1, 0, 'alice')",
-        id
-    );
-
-    let rows = petros_sql::query!(
-        store,
-        "SELECT s.title, f.pos AS \"place?: Int\"
-           FROM song s LEFT JOIN favorite f ON f.song_id = s.id
-          ORDER BY s.pos, s.id"
-    );
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].place, Some(1), "on the playlist");
-    assert_eq!(rows[1].place, None, "not on it");
-}
-
-/// The set operation the whole escape hatch is for: one statement, over
-/// however many rows there are.
-#[test]
-fn a_set_operation_in_one_statement() {
-    let mut conn = db();
-    let mut store = SqliteStore(&mut conn);
-    for i in 1..=5u8 {
-        add(&mut store, i, "t", i as i64);
+fn song(id: u8, title: &str, pos: i64) -> Song {
+    Song {
+        id: vec![id; 16],
+        title: title.into(),
+        artist: "Bicep".into(),
+        pos,
     }
-    let three = vec![3u8; 16];
-    petros_sql::exec!(
-        store,
-        "INSERT INTO favorite (song_id, pos, favorited_ms, actor) VALUES (?, 1, 10, 'bob')",
-        three
-    );
-
-    let now = 1_700_000_000i64;
-    let actor = "alice".to_string();
-    petros_sql::exec!(
-        store,
-        "INSERT INTO favorite (song_id, pos, favorited_ms, actor)
-         SELECT s.id,
-                (SELECT COALESCE(MAX(pos), 0) FROM favorite)
-                  + ROW_NUMBER() OVER (ORDER BY s.pos, s.id),
-                ?, ?
-           FROM song s
-          WHERE NOT EXISTS (SELECT 1 FROM favorite f WHERE f.song_id = s.id)
-          ORDER BY s.pos, s.id",
-        now,
-        actor
-    );
-
-    let playlist = petros_sql::query!(
-        store,
-        "SELECT song_id, pos, actor FROM favorite ORDER BY pos"
-    );
-    assert_eq!(playlist.len(), 5, "the four missing ones were added");
-    let places: Vec<i64> = playlist.iter().map(|f| f.pos).collect();
-    assert_eq!(places, vec![1, 2, 3, 4, 5], "each holds a distinct place");
-    // The one already there kept its place and its author.
-    assert_eq!((playlist[0].pos, playlist[0].actor.as_str()), (1, "bob"));
 }
 
-/// Values are bound, never pasted. The macro checks the statement; SQLite binds
-/// the values.
+/// The row types come out of the schema, so the columns and their types are
+/// whatever `schema.sql` says and there is nothing to keep in step.
 #[test]
-fn values_are_bound_not_pasted() {
+fn the_row_type_matches_the_table() {
+    use petros_schema::Table;
+    assert_eq!(Song::DEF.name, "song");
+    assert_eq!(Song::DEF.columns, &["id", "title", "artist", "pos"]);
+    assert_eq!(Song::DEF.key, &["id"]);
+    assert_eq!(Favorite::DEF.key, &["song_id"]);
+}
+
+#[test]
+fn a_row_survives_the_round_trip() {
     let mut conn = db();
-    let mut store = SqliteStore(&mut conn);
-    add(&mut store, 1, "Glue", 1);
-    let nasty = "'; DROP TABLE song; --".to_string();
-    petros_sql::exec!(
-        store,
-        "UPDATE song SET title = ? WHERE pos = ?",
-        nasty,
-        1i64
-    );
-    let all = petros_sql::query!(store, "SELECT title FROM song");
-    assert_eq!(all.len(), 1, "the table is still there");
-    assert_eq!(all[0].title, "'; DROP TABLE song; --");
+    let mut store = SqliteStore::new(&mut conn);
+
+    let one = song(1, "Glue", 1);
+    store.put(&one);
+    assert_eq!(store.get::<Song>(&Song::key_of(&vec![1u8; 16])), Some(one));
+    assert!(store.exists::<Song>(&Song::key_of(&vec![1u8; 16])));
+    assert!(!store.exists::<Song>(&Song::key_of(&vec![9u8; 16])));
+}
+
+/// The reason typed writes are back: a write says which row moved and what it
+/// was. `UPDATE … WHERE` could never say either.
+#[test]
+fn a_write_says_what_changed() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+
+    store.put(&song(1, "Glue", 1));
+    match store.take_changes().as_slice() {
+        [Change::Add { table, row }] => {
+            assert_eq!(table, "song");
+            assert_eq!(row[1], Value::Text("Glue".into()));
+        }
+        other => panic!("expected one add, got {other:?}"),
+    }
+
+    // An overwrite carries both versions. A view that sorts on `pos` needs the
+    // old one to know where the row was.
+    store.put(&song(1, "Glue (remastered)", 7));
+    match store.take_changes().as_slice() {
+        [Change::Edit { old, new, .. }] => {
+            assert_eq!(old[1], Value::Text("Glue".into()));
+            assert_eq!(old[3], Value::Int(1));
+            assert_eq!(new[1], Value::Text("Glue (remastered)".into()));
+            assert_eq!(new[3], Value::Int(7));
+        }
+        other => panic!("expected one edit, got {other:?}"),
+    }
+
+    store.delete::<Song>(&Song::key_of(&vec![1u8; 16]));
+    match store.take_changes().as_slice() {
+        [Change::Remove { row, .. }] => {
+            assert_eq!(row[1], Value::Text("Glue (remastered)".into()))
+        }
+        other => panic!("expected one remove, got {other:?}"),
+    }
+
+    // Deleting what is not there is a no-op, and a no-op is not a change: an
+    // entry earlier in the log may have removed it already.
+    store.delete::<Song>(&Song::key_of(&vec![1u8; 16]));
+    assert!(store.take_changes().is_empty());
+}
+
+/// Changes are drained, not accumulated. Whoever takes them owns them — they go
+/// to a view, or they go nowhere because a savepoint rolled back.
+#[test]
+fn changes_are_drained() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(1, "Glue", 1));
+    assert_eq!(store.take_changes().len(), 1);
+    assert!(store.take_changes().is_empty());
+}
+
+/// A read is still SQL, still checked, and still binds rather than pastes.
+#[test]
+fn reads_are_sql_and_values_are_bound() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    for (i, title) in ["it's a quote", "'; DROP TABLE song; --", "unicode ✓ ♥ 漢"]
+        .iter()
+        .enumerate()
+    {
+        store.put(&song(i as u8, title, i as i64));
+    }
+
+    let all = petros_sql::query!(store, "SELECT title, pos FROM song ORDER BY pos, title");
+    assert_eq!(all.len(), 3, "the table is still there");
+    assert_eq!(all[1].title, "'; DROP TABLE song; --");
+    assert_eq!(all[2].pos, 2);
 }

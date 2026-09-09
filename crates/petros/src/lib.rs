@@ -194,7 +194,7 @@ macro_rules! app {
                 actor: &$crate::ActorId,
             ) -> ::core::result::Result<(), $crate::MutationError> {
                 $apply(
-                    &mut $crate::backend::SqliteStore(tx.conn()),
+                    &mut $crate::backend::SqliteStore::new(tx.conn()),
                     &self.0,
                     actor.as_str(),
                 )

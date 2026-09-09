@@ -40,7 +40,7 @@ fn a_real_domain_converges_across_a_broken_network() {
     }
     assert_eq!(first, sim.server_hash(), "the server disagrees");
     assert_eq!(
-        todo::list(&mut petros::backend::SqliteStore(sim.conn(0)))
+        todo::list(&mut petros::backend::SqliteStore::new(sim.conn(0)))
             .unwrap()
             .len(),
         27,

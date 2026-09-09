@@ -85,11 +85,35 @@ macro_rules! export {
         }
 
         impl $crate::petros_schema::Store for PetrosStore {
-            fn exec(&mut self, sql: &str, params: &[$crate::petros_schema::Value]) {
-                let _ = PetrosStore::ask(&$crate::petros_schema::Request::Exec {
-                    sql: sql.to_string(),
-                    params: params.to_vec(),
+            fn put_row(&mut self, table: &str, row: &[$crate::petros_schema::Value]) {
+                let _ = PetrosStore::ask(&$crate::petros_schema::Request::Put {
+                    table: table.to_string(),
+                    row: row.to_vec(),
                 });
+            }
+
+            fn delete_row(&mut self, table: &str, key: &[$crate::petros_schema::Value]) {
+                let _ = PetrosStore::ask(&$crate::petros_schema::Request::Delete {
+                    table: table.to_string(),
+                    key: key.to_vec(),
+                });
+            }
+
+            fn get_row(
+                &mut self,
+                table: &str,
+                key: &[$crate::petros_schema::Value],
+            ) -> ::core::option::Option<::std::vec::Vec<$crate::petros_schema::Value>> {
+                let answer = PetrosStore::ask(&$crate::petros_schema::Request::Get {
+                    table: table.to_string(),
+                    key: key.to_vec(),
+                });
+                $crate::decode_rows(&answer).into_iter().next()
+            }
+
+            /// Changes are the host's: they are recorded where the rows are.
+            fn take_changes(&mut self) -> ::std::vec::Vec<$crate::petros_schema::Change> {
+                ::std::vec::Vec::new()
             }
 
             fn query(

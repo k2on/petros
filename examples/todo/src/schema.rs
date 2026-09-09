@@ -7,13 +7,22 @@
 //! Behind the `storage` feature, because the wasm build applies mutations and
 //! never reads a row.
 
-use petros::Id;
+// A row type per table, generated from `schema.sql` — the same file every
+// statement is checked against and the one `migrate` runs. The tables were
+// described twice before, once as DDL and once in Rust, with a test to hold
+// them together. SQLite already parsed the DDL to check the SQL, so it can say
+// what is in it and there is nothing to keep in step.
+petros_sql::tables!();
 
-/// One row of the materialised view. Read-only: rows are produced by `apply`,
-/// never by this crate.
+/// The one description of this app's tables.
+pub const SCHEMA: &str = include_str!("../schema.sql");
+
+/// One row of the materialised view, as a reader wants it: an id rather than
+/// sixteen bytes. Behind `storage`, like the read model that produces it.
+#[cfg(feature = "storage")]
 #[derive(Debug, Clone)]
 pub struct Item {
-    pub id: Id,
+    pub id: petros::Id,
     pub text: String,
     pub done: bool,
     pub pos: i64,
@@ -21,11 +30,9 @@ pub struct Item {
     pub actor: String,
 }
 
-/// The one description of this app's tables.
-pub const SCHEMA: &str = include_str!("../schema.sql");
-
 /// Sixteen bytes out of a BLOB column. A row whose id is not sixteen bytes did
 /// not come from a mutation, and there is nothing useful to do with it.
-pub(crate) fn id_of(bytes: &[u8]) -> Id {
-    Id(petros::uuid::Uuid::from_slice(bytes).unwrap_or(petros::uuid::Uuid::nil()))
+#[cfg(feature = "storage")]
+pub(crate) fn id_of(bytes: &[u8]) -> petros::Id {
+    petros::Id(petros::uuid::Uuid::from_slice(bytes).unwrap_or(petros::uuid::Uuid::nil()))
 }

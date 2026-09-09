@@ -154,6 +154,53 @@ pub enum ColumnTy {
     Bool,
 }
 
+/// A column's place in a table, for the dynamic side of the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableDef {
+    pub name: &'static str,
+    /// Column names in declaration order. A row is always this shape.
+    pub columns: &'static [&'static str],
+    pub types: &'static [ColumnTy],
+    /// The primary key's columns, a subset of the above.
+    pub key: &'static [&'static str],
+}
+
+/// A table, as `petros_sql::tables!` generates it from `schema.sql`.
+pub trait Table: Sized {
+    const DEF: TableDef;
+    fn to_row(&self) -> Vec<Value>;
+    fn from_row(row: &[Value]) -> Option<Self>;
+    /// This row's key, in `DEF.key` order.
+    fn key(&self) -> Vec<Value>;
+}
+
+/// What a write did, at the granularity a view can be maintained from.
+///
+/// The reason typed writes are back. `exec!` told us a statement ran; this says
+/// which rows moved and what they were — which is exactly what an incremental
+/// view needs, and what SQL could never give us without a hook Diesel does not
+/// expose.
+///
+/// `Edit` carries the old row as well as the new, because a view that sorts or
+/// filters on a column has to know what the value *was* to know where the row
+/// was.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    Add {
+        table: String,
+        row: Vec<Value>,
+    },
+    Remove {
+        table: String,
+        row: Vec<Value>,
+    },
+    Edit {
+        table: String,
+        old: Vec<Value>,
+        new: Vec<Value>,
+    },
+}
+
 /// The database, as a mutation sees it.
 ///
 /// Two methods. Not because a domain needs little, but because the SQL is
@@ -170,20 +217,75 @@ pub enum ColumnTy {
 ///
 /// Calling either of these with a runtime string gives all of that up. Don't.
 pub trait Store {
-    /// A checked statement. Use `petros_sql::exec!`.
-    fn exec(&mut self, sql: &str, params: &[Value]);
     /// A checked query, decoding each column as the type given.
-    /// Use `petros_sql::query!`.
+    /// Use `petros_sql::query!`. Reads need no capture, so they stay SQL.
     fn query(&mut self, sql: &str, params: &[Value], types: &[ColumnTy]) -> Vec<Vec<Value>>;
+
+    /// Write a row, and say what changed.
+    ///
+    /// `row` is in the table's declared column order. Both sides of a wasm
+    /// boundary learn that order from `schema.sql` — the guest through
+    /// `tables!`, the host by asking the database — so only the name has to
+    /// cross.
+    ///
+    /// Reads the old row first, so an overwrite reports [`Change::Edit`] with
+    /// both versions rather than an add that a view cannot place. That is one
+    /// extra point lookup per write, against an index.
+    fn put_row(&mut self, table: &str, row: &[Value]);
+
+    /// Remove a row by key, and say what changed. A key that is not there is a
+    /// no-op and no change: an entry earlier in the log may have removed it.
+    fn delete_row(&mut self, table: &str, key: &[Value]);
+
+    /// One row by key.
+    fn get_row(&mut self, table: &str, key: &[Value]) -> Option<Vec<Value>>;
+
+    /// What has been written since this was last called, in order.
+    ///
+    /// Drained rather than accumulated, because the caller that takes them owns
+    /// them: they go to a view, or they are dropped when a savepoint rolls back.
+    fn take_changes(&mut self) -> Vec<Change>;
 }
+
+/// The typed half, in terms of the four above.
+pub trait Rows: Store {
+    fn get<T: Table>(&mut self, key: &[Value]) -> Option<T> {
+        self.get_row(T::DEF.name, key)
+            .as_deref()
+            .and_then(T::from_row)
+    }
+
+    fn exists<T: Table>(&mut self, key: &[Value]) -> bool {
+        self.get_row(T::DEF.name, key).is_some()
+    }
+
+    fn put<T: Table>(&mut self, row: &T) {
+        self.put_row(T::DEF.name, &row.to_row());
+    }
+
+    fn delete<T: Table>(&mut self, key: &[Value]) {
+        self.delete_row(T::DEF.name, key);
+    }
+}
+
+impl<S: Store + ?Sized> Rows for S {}
 
 /// So a `&mut Store` is a `Store`, and a helper taking one can pass it on.
 impl<S: Store + ?Sized> Store for &mut S {
-    fn exec(&mut self, sql: &str, params: &[Value]) {
-        (**self).exec(sql, params)
-    }
     fn query(&mut self, sql: &str, params: &[Value], types: &[ColumnTy]) -> Vec<Vec<Value>> {
         (**self).query(sql, params, types)
+    }
+    fn put_row(&mut self, table: &str, row: &[Value]) {
+        (**self).put_row(table, row)
+    }
+    fn delete_row(&mut self, table: &str, key: &[Value]) {
+        (**self).delete_row(table, key)
+    }
+    fn get_row(&mut self, table: &str, key: &[Value]) -> Option<Vec<Value>> {
+        (**self).get_row(table, key)
+    }
+    fn take_changes(&mut self) -> Vec<Change> {
+        (**self).take_changes()
     }
 }
 
@@ -197,13 +299,21 @@ impl<S: Store + ?Sized> Store for &mut S {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Request {
-    Exec {
-        sql: String,
-        params: Vec<Value>,
-    },
     Query {
         sql: String,
         params: Vec<Value>,
         types: Vec<ColumnTy>,
+    },
+    Get {
+        table: String,
+        key: Vec<Value>,
+    },
+    Put {
+        table: String,
+        row: Vec<Value>,
+    },
+    Delete {
+        table: String,
+        key: Vec<Value>,
     },
 }

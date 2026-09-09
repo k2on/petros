@@ -1,7 +1,8 @@
 //! Raw SQL in a mutation, checked before it ships.
 //!
-//! The typed store covers point operations — get, exists, max, put, delete —
-//! and loses exactly one thing: set operations. `INSERT ... SELECT` over a
+//! Reads are SQL, and checked. Writes are not: they go through the typed store,
+//! because a view can only be maintained from changes it is told about and
+//! `UPDATE … WHERE` says nothing about which rows moved. `INSERT ... SELECT` over a
 //! whole table is one statement, and a scan plus a write per row otherwise,
 //! which on a phone is a boundary crossing per row.
 //!
@@ -39,7 +40,8 @@
 //! ```
 
 use proc_macro::TokenStream;
-use quote::quote;
+use proc_macro2::Ident;
+use quote::{format_ident, quote};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use syn::parse::{Parse, ParseStream};
@@ -66,68 +68,6 @@ impl Parse for Stmt {
         }
         Ok(Stmt { store, sql, args })
     }
-}
-
-/// Run a checked statement against a [`petros_schema::Store`].
-///
-/// ```ignore
-/// petros_sql::exec!(
-///     store,
-///     "INSERT INTO favorite (song_id, pos, favorited_ms, actor)
-///      SELECT s.id,
-///             (SELECT COALESCE(MAX(pos), 0) FROM favorite)
-///               + ROW_NUMBER() OVER (ORDER BY s.pos, s.id),
-///             ?, ?
-///        FROM song s
-///       WHERE NOT EXISTS (SELECT 1 FROM favorite f WHERE f.song_id = s.id)",
-///     favorited_ms, actor
-/// );
-/// ```
-#[proc_macro]
-pub fn exec(input: TokenStream) -> TokenStream {
-    let Stmt { store, sql, args } = syn::parse_macro_input!(input as Stmt);
-    let text = sql.value();
-
-    let schema = match schema_path() {
-        Ok(path) => path,
-        Err(message) => return error(&sql, &message),
-    };
-    let ddl = match std::fs::read_to_string(&schema) {
-        Ok(ddl) => ddl,
-        Err(e) => {
-            return error(
-                &sql,
-                &format!(
-                    "cannot read the schema at {}: {e}\n\
-                     set PETROS_SCHEMA, or put a schema.sql beside Cargo.toml",
-                    schema.display()
-                ),
-            )
-        }
-    };
-
-    match check(&ddl, &text, args.len()) {
-        Ok(()) => {}
-        Err(message) => return error(&sql, &message),
-    }
-
-    // `include_str!` so rustc treats the schema as an input to this
-    // compilation. Without it, editing the schema would not rebuild the call
-    // sites it invalidates — the failure being a stale check, which is worse
-    // than no check.
-    let schema_str = schema.to_string_lossy().into_owned();
-    let values = args.iter().map(|a| {
-        quote! { ::petros_schema::Bind::to_value(&(#a)) }
-    });
-    quote! {{
-        const _: &str = ::core::include_str!(#schema_str);
-        // A method call rather than `Store::exec(&mut store, ..)`, so this
-        // works whether the caller holds a store or a `&mut` to one.
-        #[allow(unused_imports)]
-        use ::petros_schema::Store as _;
-        #store.exec(#sql, &[#(#values),*])
-    }}
-    .into()
 }
 
 /// Read rows, as a `Vec` of an anonymous struct with a field per column.
@@ -382,19 +322,6 @@ fn schema_path() -> Result<PathBuf, String> {
 }
 
 /// Prepare the statement against the schema, and say what SQLite says.
-fn check(ddl: &str, sql: &str, args: usize) -> Result<(), String> {
-    with_schema(ddl, |conn| {
-        let stmt = conn.prepare(sql).map_err(|e| format!("{e}"))?;
-        placeholders(&stmt, args)?;
-        // A `SELECT` here would run and discard its rows. That is never what
-        // was meant, and it is the sort of thing that looks like it works.
-        if stmt.readonly() {
-            return Err("this statement reads and writes nothing; `exec!` is for writes".into());
-        }
-        Ok(())
-    })
-}
-
 /// The statement's `?` count has to match what the call site passed.
 fn placeholders(stmt: &rusqlite::Statement<'_>, args: usize) -> Result<(), String> {
     let wanted = stmt.parameter_count();
@@ -412,4 +339,184 @@ fn error(at: &LitStr, message: &str) -> TokenStream {
     syn::Error::new(at.span(), message)
         .to_compile_error()
         .into()
+}
+
+/// Declare a struct per table, read out of the schema itself.
+///
+/// Takes nothing. It opens the same `schema.sql` every statement is checked
+/// against, asks SQLite what is in it, and emits a row type and a
+/// `petros_schema::Table` impl per table.
+///
+/// That is the point: the tables were described twice before — once as DDL and
+/// once as a Rust declaration — with a test to hold them together. SQLite
+/// already parsed the DDL to check the statements, so it can answer
+/// `PRAGMA table_info` at the same time and there is nothing to keep in step.
+///
+/// ```ignore
+/// petros_sql::tables!();          // schema.sql -> struct Song { … }, struct Favorite { … }
+/// ```
+#[proc_macro]
+pub fn tables(_input: TokenStream) -> TokenStream {
+    match expand_tables() {
+        Ok(t) => t.into(),
+        Err(message) => {
+            let message = message.to_string();
+            quote!(compile_error!(#message);).into()
+        }
+    }
+}
+
+fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
+    let schema = schema_path()?;
+    let ddl = std::fs::read_to_string(&schema)
+        .map_err(|e| format!("cannot read the schema at {}: {e}", schema.display()))?;
+    let schema_str = schema.to_string_lossy().into_owned();
+
+    let tables = with_schema(&ddl, |conn| {
+        let mut names: Vec<String> = Vec::new();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for name in rows {
+            names.push(name.map_err(|e| e.to_string())?);
+        }
+
+        let mut out = Vec::new();
+        for table in names {
+            let mut columns = Vec::new();
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(1)?, // name
+                        r.get::<_, String>(2)?, // declared type
+                        r.get::<_, i64>(5)?,    // pk position, 0 for not-a-key
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                columns.push(row.map_err(|e| e.to_string())?);
+            }
+            out.push((table, columns));
+        }
+        Ok(out)
+    })?;
+
+    let mut items = Vec::new();
+    for (table, columns) in tables {
+        if columns.is_empty() {
+            continue;
+        }
+        let ty = format_ident!("{}", camel(&table));
+        let mut fields = Vec::new();
+        let mut names = Vec::new();
+        let mut kinds = Vec::new();
+        let mut key_names = Vec::new();
+        let mut key_tys = Vec::new();
+        for (name, decl, pk) in &columns {
+            let ident = format_ident!("{}", name);
+            let kind = column_kind(decl)?;
+            let rust = kind.rust();
+            fields.push(quote! { pub #ident: #rust });
+            names.push(name.clone());
+            kinds.push(kind.token());
+            if *pk > 0 {
+                key_names.push(ident.clone());
+                key_tys.push(rust);
+            }
+        }
+        if key_names.is_empty() {
+            return Err(format!(
+                "table `{table}` has no primary key. A row the store can write \
+                 has to be addressable, so every table needs one."
+            ));
+        }
+        let idents: Vec<Ident> = names.iter().map(|n| format_ident!("{}", n)).collect();
+        let doc = format!("The `{table}` table, from `schema.sql`.");
+
+        items.push(quote! {
+            #[doc = #doc]
+            #[derive(Debug, Clone, PartialEq)]
+            pub struct #ty {
+                #(#fields,)*
+            }
+
+            impl #ty {
+                /// A key, for `get` and `delete`.
+                pub fn key_of(#(#key_names: &#key_tys),*) -> ::std::vec::Vec<::petros_schema::Value> {
+                    ::std::vec![#(::petros_schema::Bind::to_value(#key_names)),*]
+                }
+            }
+
+            impl ::petros_schema::Table for #ty {
+                const DEF: ::petros_schema::TableDef = ::petros_schema::TableDef {
+                    name: #table,
+                    columns: &[#(#names),*],
+                    types: &[#(#kinds),*],
+                    key: &[#(::core::stringify!(#key_names)),*],
+                };
+
+                fn to_row(&self) -> ::std::vec::Vec<::petros_schema::Value> {
+                    ::std::vec![#(::petros_schema::Bind::to_value(&self.#idents)),*]
+                }
+
+                fn from_row(row: &[::petros_schema::Value]) -> ::core::option::Option<Self> {
+                    let mut it = row.iter();
+                    ::core::option::Option::Some(#ty {
+                        #(#idents: ::petros_schema::Cell::from_value(it.next()?)?,)*
+                    })
+                }
+
+                fn key(&self) -> ::std::vec::Vec<::petros_schema::Value> {
+                    ::std::vec![#(::petros_schema::Bind::to_value(&self.#key_names)),*]
+                }
+            }
+        });
+    }
+
+    Ok(quote! {
+        // So a change to the schema rebuilds what was generated from it.
+        const _: &str = ::core::include_str!(#schema_str);
+        #(#items)*
+    })
+}
+
+/// SQLite's declared type, as the store's four.
+fn column_kind(decl: &str) -> Result<Kind, String> {
+    let d = decl.trim().to_ascii_uppercase();
+    Ok(match d.as_str() {
+        "BLOB" => Kind::Blob,
+        "TEXT" => Kind::Text,
+        "BOOL" | "BOOLEAN" => Kind::Bool,
+        _ if d.contains("INT") => Kind::Int,
+        other => {
+            return Err(format!(
+                "column type `{other}` is not one a mutation can write. The log is \
+                 permanent and a foreign caller has to be able to write one, so a \
+                 column is BLOB, TEXT, BOOL or an integer type."
+            ))
+        }
+    })
+}
+
+/// `song` -> `Song`. A table names a row type the way a type is spelled.
+fn camel(snake: &str) -> String {
+    let mut out = String::new();
+    let mut up = true;
+    for c in snake.chars() {
+        if c == '_' {
+            up = true;
+        } else if up {
+            out.extend(c.to_uppercase());
+            up = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

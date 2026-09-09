@@ -122,7 +122,7 @@ impl IntoCbor for Id {
         cbor::Value::Bytes(self)
     }
 }
-pub use store::{Bind, Cell, ColumnTy, Request, Store, Value};
+pub use store::{Bind, Cell, Change, ColumnTy, Request, Rows, Store, Table, TableDef, Value};
 
 /// Every mutation an app understands.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

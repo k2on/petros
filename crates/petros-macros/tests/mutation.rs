@@ -20,12 +20,23 @@ type Actor<'a> = &'a str;
 /// did without a database.
 #[derive(Default)]
 struct Recorder {
-    statements: Vec<(String, Vec<petros_schema::Value>)>,
+    writes: Vec<(String, Vec<petros_schema::Value>)>,
 }
 
 impl Store for Recorder {
-    fn exec(&mut self, sql: &str, params: &[petros_schema::Value]) {
-        self.statements.push((sql.to_string(), params.to_vec()));
+    fn put_row(&mut self, table: &str, row: &[petros_schema::Value]) {
+        self.writes.push((table.to_string(), row.to_vec()));
+    }
+    fn delete_row(&mut self, _table: &str, _key: &[petros_schema::Value]) {}
+    fn get_row(
+        &mut self,
+        _table: &str,
+        _key: &[petros_schema::Value],
+    ) -> Option<Vec<petros_schema::Value>> {
+        None
+    }
+    fn take_changes(&mut self) -> Vec<petros_schema::Change> {
+        Vec::new()
     }
     fn query(
         &mut self,
@@ -50,8 +61,8 @@ pub fn add_song(
     if title.trim().is_empty() {
         return Err("a song needs a title".into());
     }
-    db.exec(
-        "INSERT INTO song (id, title, artist, added_ms, actor) VALUES (?, ?, ?, ?, ?)",
+    db.put_row(
+        "song",
         &[
             petros_schema::Value::Blob(id),
             petros_schema::Value::Text(title),
@@ -104,9 +115,9 @@ fn applying_runs_the_body_against_the_store() {
     let mut db = Recorder::default();
     __petros_apply_add_song(&mut db, &m, "alice").expect("applies");
 
-    assert_eq!(db.statements.len(), 1);
-    let (sql, params) = &db.statements[0];
-    assert!(sql.starts_with("INSERT INTO song"));
+    assert_eq!(db.writes.len(), 1);
+    let (table, params) = &db.writes[0];
+    assert_eq!(table, "song");
     assert_eq!(params[0], petros_schema::Value::Blob(vec![7; 16]));
     assert_eq!(params[1], petros_schema::Value::Text("Glue".into()));
     assert_eq!(params[3], petros_schema::Value::Int(1234));
@@ -124,16 +135,13 @@ fn a_refusal_comes_back_from_the_body() {
     let mut db = Recorder::default();
     let refused = __petros_apply_add_song(&mut db, &m, "alice");
     assert_eq!(refused, Err("a song needs a title".to_string()));
-    assert!(db.statements.is_empty(), "nothing was written");
+    assert!(db.writes.is_empty(), "nothing was written");
 }
 
 /// Take a song back out of the playlist.
 #[petros_macros::mutation]
 pub fn unfavorite(db: &mut Db, id: petros_schema::Id) -> Result<(), String> {
-    db.exec(
-        "DELETE FROM favorite WHERE song_id = ?",
-        &[petros_schema::Value::Blob(id)],
-    );
+    db.delete_row("favorite", &[petros_schema::Value::Blob(id)]);
     Ok(())
 }
 
@@ -147,12 +155,13 @@ fn dispatch_routes_by_verb() {
     fill_auto(&mut m, vec![3; 16], 99);
     let mut db = Recorder::default();
     apply(&mut db, &m, "alice").expect("routed to add_song");
-    assert_eq!(db.statements.len(), 1);
+    assert_eq!(db.writes.len(), 1);
 
     let mut m = unfavorite(vec![4; 16]);
     fill_auto(&mut m, vec![0; 16], 0);
     apply(&mut db, &m, "alice").expect("routed to unfavorite");
-    assert!(db.statements[1].0.starts_with("DELETE FROM favorite"));
+    // `unfavorite` deletes, and a delete is not a write this recorder keeps.
+    assert_eq!(db.writes.len(), 1);
 
     let unknown = Value::Map(vec![(
         Value::Text("t".into()),
