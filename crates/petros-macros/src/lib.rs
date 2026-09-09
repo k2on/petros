@@ -1,0 +1,317 @@
+//! One definition per function.
+//!
+//! A mutation used to be written three times: once as a verb declaration with a
+//! body, once as an authoring helper that built its payload, and once as a
+//! method on the client a foreign caller sees. A query was written twice. None
+//! of those repetitions carried information — they carried the same
+//! information, in three places that could disagree.
+//!
+//! Here a function is written once, as an ordinary Rust function, and the
+//! attribute generates the rest:
+//!
+//! ```ignore
+//! /// Put a song in the library.
+//! #[petros::mutation]
+//! pub fn add_song(db: &mut Db, id: NewId, added_ms: Now, actor: Actor,
+//!                 title: String, artist: String) -> Result<()> {
+//!     …
+//! }
+//! ```
+//!
+//! # What the parameters mean
+//!
+//! The engine supplies the leading ones and a caller supplies the rest, and
+//! which is which is decided by type rather than by position or by a list:
+//!
+//! - `&mut Db` — the store. Every function takes one.
+//! - `NewId` — a fresh id, chosen once at the originating client by `fill_auto`
+//!   and frozen in the log. `apply` may not invent one, because all it can reach
+//!   is the store.
+//! - `Now` — the clock, frozen the same way.
+//! - `Actor` — who authored the entry.
+//!
+//! Everything after those is an argument, and is what appears in the authoring
+//! function, in the schema a module carries, and in the generated TypeScript.
+
+use proc_macro::TokenStream;
+use quote::{format_ident, quote};
+use syn::{FnArg, Ident, ItemFn, Pat, PatType, Type};
+
+/// A parameter the engine supplies rather than a caller.
+#[derive(Clone, Copy, PartialEq)]
+enum Ctx {
+    Db,
+    NewId,
+    Now,
+    Actor,
+}
+
+impl Ctx {
+    fn of(ty: &Type) -> Option<Ctx> {
+        let text = quote!(#ty).to_string().replace(' ', "");
+        match text.trim_start_matches('&').trim_start_matches("mut") {
+            "Db" => Some(Ctx::Db),
+            "NewId" => Some(Ctx::NewId),
+            "Now" => Some(Ctx::Now),
+            "Actor" => Some(Ctx::Actor),
+            _ => None,
+        }
+    }
+}
+
+/// One argument a caller passes.
+struct Arg {
+    name: Ident,
+    ty: Type,
+}
+
+/// The schema's name for a type. The list is deliberately short: these are the
+/// types that survive a log, a CBOR round trip and a foreign boundary without
+/// anyone having to decide anything.
+fn schema_ty(ty: &Type) -> Result<&'static str, String> {
+    let text = quote!(#ty).to_string().replace(' ', "");
+    Ok(match text.as_str() {
+        "String" | "&str" => "Text",
+        "i64" | "u64" | "i32" | "u32" => "Integer",
+        "bool" => "Bool",
+        "Id" | "petros::Id" => "Id",
+        other => {
+            return Err(format!(
+                "`{other}` is not a type a mutation argument can be. \
+                 The log is permanent and a foreign caller has to be able to write one, \
+                 so arguments are String, i64, bool or Id."
+            ))
+        }
+    })
+}
+
+struct Parsed {
+    ctx: Vec<(Ident, Ctx)>,
+    args: Vec<Arg>,
+}
+
+fn parse(f: &ItemFn) -> Result<Parsed, syn::Error> {
+    let mut ctx = Vec::new();
+    let mut args = Vec::new();
+    for input in &f.sig.inputs {
+        let FnArg::Typed(PatType { pat, ty, .. }) = input else {
+            return Err(syn::Error::new_spanned(
+                input,
+                "a mutation is a free function; it has no `self`",
+            ));
+        };
+        let Pat::Ident(name) = &**pat else {
+            return Err(syn::Error::new_spanned(
+                pat,
+                "each parameter needs a plain name: it becomes an argument name in the log",
+            ));
+        };
+        match Ctx::of(ty) {
+            Some(kind) => {
+                if !args.is_empty() {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "the engine's parameters come before a caller's",
+                    ));
+                }
+                ctx.push((name.ident.clone(), kind));
+            }
+            None => args.push(Arg {
+                name: name.ident.clone(),
+                ty: (**ty).clone(),
+            }),
+        }
+    }
+    if !ctx.iter().any(|(_, k)| *k == Ctx::Db) {
+        return Err(syn::Error::new_spanned(
+            &f.sig,
+            "a function needs `db: &mut Db` — it is how it reaches the database",
+        ));
+    }
+    Ok(Parsed { ctx, args })
+}
+
+/// Declare a mutation: an intent, applied by every replica, recorded forever.
+///
+/// See the crate docs for what the parameters mean. What this generates:
+///
+/// - the body, as `apply` for this verb, taking the store and the payload;
+/// - an authoring function of the same name, taking only a caller's arguments
+///   and returning the payload to hand to `Client::mutate`;
+/// - a line in the module's schema section, so a generator with only the
+///   `.wasm` can recover the declaration;
+/// - a method on `Peer`, for a foreign caller.
+#[proc_macro_attribute]
+pub fn mutation(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let f = syn::parse_macro_input!(item as ItemFn);
+    match expand_mutation(f) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let parsed = parse(&f)?;
+    let name = f.sig.ident.clone();
+    let verb = camel(&name.to_string());
+    let verb_lit = verb.clone();
+    let docs = docs_of(&f);
+    let body = &f.block;
+    let vis = &f.vis;
+
+    let apply_fn = format_ident!("__petros_apply_{}", name);
+    let db = parsed
+        .ctx
+        .iter()
+        .find(|(_, k)| *k == Ctx::Db)
+        .map(|(n, _)| n.clone())
+        .expect("checked in parse");
+
+    // The engine's parameters, bound from what `fill_auto` froze into the entry
+    // and from the actor the log records.
+    let ctx_binds = parsed
+        .ctx
+        .iter()
+        .filter(|(_, k)| *k != Ctx::Db)
+        .map(|(n, k)| {
+            let field = n.to_string();
+            match k {
+                Ctx::NewId => quote! {
+                    let #n: ::petros_schema::Id = ::petros_schema::cbor::field(mutation, #field)
+                        .and_then(::petros_schema::cbor::as_bytes)
+                        .ok_or_else(|| ::std::format!(
+                            "{} has no {}; fill_auto did not run", #verb_lit, #field))?;
+                },
+                Ctx::Now => quote! {
+                    let #n: i64 = ::petros_schema::cbor::field(mutation, #field)
+                        .and_then(::petros_schema::cbor::as_int)
+                        .ok_or_else(|| ::std::format!(
+                            "{} has no {}; fill_auto did not run", #verb_lit, #field))?;
+                },
+                Ctx::Actor => quote! { let #n: &str = actor; },
+                Ctx::Db => unreachable!(),
+            }
+        });
+
+    let arg_binds = parsed.args.iter().map(|a| {
+        let n = &a.name;
+        let field = n.to_string();
+        let ty = &a.ty;
+        // A bad type is reported below, with a span and a message. Falling
+        // back here only keeps this expansion well-formed until it is.
+        let kind = schema_ty(ty).unwrap_or("Text");
+        let getter = match kind {
+            "Text" => quote! { ::petros_schema::cbor::opt_text(mutation, #field) },
+            "Integer" => quote! {
+                ::petros_schema::cbor::field(mutation, #field)
+                    .and_then(::petros_schema::cbor::as_int)
+                    .unwrap_or_default()
+            },
+            "Bool" => quote! {
+                ::petros_schema::cbor::field(mutation, #field)
+                    .and_then(::petros_schema::cbor::as_bool)
+                    .unwrap_or_default()
+            },
+            _ => quote! {
+                ::petros_schema::cbor::field(mutation, #field)
+                    .and_then(::petros_schema::cbor::as_bytes)
+                    .unwrap_or_default()
+            },
+        };
+        quote! { let #n: #ty = #getter; }
+    });
+
+    // Type errors on arguments are worth a good message, so they are checked
+    // rather than left to fail somewhere inside the expansion.
+    for a in &parsed.args {
+        schema_ty(&a.ty).map_err(|m| syn::Error::new_spanned(&a.ty, m))?;
+    }
+
+    let arg_names: Vec<_> = parsed.args.iter().map(|a| a.name.clone()).collect();
+    let arg_tys: Vec<_> = parsed.args.iter().map(|a| a.ty.clone()).collect();
+    let arg_strs: Vec<String> = arg_names.iter().map(|n| n.to_string()).collect();
+    let arg_kinds: Vec<Ident> = parsed
+        .args
+        .iter()
+        .map(|a| format_ident!("{}", schema_ty(&a.ty).unwrap()))
+        .collect();
+
+    // What `fill_auto` has to put in, and what a caller must not.
+    let autos: Vec<(String, Ctx)> = parsed
+        .ctx
+        .iter()
+        .filter(|(_, k)| matches!(k, Ctx::NewId | Ctx::Now))
+        .map(|(n, k)| (n.to_string(), *k))
+        .collect();
+    let auto_names: Vec<String> = autos.iter().map(|(n, _)| n.clone()).collect();
+    let auto_is_id: Vec<bool> = autos.iter().map(|(_, k)| *k == Ctx::NewId).collect();
+
+    Ok(quote! {
+        #(#docs)*
+        ///
+        /// Authoring. Hand the result to `Client::mutate`; the body above runs
+        /// on every replica, from the log, not here.
+        #vis fn #name(#(#arg_names: #arg_tys),*) -> ::petros_schema::cbor::Value {
+            let mut fields = ::std::vec![(
+                ::petros_schema::cbor::Value::Text("t".into()),
+                ::petros_schema::cbor::Value::Text(#verb_lit.into()),
+            )];
+            #(
+                fields.push((
+                    ::petros_schema::cbor::Value::Text(#arg_strs.into()),
+                    ::petros_schema::IntoCbor::into_cbor(#arg_names),
+                ));
+            )*
+            ::petros_schema::cbor::Value::Map(fields)
+        }
+
+        #[doc(hidden)]
+        #[allow(non_snake_case, clippy::needless_question_mark)]
+        pub fn #apply_fn<S: ::petros_schema::Store>(
+            #db: &mut S,
+            mutation: &::petros_schema::cbor::Value,
+            actor: &str,
+        ) -> ::core::result::Result<(), ::std::string::String> {
+            #(#ctx_binds)*
+            #(#arg_binds)*
+            #body
+        }
+
+        #[doc(hidden)]
+        pub mod #name {
+            /// The verb as it appears in the log and in the schema.
+            pub const VERB: &str = #verb_lit;
+            /// A caller's arguments, in declaration order.
+            pub const ARGS: &[(&str, ::petros_schema::Ty)] =
+                &[#((#arg_strs, ::petros_schema::Ty::#arg_kinds)),*];
+            /// What `fill_auto` fills, and whether it is an id or a timestamp.
+            pub const AUTO: &[(&str, bool)] = &[#((#auto_names, #auto_is_id)),*];
+        }
+    })
+}
+
+/// `add_song` -> `AddSong`. The log records the verb, and the verb is what a
+/// foreign caller writes, so it is spelled the way a type is.
+fn camel(snake: &str) -> String {
+    let mut out = String::new();
+    let mut up = true;
+    for c in snake.chars() {
+        if c == '_' {
+            up = true;
+        } else if up {
+            out.extend(c.to_uppercase());
+            up = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn docs_of(f: &ItemFn) -> Vec<proc_macro2::TokenStream> {
+    f.attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .map(|a| quote!(#a))
+        .collect()
+}

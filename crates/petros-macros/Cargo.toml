@@ -1,0 +1,18 @@
+[package]
+name = "petros-macros"
+version = "0.1.0"
+description = "`#[mutation]` and `#[query]`: one definition per function, and everything else generated."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+petros-schema = { workspace = true, features = ["cbor"] }

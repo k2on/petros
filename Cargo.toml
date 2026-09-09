@@ -4,6 +4,7 @@ members = [
     "crates/petros",
     "crates/petros-axum",
     "crates/petros-schema",
+    "crates/petros-macros",
     "crates/petros-sql",
     "crates/petros-testkit",
     "crates/petros-wasm-guest",
@@ -26,6 +27,7 @@ ciborium = "0.2"
 petros = { path = "crates/petros" }
 petros-wasm-host = { path = "crates/petros-wasm-host" }
 petros-schema = { path = "crates/petros-schema" }
+petros-macros = { path = "crates/petros-macros" }
 petros-sql = { path = "crates/petros-sql" }
 petros-testkit = { path = "crates/petros-testkit" }
 petros-wasm-guest = { path = "crates/petros-wasm-guest" }

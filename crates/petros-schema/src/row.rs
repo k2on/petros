@@ -107,6 +107,12 @@ macro_rules! row {
         /// carry a type it does not own.
         #[cfg(feature = "foreign")]
         pub mod foreign {
+            // The conversions are written in the caller's scope and name its
+            // types. A glob is shadowed by anything defined below it, so each
+            // record still wins over the row it is named after.
+            #[allow(unused_imports)]
+            use super::*;
+
             $(
                 $(#[$meta])*
                 ///

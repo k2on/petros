@@ -29,6 +29,46 @@ pub mod row;
 pub mod seed;
 pub mod store;
 pub use seed::Seed;
+
+/// Sixteen bytes: an id as the log stores it.
+///
+/// Not a uuid type, so this crate keeps no dependency on one. `petros::Id` is
+/// the same bytes with a `Display` and a Diesel impl.
+pub type Id = ::std::vec::Vec<u8>;
+
+/// A value an authoring function can put into a payload.
+///
+/// The list is the same one the schema allows, because a mutation's arguments
+/// are exactly what a foreign caller can write.
+pub trait IntoCbor {
+    fn into_cbor(self) -> cbor::Value;
+}
+
+impl IntoCbor for String {
+    fn into_cbor(self) -> cbor::Value {
+        cbor::Value::Text(self)
+    }
+}
+impl IntoCbor for &str {
+    fn into_cbor(self) -> cbor::Value {
+        cbor::Value::Text(self.to_string())
+    }
+}
+impl IntoCbor for i64 {
+    fn into_cbor(self) -> cbor::Value {
+        cbor::Value::Integer(self.into())
+    }
+}
+impl IntoCbor for bool {
+    fn into_cbor(self) -> cbor::Value {
+        cbor::Value::Bool(self)
+    }
+}
+impl IntoCbor for Id {
+    fn into_cbor(self) -> cbor::Value {
+        cbor::Value::Bytes(self)
+    }
+}
 pub use store::{Bind, Cell, ColumnTy, Request, Store, Value};
 
 /// Every mutation an app understands.
@@ -354,6 +394,16 @@ pub mod cbor {
     }
 
     #[doc(hidden)]
+    /// A bool, as the log stores one: CBOR's own, or an integer, because
+    /// SQLite has no boolean and a value that round-tripped through it comes
+    /// back as 0 or 1.
+    pub fn as_bool(v: &Value) -> Option<bool> {
+        match v {
+            Value::Bool(b) => Some(*b),
+            other => as_int(other).map(|i| i != 0),
+        }
+    }
+
     pub fn opt_text(m: &Value, name: &str) -> String {
         field(m, name).and_then(as_text).unwrap_or_default()
     }
