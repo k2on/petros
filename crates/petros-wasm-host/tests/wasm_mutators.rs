@@ -447,3 +447,49 @@ fn a_reused_instance_does_not_grow() {
         "guest memory grew from {first} to {last} pages over 120 calls of 32KiB: {pages:?}"
     );
 }
+
+/// A module's writes have to report what they changed, or a phone cannot
+/// maintain a view.
+///
+/// The host builds a store per request and drops it, so the changes had
+/// nowhere to go and were lost the moment the request returned. They are
+/// collected across the whole apply now, which is the unit a mutation is.
+#[test]
+fn a_module_reports_what_it_changed() {
+    let m = Mutators::load(MODULE).unwrap();
+    let mut conn = database();
+    let mut auto = petros::AutoCtx::seeded(1);
+
+    let payload = filled(&m, &mut auto, todo::add("first".into()));
+    let changes = m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    assert_eq!(changes.len(), 1, "one row added: {changes:?}");
+    assert!(
+        matches!(&changes[0], petros_schema::Change::Add { table, .. } if table == "todo"),
+        "{changes:?}"
+    );
+
+    // A verb that writes several rows reports several: the collection is per
+    // apply, not per request.
+    let payload = filled(&m, &mut auto, todo::add("second".into()));
+    m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    let payload = filled(&m, &mut auto, todo::mark_all_done());
+    let changes = m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    assert_eq!(changes.len(), 2, "both to-dos were edited: {changes:?}");
+    assert!(
+        changes
+            .iter()
+            .all(|c| matches!(c, petros_schema::Change::Edit { .. })),
+        "{changes:?}"
+    );
+
+    // And a fresh apply does not repeat what an earlier one reported.
+    let payload = filled(&m, &mut auto, todo::add("third".into()));
+    let changes = m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    assert_eq!(changes.len(), 1);
+}
+
+fn filled(m: &Mutators, auto: &mut petros::AutoCtx, raw: petros_schema::cbor::Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&raw, &mut bytes).unwrap();
+    m.fill_auto(&bytes, auto).unwrap()
+}

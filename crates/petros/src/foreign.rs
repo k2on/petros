@@ -102,7 +102,13 @@ macro_rules! foreign_peer {
                     )
                 })?;
                 match module.apply(tx.conn(), &bytes, actor.as_str()) {
-                    ::core::result::Result::Ok(::core::result::Result::Ok(())) => {
+                    // The module's writes went through the host's store, which
+                    // is created per request and dropped — so the changes come
+                    // back from the apply and are reported here, exactly as a
+                    // linked `apply` reports its own. A phone maintains a view
+                    // the same way a desktop does.
+                    ::core::result::Result::Ok(::core::result::Result::Ok(changes)) => {
+                        tx.record(changes);
                         ::core::result::Result::Ok(())
                     }
                     ::core::result::Result::Ok(::core::result::Result::Err(reason)) => {

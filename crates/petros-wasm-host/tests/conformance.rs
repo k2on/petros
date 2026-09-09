@@ -152,8 +152,11 @@ fn refusals_match_too() {
             .apply(&mut b, &encode(&p), "alice")
             .expect("host ran");
 
+        // The wasm side reports what it changed on success; a refusal carries
+        // the same reason either way, and that is what is being compared.
         assert_eq!(
-            native, wasm,
+            native,
+            wasm.map(|_| ()),
             "{kind} is refused differently by the two builds"
         );
         assert!(native.is_err(), "{kind} should be refused");

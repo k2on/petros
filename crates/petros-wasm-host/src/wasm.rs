@@ -72,6 +72,12 @@ struct HostState {
     /// instance that is already running, so the answer waits here and the guest
     /// asks for it once it has made room.
     answer: Vec<u8>,
+    /// What the module's writes did, collected across the whole apply.
+    ///
+    /// The store is built and dropped per request — one per `put` the module
+    /// makes — so without somewhere to put them the changes are lost the moment
+    /// the request returns, and a phone could not maintain a view.
+    changes: Vec<petros_schema::Change>,
 }
 
 impl HostState {
@@ -353,8 +359,9 @@ impl Mutators {
         conn: &mut Connection,
         payload: &[u8],
         actor: &str,
-    ) -> Result<Result<(), String>, String> {
+    ) -> Result<Result<Vec<petros_schema::Change>, String>, String> {
         self.run(Some(conn), |store, instance| {
+            store.data_mut().changes.clear();
             let p = write_bytes(store, payload)?;
             let a = write_bytes(store, actor.as_bytes())?;
             let f = instance
@@ -366,7 +373,7 @@ impl Mutators {
             free_bytes(store, instance, p.0, p.1)?;
             free_bytes(store, instance, a.0, a.1)?;
             if packed == 0 {
-                return Ok(Ok(()));
+                return Ok(Ok(std::mem::take(&mut store.data_mut().changes)));
             }
             let reason = read_packed(store, packed)?;
             free_bytes(store, instance, (packed >> 32) as u32, packed as u32)?;
@@ -441,13 +448,14 @@ fn host_store(mut caller: Caller<'_, HostState>, request: u32, len: u32) -> u32 
             .map_err(|e| format!("the module sent a request we cannot read: {e}"))?;
         let conn = caller.data_mut().conn()?;
         let mut store = SqliteStore::new(conn);
+        let mut recorded = Vec::new();
         let encode = |rows: Vec<Vec<petros_schema::Value>>| -> Result<Vec<u8>, String> {
             let mut out = Vec::new();
             ciborium::into_writer(&rows, &mut out)
                 .map_err(|e| format!("could not encode the rows: {e}"))?;
             Ok(out)
         };
-        Ok(match request {
+        let answer = match request {
             Request::Fetch { plan } => encode(store.fetch(&plan))?,
             Request::Get { table, key } => {
                 encode(store.get_row(&table, &key).into_iter().collect())?
@@ -456,14 +464,27 @@ fn host_store(mut caller: Caller<'_, HostState>, request: u32, len: u32) -> u32 
             // failure: the mutation asked for this write and is the thing that
             // should decide what a refused one means. Success is an empty
             // answer, which is what every write used to send.
-            Request::Put { table, row } => encode_outcome(store.put_row(&table, &row))?,
-            Request::Delete { table, key } => encode_outcome(store.delete_row(&table, &key))?,
-        })
+            Request::Put { table, row } => {
+                let outcome = store.put_row(&table, &row);
+                recorded = store.take_changes();
+                encode_outcome(outcome)?
+            }
+            Request::Delete { table, key } => {
+                let outcome = store.delete_row(&table, &key);
+                recorded = store.take_changes();
+                encode_outcome(outcome)?
+            }
+        };
+        Ok((answer, recorded))
     });
     match outcome {
-        Ok(answer) => {
+        Ok((answer, mut recorded)) => {
             let len = answer.len() as u32;
-            caller.data_mut().answer = answer;
+            let state = caller.data_mut();
+            // Kept for the length of the apply, not the request, so a mutation
+            // that writes five rows reports five changes.
+            state.changes.append(&mut recorded);
+            state.answer = answer;
             len
         }
         Err(e) => {
