@@ -164,3 +164,70 @@ fn the_extra_read_on_a_write() {
         );
     }
 }
+
+/// The join: hearting one song, against re-running the tree query.
+///
+/// This is the case a flat view cannot express at all, and the one a library
+/// screen is actually made of.
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn a_maintained_tree_against_a_re_run() {
+    println!("\n  one heart, then the library of N songs with their favourites:");
+    println!(
+        "    {:>8}  {:>12}  {:>12}  {:>7}",
+        "songs", "re-run", "maintained", "ratio"
+    );
+
+    for n in [100usize, 1_000, 10_000] {
+        let mut conn = petros::open_memory().unwrap();
+        conn.batch_execute(SCHEMA).unwrap();
+        let mut store = SqliteStore::new(&mut conn);
+        for i in 0..n {
+            store.put(&Song {
+                id: id(i),
+                title: format!("song {i}"),
+                done: false,
+                pos: i as i64,
+            });
+        }
+        store.take_changes();
+
+        let query = || {
+            Song::all()
+                .order_by(Song::pos.asc())
+                .order_by(Song::id.asc())
+                .limit(20)
+        };
+        let children = || Favorite::all().order_by(Favorite::pos.asc());
+        let mut view = View::<Song>::related(query(), Song::favorite, children());
+        view.hydrate(&mut store);
+
+        let (mut fresh, mut kept) = (Vec::new(), Vec::new());
+        for i in 0..50 {
+            // Heart a song outside the window: the change the view must judge
+            // and then decline, which is the common case on a long list.
+            store.put(&Favorite {
+                song_id: id(n - 1 - i),
+                pos: i as i64,
+            });
+            let changes = store.take_changes();
+            let t = Instant::now();
+            view.apply(&mut store, &changes);
+            let _ = view.with::<Favorite>();
+            kept.push(t.elapsed().as_secs_f64() * 1000.0);
+
+            let t = Instant::now();
+            let _ = store.select_with(query(), Song::favorite, children());
+            fresh.push(t.elapsed().as_secs_f64() * 1000.0);
+            store.take_changes();
+        }
+        let (f, k) = (median(fresh), median(kept));
+        println!(
+            "    {:>8}  {:>9.4} ms  {:>9.4} ms  {:>6.1}x",
+            n,
+            f,
+            k,
+            f / k
+        );
+    }
+}

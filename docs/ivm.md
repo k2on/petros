@@ -135,9 +135,14 @@ than leaving a seam between them.
 reports what `REFERENCES` said — so a result is a tree and neither `LEFT JOIN`
 nor `INNER JOIN` appears anywhere. Which end you read from is the join.
 
-**The operators**: `Source`, `Filter`, `Take`, and a `View` that holds the
-answer. `petros-ivm`. A view is hydrated once and then handed what each mutation
-changed.
+**The operators**: `Source`, `Filter`, `Join`, `Take`, and a `View` that holds
+the answer. `petros-ivm`. A view is hydrated once and then handed what each
+mutation changed.
+
+**`Child`**, Zero's fourth kind of change, without which a tree cannot be
+maintained: hearting a song does not add, remove or edit any *song*, and yet a
+library view has to move. The alternative — remove the row and add it back — is
+a flicker and a lost scroll position.
 
 ## One thing I got wrong about the shape
 
@@ -166,6 +171,33 @@ the new row part of the window before anything seeks past it.
 Six hand-written tests all passed with this bug present. A two-thousand-step
 random session against a re-run of the same query found it at step 26.
 
+## What the return-value shape bought a second time
+
+The join needs to see changes to the *child* table, which the parent's source
+knows nothing about. With output pointers that means a second wire into the
+graph — the child source connected to the join as well. Here the raw change is
+in hand at every level on the way down, so the join simply looks at it. No
+second edge, and the pipeline is still a chain.
+
+`Child` is not recursive, and Zero's is. Zero's trees nest arbitrarily; this one
+nests one level, the same level `select_with` reads. A recursive type that can
+only ever be one deep would be a lie about what the code does.
+
+## What I got wrong about foreign keys
+
+The first version of "a new parent arrives with its children" wrote the child
+first and then the parent. It failed, and the reason was not the join: the
+foreign key refused the orphan, so the child was never written and the view was
+right to show nothing. `put_row` swallowed the error — it does correctly report
+*no change* when a write fails, so the view stayed consistent with the database,
+but a mutation that violates a constraint gets no signal at all.
+
+That is worth fixing separately and is not the join's business: `Store::put_row`
+returns `()`, so reporting would change the trait and the guest ABI with it.
+
+The test now brings the parent into view by editing it across the filter, which
+is a real case and does not need an orphan to exist.
+
 ## What I would build, in order
 
 1. ~~Change capture~~ and ~~a source over SQLite~~ — done. Triggers turned out
@@ -173,15 +205,17 @@ random session against a re-run of the same query found it at step 26.
    than reading them back out of a table, and the cost is one point lookup per
    write rather than an insert.
 2. ~~`push`~~ — done, as a return value rather than an output pointer.
-3. **The operators:** ~~filter~~, ~~take~~, join. Filter was trivial and take
-   was where the design was tested, exactly as expected. Join is what is left,
-   and it is the one that makes a maintained `library()` possible: the pipeline
-   is single-table, so the tree that `select_with` builds is still assembled by
-   a fetch rather than maintained by an operator.
-4. ~~Relationships~~ — done as `select_with`, generated from the foreign keys.
-   Maintaining one incrementally is the join above; a change to a child has to
-   become Zero's fourth kind of change, `Child`, meaning "this row is unchanged
-   but something beneath it moved".
+3. ~~The operators:~~ filter, take and join, all done. Filter was trivial and
+   take was where the design was tested, exactly as expected.
+4. ~~Relationships~~ — `select_with` reads one, `View::related` maintains one.
+5. **Wire a view into a client.** Nothing uses this yet: harken's `library()`
+   still runs on every read. A client holds a `View`, hands it
+   `store.take_changes()` after each entry, and renders from it — and the
+   rebase makes that interesting, because a replay is a great many changes at
+   once and the view should coalesce rather than churn.
+6. **Aggregates**, which is where the flat comparison below stops being kind to
+   the re-run: `COUNT` and `MAX` over a table are O(n) every time, and O(1) to
+   maintain.
 
 ## What to measure before any of it
 
@@ -231,6 +265,17 @@ indexing is a different kind of thing to reason about.
 
 Maintained is 0.0013 ms in every row of both tables. That flatness is the
 property, not the ratio.
+
+The tree is the case that grows, because a re-run of it is two statements and
+the second one's `IN` gets longer as the relationship fills:
+
+```
+  one heart, then the library of N songs with their favourites:
+       songs        re-run    maintained    ratio
+         100     0.0333 ms     0.0054 ms     6.1x
+        1000     0.0726 ms     0.0053 ms    13.6x
+       10000     0.3575 ms     0.0039 ms    91.3x
+```
 
 **The extra read on a write**, which is what a write pays to be able to report
 what it changed:
