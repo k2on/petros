@@ -45,7 +45,7 @@ pub fn add(db: &mut Db, id: NewId, created_ms: Now, actor: Actor, text: String) 
         pos: last + 1,
         created_ms,
         actor: actor.to_string(),
-    });
+    })?;
     Ok(())
 }
 
@@ -63,7 +63,7 @@ pub fn mark_all_done(db: &mut Db) -> Result {
     let open = db.select(TodoRow::all().filter(TodoRow::done.eq(false)));
     for mut todo in open {
         todo.done = true;
-        db.put(&todo);
+        db.put(&todo)?;
     }
     Ok(())
 }
@@ -74,14 +74,14 @@ pub fn mark_all_done(db: &mut Db) -> Result {
 pub fn set_done(db: &mut Db, id: Id, done: bool) -> Result {
     if let Some(mut todo) = db.get::<TodoRow>(&TodoRow::key_of(&id)) {
         todo.done = done;
-        db.put(&todo);
+        db.put(&todo)?;
     }
     Ok(())
 }
 
 #[mutation]
 pub fn remove(db: &mut Db, id: Id) -> Result {
-    db.delete::<TodoRow>(&TodoRow::key_of(&id));
+    db.delete::<TodoRow>(&TodoRow::key_of(&id))?;
     Ok(())
 }
 

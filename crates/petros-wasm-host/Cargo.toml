@@ -18,6 +18,7 @@ petros-schema = { workspace = true, features = ["serde"] }
 wasmi = "2"
 
 [dev-dependencies]
+petros-wasm-guest.workspace = true
 # A domain to run. Nothing above this line knows what a to-do is.
 todo = { workspace = true, features = ["storage"] }
 # The tests check the module against the schema it was generated from.

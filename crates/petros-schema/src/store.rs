@@ -235,11 +235,20 @@ pub trait Store {
     /// Reads the old row first, so an overwrite reports [`Change::Edit`] with
     /// both versions rather than an add that a view cannot place. That is one
     /// extra point lookup per write, against an index.
-    fn put_row(&mut self, table: &str, row: &[Value]);
+    /// Write a row, reporting a refusal rather than swallowing one.
+    ///
+    /// A constraint the database enforces — a foreign key, a check — is a
+    /// *deterministic verdict*: every replica applying this entry reaches it,
+    /// so it belongs in the same channel as a mutation's own refusal and not in
+    /// a log nobody reads. This returned `()` at first, and a write that a
+    /// foreign key refused simply did not happen, in silence.
+    fn put_row(&mut self, table: &str, row: &[Value]) -> Result<(), String>;
 
     /// Remove a row by key, and say what changed. A key that is not there is a
     /// no-op and no change: an entry earlier in the log may have removed it.
-    fn delete_row(&mut self, table: &str, key: &[Value]);
+    /// Remove a row, reporting a refusal — a foreign key with `ON DELETE
+    /// RESTRICT` is the usual one.
+    fn delete_row(&mut self, table: &str, key: &[Value]) -> Result<(), String>;
 
     /// One row by key.
     fn get_row(&mut self, table: &str, key: &[Value]) -> Option<Vec<Value>>;
@@ -335,12 +344,12 @@ pub trait Rows: Store {
         self.get_row(T::DEF.name, key).is_some()
     }
 
-    fn put<T: Table>(&mut self, row: &T) {
-        self.put_row(T::DEF.name, &row.to_row());
+    fn put<T: Table>(&mut self, row: &T) -> Result<(), String> {
+        self.put_row(T::DEF.name, &row.to_row())
     }
 
-    fn delete<T: Table>(&mut self, key: &[Value]) {
-        self.delete_row(T::DEF.name, key);
+    fn delete<T: Table>(&mut self, key: &[Value]) -> Result<(), String> {
+        self.delete_row(T::DEF.name, key)
     }
 }
 
@@ -351,10 +360,10 @@ impl<S: Store + ?Sized> Store for &mut S {
     fn fetch(&mut self, plan: &crate::Plan) -> Vec<Vec<Value>> {
         (**self).fetch(plan)
     }
-    fn put_row(&mut self, table: &str, row: &[Value]) {
+    fn put_row(&mut self, table: &str, row: &[Value]) -> Result<(), String> {
         (**self).put_row(table, row)
     }
-    fn delete_row(&mut self, table: &str, key: &[Value]) {
+    fn delete_row(&mut self, table: &str, key: &[Value]) -> Result<(), String> {
         (**self).delete_row(table, key)
     }
     fn get_row(&mut self, table: &str, key: &[Value]) -> Option<Vec<Value>> {

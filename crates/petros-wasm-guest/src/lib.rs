@@ -85,18 +85,30 @@ macro_rules! export {
         }
 
         impl $crate::petros_schema::Store for PetrosStore {
-            fn put_row(&mut self, table: &str, row: &[$crate::petros_schema::Value]) {
-                let _ = PetrosStore::ask(&$crate::petros_schema::Request::Put {
-                    table: table.to_string(),
-                    row: row.to_vec(),
-                });
+            fn put_row(
+                &mut self,
+                table: &str,
+                row: &[$crate::petros_schema::Value],
+            ) -> ::core::result::Result<(), ::std::string::String> {
+                $crate::decode_outcome(PetrosStore::ask(
+                    &$crate::petros_schema::Request::Put {
+                        table: table.to_string(),
+                        row: row.to_vec(),
+                    },
+                ))
             }
 
-            fn delete_row(&mut self, table: &str, key: &[$crate::petros_schema::Value]) {
-                let _ = PetrosStore::ask(&$crate::petros_schema::Request::Delete {
-                    table: table.to_string(),
-                    key: key.to_vec(),
-                });
+            fn delete_row(
+                &mut self,
+                table: &str,
+                key: &[$crate::petros_schema::Value],
+            ) -> ::core::result::Result<(), ::std::string::String> {
+                $crate::decode_outcome(PetrosStore::ask(
+                    &$crate::petros_schema::Request::Delete {
+                        table: table.to_string(),
+                        key: key.to_vec(),
+                    },
+                ))
             }
 
             fn get_row(
@@ -284,6 +296,23 @@ pub fn encode(value: &ciborium::value::Value) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     ciborium::into_writer(value, &mut out).ok()?;
     Some(out)
+}
+
+/// What the host said about a write.
+///
+/// Empty means it went through — which is also what an older host sends for
+/// every write, so a guest built against this reads silence as success and
+/// behaves exactly as it did before. Anything else is the refusal, and the
+/// mutation that asked for the write gets to return it.
+#[doc(hidden)]
+pub fn decode_outcome(answer: Vec<u8>) -> Result<(), String> {
+    if answer.is_empty() {
+        return Ok(());
+    }
+    match ciborium::from_reader::<String, _>(&answer[..]) {
+        Ok(reason) => Err(reason),
+        Err(e) => Err(format!("the host refused the write, unreadably: {e}")),
+    }
 }
 
 /// A request, as the bytes the host decodes. CBOR, like the log.

@@ -3013,6 +3013,7 @@ dependencies = [
  "diesel",
  "petros",
  "petros-schema",
+ "petros-wasm-guest",
  "serde_json",
  "todo",
  "wasmi",

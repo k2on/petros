@@ -40,7 +40,7 @@ fn a_row_survives_the_round_trip() {
     let mut store = SqliteStore::new(&mut conn);
 
     let one = song(1, "Glue", 1);
-    store.put(&one);
+    store.put(&one).unwrap();
     assert_eq!(store.get::<Song>(&Song::key_of(&vec![1u8; 16])), Some(one));
     assert!(store.exists::<Song>(&Song::key_of(&vec![1u8; 16])));
     assert!(!store.exists::<Song>(&Song::key_of(&vec![9u8; 16])));
@@ -53,7 +53,7 @@ fn a_write_says_what_changed() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
 
-    store.put(&song(1, "Glue", 1));
+    store.put(&song(1, "Glue", 1)).unwrap();
     match store.take_changes().as_slice() {
         [Change::Add { table, row }] => {
             assert_eq!(table, "song");
@@ -64,7 +64,7 @@ fn a_write_says_what_changed() {
 
     // An overwrite carries both versions. A view that sorts on `pos` needs the
     // old one to know where the row was.
-    store.put(&song(1, "Glue (remastered)", 7));
+    store.put(&song(1, "Glue (remastered)", 7)).unwrap();
     match store.take_changes().as_slice() {
         [Change::Edit { old, new, .. }] => {
             assert_eq!(old[1], Value::Text("Glue".into()));
@@ -75,7 +75,7 @@ fn a_write_says_what_changed() {
         other => panic!("expected one edit, got {other:?}"),
     }
 
-    store.delete::<Song>(&Song::key_of(&vec![1u8; 16]));
+    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
     match store.take_changes().as_slice() {
         [Change::Remove { row, .. }] => {
             assert_eq!(row[1], Value::Text("Glue (remastered)".into()))
@@ -85,7 +85,7 @@ fn a_write_says_what_changed() {
 
     // Deleting what is not there is a no-op, and a no-op is not a change: an
     // entry earlier in the log may have removed it already.
-    store.delete::<Song>(&Song::key_of(&vec![1u8; 16]));
+    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
     assert!(store.take_changes().is_empty());
 }
 
@@ -95,7 +95,7 @@ fn a_write_says_what_changed() {
 fn changes_are_drained() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(1, "Glue", 1));
+    store.put(&song(1, "Glue", 1)).unwrap();
     assert_eq!(store.take_changes().len(), 1);
     assert!(store.take_changes().is_empty());
 }
@@ -109,7 +109,7 @@ fn a_read_is_a_query() {
         .iter()
         .enumerate()
     {
-        store.put(&song(i as u8, title, i as i64));
+        store.put(&song(i as u8, title, i as i64)).unwrap();
     }
 
     let all = store.select(Song::all().order_by(Song::pos.asc()));
@@ -134,7 +134,7 @@ fn a_query_can_start_after_a_row() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
     for i in 0..5u8 {
-        store.put(&song(i, &format!("song {i}"), i as i64));
+        store.put(&song(i, &format!("song {i}"), i as i64)).unwrap();
     }
 
     let page = store.select(Song::all().order_by(Song::pos.asc()).limit(2));
@@ -187,11 +187,11 @@ fn related_rows_hang_off_their_parent() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
     for (i, title) in ["Glue", "Apricots", "Opal"].iter().enumerate() {
-        store.put(&song(i as u8, title, i as i64));
+        store.put(&song(i as u8, title, i as i64)).unwrap();
     }
     // Two on the first song, none on the second, one on the third.
-    store.put(&favorite(0, 1));
-    store.put(&favorite(2, 2));
+    store.put(&favorite(0, 1)).unwrap();
+    store.put(&favorite(2, 2)).unwrap();
 
     let rows = store.select_with(
         Song::all().order_by(Song::pos.asc()),
@@ -218,10 +218,10 @@ fn related_rows_hang_off_their_parent() {
 fn a_relationship_reads_from_either_end() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(0, "Glue", 0));
-    store.put(&song(1, "Apricots", 1));
-    store.put(&favorite(1, 1));
-    store.put(&favorite(0, 2));
+    store.put(&song(0, "Glue", 0)).unwrap();
+    store.put(&song(1, "Apricots", 1)).unwrap();
+    store.put(&favorite(1, 1)).unwrap();
+    store.put(&favorite(0, 2)).unwrap();
 
     let rows = store.select_with(
         Favorite::all().order_by(Favorite::pos.asc()),
@@ -243,10 +243,10 @@ fn a_relationship_reads_from_either_end() {
 fn the_related_side_is_a_query() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(0, "Glue", 0));
-    store.put(&song(1, "Apricots", 1));
-    store.put(&favorite(0, 5));
-    store.put(&favorite(1, 3));
+    store.put(&song(0, "Glue", 0)).unwrap();
+    store.put(&song(1, "Apricots", 1)).unwrap();
+    store.put(&favorite(0, 5)).unwrap();
+    store.put(&favorite(1, 3)).unwrap();
 
     let rows = store.select_with(
         Song::all().order_by(Song::pos.asc()),

@@ -57,12 +57,14 @@ fn sweep(indexed: bool) {
         }
         let mut store = SqliteStore::new(&mut conn);
         for i in 0..n {
-            store.put(&Song {
-                id: id(i),
-                title: format!("song {i}"),
-                done: false,
-                pos: i as i64,
-            });
+            store
+                .put(&Song {
+                    id: id(i),
+                    title: format!("song {i}"),
+                    done: false,
+                    pos: i as i64,
+                })
+                .unwrap();
         }
         store.take_changes();
 
@@ -85,7 +87,7 @@ fn sweep(indexed: bool) {
                 pos: (n + i) as i64,
             };
 
-            store.put(&row);
+            store.put(&row).unwrap();
             let changes = store.take_changes();
             let t = Instant::now();
             view.apply(&mut store, &changes);
@@ -125,12 +127,14 @@ fn the_extra_read_on_a_write() {
         conn.batch_execute(SCHEMA).unwrap();
         let mut store = SqliteStore::new(&mut conn);
         for i in 0..n {
-            store.put(&Song {
-                id: id(i),
-                title: format!("song {i}"),
-                done: false,
-                pos: i as i64,
-            });
+            store
+                .put(&Song {
+                    id: id(i),
+                    title: format!("song {i}"),
+                    done: false,
+                    pos: i as i64,
+                })
+                .unwrap();
         }
         store.take_changes();
 
@@ -144,7 +148,7 @@ fn the_extra_read_on_a_write() {
                 pos: (n + i) as i64,
             };
             let t = Instant::now();
-            store.put(&fresh);
+            store.put(&fresh).unwrap();
             inserts.push(t.elapsed().as_secs_f64() * 1000.0);
 
             // An update, which is the case that pays for the lookup: it has an
@@ -152,7 +156,7 @@ fn the_extra_read_on_a_write() {
             let mut existing = store.get::<Song>(&Song::key_of(&id(i))).unwrap();
             existing.done = !existing.done;
             let t = Instant::now();
-            store.put(&existing);
+            store.put(&existing).unwrap();
             updates.push(t.elapsed().as_secs_f64() * 1000.0);
             store.take_changes();
         }
@@ -183,12 +187,14 @@ fn a_maintained_tree_against_a_re_run() {
         conn.batch_execute(SCHEMA).unwrap();
         let mut store = SqliteStore::new(&mut conn);
         for i in 0..n {
-            store.put(&Song {
-                id: id(i),
-                title: format!("song {i}"),
-                done: false,
-                pos: i as i64,
-            });
+            store
+                .put(&Song {
+                    id: id(i),
+                    title: format!("song {i}"),
+                    done: false,
+                    pos: i as i64,
+                })
+                .unwrap();
         }
         store.take_changes();
 
@@ -206,10 +212,12 @@ fn a_maintained_tree_against_a_re_run() {
         for i in 0..50 {
             // Heart a song outside the window: the change the view must judge
             // and then decline, which is the common case on a long list.
-            store.put(&Favorite {
-                song_id: id(n - 1 - i),
-                pos: i as i64,
-            });
+            store
+                .put(&Favorite {
+                    song_id: id(n - 1 - i),
+                    pos: i as i64,
+                })
+                .unwrap();
             let changes = store.take_changes();
             let t = Instant::now();
             view.apply(&mut store, &changes);

@@ -186,9 +186,9 @@ impl petros_schema::Store for SqliteStore<'_> {
         rows(self.conn, q, &types).into_iter().next()
     }
 
-    fn put_row(&mut self, table: &str, row: &[Value]) {
+    fn put_row(&mut self, table: &str, row: &[Value]) -> Result<(), String> {
         let Some(shape) = self.shape(table) else {
-            return;
+            return Err(format!("no table called `{table}`"));
         };
         let (name, columns_list) = (shape.name.clone(), shape.columns.clone());
         // The old row first. An overwrite has to report what it replaced, or a
@@ -214,8 +214,8 @@ impl petros_schema::Store for SqliteStore<'_> {
             q.bind(value.clone());
         }
         q.sql(")");
-        if q.execute(&mut *self.conn).is_err() {
-            return;
+        if let Err(e) = q.execute(&mut *self.conn) {
+            return Err(format!("writing to `{name}`: {e}"));
         }
         self.changes.push(match old {
             Some(old) => Change::Edit {
@@ -228,28 +228,30 @@ impl petros_schema::Store for SqliteStore<'_> {
                 row: row.to_vec(),
             },
         });
+        Ok(())
     }
 
-    fn delete_row(&mut self, table: &str, key: &[Value]) {
+    fn delete_row(&mut self, table: &str, key: &[Value]) -> Result<(), String> {
         // Nothing to report if nothing was there, and a redelivered entry
         // removing a row twice is normal.
         let Some(old) = self.get_row(table, key) else {
-            return;
+            return Ok(());
         };
         let Some(shape) = self.shape(table) else {
-            return;
+            return Err(format!("no table called `{table}`"));
         };
         let (name, key_cols) = (shape.name.clone(), shape.key.clone());
         let mut q = Sql::new();
         q.sql(&format!("DELETE FROM {}", ident(&name)));
         where_key(&mut q, &key_cols, key);
-        if q.execute(&mut *self.conn).is_err() {
-            return;
+        if let Err(e) = q.execute(&mut *self.conn) {
+            return Err(format!("writing to `{name}`: {e}"));
         }
         self.changes.push(Change::Remove {
             table: name,
             row: old,
         });
+        Ok(())
     }
 
     fn take_changes(&mut self) -> Vec<Change> {

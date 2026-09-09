@@ -24,10 +24,13 @@ struct Recorder {
 }
 
 impl Store for Recorder {
-    fn put_row(&mut self, table: &str, row: &[petros_schema::Value]) {
+    fn put_row(&mut self, table: &str, row: &[petros_schema::Value]) -> Result<(), String> {
         self.writes.push((table.to_string(), row.to_vec()));
+        Ok(())
     }
-    fn delete_row(&mut self, _table: &str, _key: &[petros_schema::Value]) {}
+    fn delete_row(&mut self, _table: &str, _key: &[petros_schema::Value]) -> Result<(), String> {
+        Ok(())
+    }
     fn get_row(
         &mut self,
         _table: &str,
@@ -65,7 +68,8 @@ pub fn add_song(
             petros_schema::Value::Int(added_ms),
             petros_schema::Value::Text(actor.to_string()),
         ],
-    );
+    )
+    .unwrap();
     Ok(())
 }
 
@@ -136,7 +140,8 @@ fn a_refusal_comes_back_from_the_body() {
 /// Take a song back out of the playlist.
 #[petros_macros::mutation]
 pub fn unfavorite(db: &mut Db, id: petros_schema::Id) -> Result<(), String> {
-    db.delete_row("favorite", &[petros_schema::Value::Blob(id)]);
+    db.delete_row("favorite", &[petros_schema::Value::Blob(id)])
+        .unwrap();
     Ok(())
 }
 

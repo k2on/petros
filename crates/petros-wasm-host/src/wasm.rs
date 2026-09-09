@@ -87,6 +87,22 @@ impl HostState {
 
 /// Build the instance a worker will keep, and remember the two exports every
 /// call needs.
+/// What the guest hears about a write it asked for.
+///
+/// Empty means it went through, which is what every write used to answer — so a
+/// guest that does not read this behaves exactly as it did before, and one that
+/// does gets the refusal. `petros_wasm_guest::decode_outcome` is the other half;
+/// the round trip is tested.
+pub fn encode_outcome(result: Result<(), String>) -> Result<Vec<u8>, String> {
+    let Err(reason) = result else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    ciborium::into_writer(&reason, &mut out)
+        .map_err(|e| format!("could not encode the refusal: {e}"))?;
+    Ok(out)
+}
+
 fn instantiate(
     engine: &Engine,
     module: &Module,
@@ -436,14 +452,12 @@ fn host_store(mut caller: Caller<'_, HostState>, request: u32, len: u32) -> u32 
             Request::Get { table, key } => {
                 encode(store.get_row(&table, &key).into_iter().collect())?
             }
-            Request::Put { table, row } => {
-                store.put_row(&table, &row);
-                Vec::new()
-            }
-            Request::Delete { table, key } => {
-                store.delete_row(&table, &key);
-                Vec::new()
-            }
+            // A refusal travels back as the answer rather than as a host
+            // failure: the mutation asked for this write and is the thing that
+            // should decide what a refused one means. Success is an empty
+            // answer, which is what every write used to send.
+            Request::Put { table, row } => encode_outcome(store.put_row(&table, &row))?,
+            Request::Delete { table, key } => encode_outcome(store.delete_row(&table, &key))?,
         })
     });
     match outcome {

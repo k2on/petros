@@ -75,21 +75,23 @@ fn shape(rows: &[With<Song, Favorite>]) -> Vec<(&str, bool)> {
 fn hearting_a_song_moves_a_view_of_songs() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(1, "Glue", 1));
-    store.put(&song(2, "Opal", 2));
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&song(2, "Opal", 2)).unwrap();
     store.take_changes();
 
     let mut view = view();
     view.hydrate(&mut store);
     assert_eq!(shape(&view.with()), vec![("Glue", false), ("Opal", false)]);
 
-    store.put(&heart(2, 1));
+    store.put(&heart(2, 1)).unwrap();
     assert!(settle(&mut view, &mut store) > 0, "the view heard about it");
     assert_eq!(shape(&view.with()), vec![("Glue", false), ("Opal", true)]);
     assert_eq!(view.with::<Favorite>(), rerun(&mut store));
 
     // And back off again.
-    store.delete::<Favorite>(&Favorite::key_of(&vec![2u8; 16]));
+    store
+        .delete::<Favorite>(&Favorite::key_of(&vec![2u8; 16]))
+        .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(shape(&view.with()), vec![("Glue", false), ("Opal", false)]);
     assert_eq!(view.with::<Favorite>(), rerun(&mut store));
@@ -107,8 +109,8 @@ fn a_parent_arrives_hydrated() {
     let mut store = SqliteStore::new(&mut conn);
     let mut hidden = song(5, "Sundial", 1);
     hidden.done = true;
-    store.put(&hidden);
-    store.put(&heart(5, 1));
+    store.put(&hidden).unwrap();
+    store.put(&heart(5, 1)).unwrap();
     store.take_changes();
 
     let mut view = View::<Song>::related(
@@ -123,7 +125,7 @@ fn a_parent_arrives_hydrated() {
     assert!(view.is_empty());
 
     hidden.done = false;
-    store.put(&hidden);
+    store.put(&hidden).unwrap();
     settle(&mut view, &mut store);
 
     let rows = view.with::<Favorite>();
@@ -141,8 +143,8 @@ fn a_parent_arrives_hydrated() {
 fn a_child_edited_in_place_stays_under_its_parent() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(1, "Glue", 1));
-    store.put(&heart(1, 1));
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&heart(1, 1)).unwrap();
     store.take_changes();
 
     let mut view = view();
@@ -152,7 +154,7 @@ fn a_child_edited_in_place_stays_under_its_parent() {
         .get::<Favorite>(&Favorite::key_of(&vec![1u8; 16]))
         .unwrap();
     moved.pos = 9;
-    store.put(&moved);
+    store.put(&moved).unwrap();
     settle(&mut view, &mut store);
 
     let rows = view.with::<Favorite>();
@@ -167,8 +169,8 @@ fn a_child_edited_in_place_stays_under_its_parent() {
 fn a_child_that_changes_parent_leaves_the_old_one() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(1, "Glue", 1));
-    store.put(&song(2, "Opal", 2));
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&song(2, "Opal", 2)).unwrap();
     store.take_changes();
 
     let mut view = view();
@@ -176,12 +178,14 @@ fn a_child_that_changes_parent_leaves_the_old_one() {
 
     // `song_id` is the key here, so moving the relationship is a delete and an
     // insert at the store — which is exactly what the view must survive.
-    store.put(&heart(1, 1));
+    store.put(&heart(1, 1)).unwrap();
     settle(&mut view, &mut store);
     assert_eq!(shape(&view.with()), vec![("Glue", true), ("Opal", false)]);
 
-    store.delete::<Favorite>(&Favorite::key_of(&vec![1u8; 16]));
-    store.put(&heart(2, 1));
+    store
+        .delete::<Favorite>(&Favorite::key_of(&vec![1u8; 16]))
+        .unwrap();
+    store.put(&heart(2, 1)).unwrap();
     settle(&mut view, &mut store);
     assert_eq!(shape(&view.with()), vec![("Glue", false), ("Opal", true)]);
     assert_eq!(view.with::<Favorite>(), rerun(&mut store));
@@ -192,10 +196,10 @@ fn a_child_that_changes_parent_leaves_the_old_one() {
 fn a_child_of_an_excluded_parent_costs_nothing() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(1, "Glue", 1));
+    store.put(&song(1, "Glue", 1)).unwrap();
     let mut hidden = song(2, "Opal", 2);
     hidden.done = true;
-    store.put(&hidden);
+    store.put(&hidden).unwrap();
     store.take_changes();
 
     let mut view = View::<Song>::related(
@@ -212,7 +216,7 @@ fn a_child_of_an_excluded_parent_costs_nothing() {
     // Hearting the hidden song reaches nothing: the parent is not in the view,
     // so there is no node to change. Asserting the answer alone would pass
     // even if the whole tree were rebuilt.
-    store.put(&heart(2, 1));
+    store.put(&heart(2, 1)).unwrap();
     assert_eq!(settle(&mut view, &mut store), 0);
     assert_eq!(shape(&view.with()), vec![("Glue", false)]);
 }
@@ -236,23 +240,26 @@ fn a_maintained_tree_agrees_with_a_re_run_over_a_random_session() {
 
     for step in 0..2000u64 {
         let id = (next() % 12) as u8;
+        // Some of these are refused by a foreign key — hearting a song that is
+        // not there — and that is part of what is under test: a refused write
+        // must not report a change, or the view drifts from the database.
         match next() % 6 {
-            0 => store.delete::<Song>(&Song::key_of(&vec![id; 16])),
-            1 => store.delete::<Favorite>(&Favorite::key_of(&vec![id; 16])),
-            2 => store.put(&heart(id, (next() % 20) as i64)),
+            0 => drop(store.delete::<Song>(&Song::key_of(&vec![id; 16]))),
+            1 => drop(store.delete::<Favorite>(&Favorite::key_of(&vec![id; 16]))),
+            2 => drop(store.put(&heart(id, (next() % 20) as i64))),
             3 => {
                 if let Some(mut s) = store.get::<Song>(&Song::key_of(&vec![id; 16])) {
                     s.pos = (next() % 20) as i64;
-                    store.put(&s);
+                    store.put(&s).unwrap();
                 }
             }
             4 => {
                 if let Some(mut f) = store.get::<Favorite>(&Favorite::key_of(&vec![id; 16])) {
                     f.pos = (next() % 20) as i64;
-                    store.put(&f);
+                    store.put(&f).unwrap();
                 }
             }
-            _ => store.put(&song(id, &format!("song {id}"), (next() % 20) as i64)),
+            _ => drop(store.put(&song(id, &format!("song {id}"), (next() % 20) as i64))),
         }
         settle(&mut view, &mut store);
         assert_eq!(
@@ -301,9 +308,9 @@ fn note_view() -> View<Song> {
 fn a_child_edited_onto_another_parent_moves() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
-    store.put(&song(1, "Glue", 1));
-    store.put(&song(2, "Opal", 2));
-    store.put(&note(7, 1, "live version"));
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&song(2, "Opal", 2)).unwrap();
+    store.put(&note(7, 1, "live version")).unwrap();
     store.take_changes();
 
     let mut view = note_view();
@@ -317,7 +324,7 @@ fn a_child_edited_onto_another_parent_moves() {
 
     let mut moved = store.get::<Note>(&Note::key_of(&vec![7u8; 16])).unwrap();
     moved.song_id = vec![2u8; 16];
-    store.put(&moved);
+    store.put(&moved).unwrap();
     settle(&mut view, &mut store);
 
     let rows = view.with::<Note>();
@@ -337,7 +344,7 @@ fn a_view_hydrated_again_is_still_right() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
     for i in 1..=5 {
-        store.put(&song(i, &format!("song {i}"), i as i64));
+        store.put(&song(i, &format!("song {i}"), i as i64)).unwrap();
     }
     store.take_changes();
 
@@ -351,7 +358,7 @@ fn a_view_hydrated_again_is_still_right() {
     );
     view.hydrate(&mut store);
 
-    store.put(&note(7, 2, "a note on song 2"));
+    store.put(&note(7, 2, "a note on song 2")).unwrap();
     settle(&mut view, &mut store);
     let after_push = view.with::<Note>();
     assert_eq!(after_push[1].related.len(), 1);
@@ -362,4 +369,31 @@ fn a_view_hydrated_again_is_still_right() {
         after_push,
         "the second hydrate read a stale node out of the window"
     );
+}
+
+/// A write the database refuses is a refusal, not silence.
+///
+/// It used to return `()`: a foreign key would reject the row and the mutation
+/// would carry on as though it had written it. The view stayed *consistent* —
+/// a refused write correctly reports no change — but nothing told the mutation,
+/// and a constraint is a deterministic verdict every replica reaches, so it
+/// belongs where a refusal belongs.
+#[test]
+fn a_write_a_foreign_key_refuses_says_so() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+
+    let refused = store
+        .put(&heart(9, 1))
+        .expect_err("no song 9, so the foreign key refuses this");
+    assert!(refused.contains("favorite"), "{refused}");
+
+    // And the view is still right, because a refused write reports no change.
+    assert!(store.take_changes().is_empty());
+    assert!(store.select(Favorite::all()).is_empty());
+
+    // The same write, once the song exists, goes through.
+    store.put(&song(9, "Sundial", 1)).unwrap();
+    store.put(&heart(9, 1)).unwrap();
+    assert_eq!(store.select(Favorite::all()).len(), 1);
 }
