@@ -30,6 +30,47 @@ pub mod seed;
 pub mod store;
 pub use seed::Seed;
 
+/// What a function written with `#[mutation]` or `#[query]` needs in scope.
+///
+/// These are the names the attributes recognise. They are markers: the macro
+/// replaces the whole signature, so nothing here is ever called — it exists so
+/// the function reads as ordinary Rust, and so rustfmt, rust-analyzer and
+/// `cargo doc` all understand it before expansion.
+pub mod prelude {
+    pub use crate::{Actor, Db, NewId, Now, Store};
+
+    /// The store, as a function reaches it. Erased by the attribute into
+    /// `&mut impl Store`, so the real type is whatever the caller has.
+    #[derive(Debug)]
+    pub struct DbMarker;
+
+    /// What a mutation or query returns.
+    ///
+    /// The error is a `String` because a refusal is a *deterministic verdict* —
+    /// every replica applying the entry reaches the same one — and not a
+    /// failure that some peers might have and others not. It has to survive the
+    /// log, and a sentence does.
+    ///
+    /// Only in the prelude, not at the crate root: at the root it would shadow
+    /// `std`'s for every other file here.
+    pub type Result<T = ()> = ::core::result::Result<T, ::std::string::String>;
+}
+
+/// The store a function is handed. See [`prelude`].
+pub type Db = prelude::DbMarker;
+
+/// A fresh id, chosen once at the originating client and frozen in the log.
+///
+/// `apply` may not invent one: all it can reach is the store, and two replicas
+/// inventing separate ids for the same entry is divergence.
+pub type NewId = Id;
+
+/// The clock, frozen the same way and for the same reason.
+pub type Now = i64;
+
+/// Who authored the entry.
+pub type Actor<'a> = &'a str;
+
 /// Sixteen bytes: an id as the log stores it.
 ///
 /// Not a uuid type, so this crate keeps no dependency on one. `petros::Id` is

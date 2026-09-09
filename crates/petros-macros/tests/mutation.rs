@@ -126,3 +126,66 @@ fn a_refusal_comes_back_from_the_body() {
     assert_eq!(refused, Err("a song needs a title".to_string()));
     assert!(db.statements.is_empty(), "nothing was written");
 }
+
+/// Take a song back out of the playlist.
+#[petros_macros::mutation]
+pub fn unfavorite(db: &mut Db, id: petros_schema::Id) -> Result<(), String> {
+    db.exec(
+        "DELETE FROM favorite WHERE song_id = ?",
+        &[petros_schema::Value::Blob(id)],
+    );
+    Ok(())
+}
+
+petros_macros::peer!(add_song, unfavorite);
+
+/// Dispatch turns a verb read out of the log into a call, and says what it
+/// knows when it cannot.
+#[test]
+fn dispatch_routes_by_verb() {
+    let mut m = add_song("Glue".into(), "Bicep".into());
+    fill_auto(&mut m, vec![3; 16], 99);
+    let mut db = Recorder::default();
+    apply(&mut db, &m, "alice").expect("routed to add_song");
+    assert_eq!(db.statements.len(), 1);
+
+    let mut m = unfavorite(vec![4; 16]);
+    fill_auto(&mut m, vec![0; 16], 0);
+    apply(&mut db, &m, "alice").expect("routed to unfavorite");
+    assert!(db.statements[1].0.starts_with("DELETE FROM favorite"));
+
+    let unknown = Value::Map(vec![(
+        Value::Text("t".into()),
+        Value::Text("Frobnicate".into()),
+    )]);
+    let e = apply(&mut db, &unknown, "alice").unwrap_err();
+    assert!(e.contains("Frobnicate"), "{e}");
+    assert!(e.contains("AddSong"), "it says what it does know: {e}");
+}
+
+/// What a verb wants filled is not written anywhere: it is what the function
+/// asked for by taking a `NewId` or a `Now`.
+#[test]
+fn fill_auto_follows_the_signature() {
+    let mut m = add_song("Glue".into(), "Bicep".into());
+    fill_auto(&mut m, vec![9; 16], 4242);
+    assert_eq!(field(&m, "id"), Some(&Value::Bytes(vec![9; 16])));
+    assert_eq!(field(&m, "added_ms"), Some(&Value::Integer(4242.into())));
+
+    // `unfavorite` takes neither, so neither is added.
+    let mut m = unfavorite(vec![1; 16]);
+    fill_auto(&mut m, vec![9; 16], 4242);
+    assert_eq!(
+        field(&m, "id"),
+        Some(&Value::Bytes(vec![1; 16])),
+        "the argument, untouched"
+    );
+    assert_eq!(field(&m, "added_ms"), None);
+}
+
+#[test]
+fn the_schema_is_every_verb_and_its_arguments() {
+    let s = schema();
+    assert_eq!(s.names(), ["AddSong", "Unfavorite"]);
+    assert_eq!(s.verb("AddSong").unwrap().args.len(), 2);
+}

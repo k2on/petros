@@ -35,7 +35,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{FnArg, Ident, ItemFn, Pat, PatType, Type};
+use syn::{FnArg, Ident, ItemFn, Pat, PatType, ReturnType, Type};
 
 /// A parameter the engine supplies rather than a caller.
 #[derive(Clone, Copy, PartialEq)]
@@ -70,11 +70,14 @@ struct Arg {
 /// anyone having to decide anything.
 fn schema_ty(ty: &Type) -> Result<&'static str, String> {
     let text = quote!(#ty).to_string().replace(' ', "");
-    Ok(match text.as_str() {
-        "String" | "&str" => "Text",
+    // Matched on the last path segment, so `Id`, `petros::Id` and
+    // `petros_schema::Id` are all the same type to a reader and to this.
+    let last = text.rsplit("::").next().unwrap_or(&text);
+    Ok(match last {
+        "String" | "&str" | "&'staticstr" => "Text",
         "i64" | "u64" | "i32" | "u32" => "Integer",
         "bool" => "Bool",
-        "Id" | "petros::Id" => "Id",
+        "Id" | "NewId" | "Vec<u8>" => "Id",
         other => {
             return Err(format!(
                 "`{other}` is not a type a mutation argument can be. \
@@ -246,6 +249,19 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let auto_names: Vec<String> = autos.iter().map(|(n, _)| n.clone()).collect();
     let auto_is_id: Vec<bool> = autos.iter().map(|(_, k)| *k == Ctx::NewId).collect();
 
+    // The declaration, as the bytes the module carries. Emitted per function
+    // rather than assembled centrally: the linker concatenates a section, so
+    // nothing has to hold the list, and `concat!` cannot see another item's
+    // const anyway.
+    let mut line = verb.clone();
+    for (name, kind) in arg_strs.iter().zip(arg_kinds.iter()) {
+        line.push_str(&format!(" {name}:{kind}"));
+    }
+    line.push('\n');
+    let line_len = line.len();
+    let line_lit = line.clone();
+    let section_ident = format_ident!("__PETROS_SCHEMA_{}", name);
+
     Ok(quote! {
         #(#docs)*
         ///
@@ -281,12 +297,24 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
         pub mod #name {
             /// The verb as it appears in the log and in the schema.
             pub const VERB: &str = #verb_lit;
+            /// This verb's line of the declaration a module carries.
+            pub const LINE: &str = #line_lit;
             /// A caller's arguments, in declaration order.
             pub const ARGS: &[(&str, ::petros_schema::Ty)] =
                 &[#((#arg_strs, ::petros_schema::Ty::#arg_kinds)),*];
             /// What `fill_auto` fills, and whether it is an id or a timestamp.
             pub const AUTO: &[(&str, bool)] = &[#((#auto_names, #auto_is_id)),*];
         }
+
+        /// Wasm only: the module is self-describing so a generator that has the
+        /// artifact does not also have to compile the domain to know what is in
+        /// it. Linking the domain into the code generator put 0.31s on a 0.45s
+        /// edit-to-device loop.
+        #[cfg(target_arch = "wasm32")]
+        #[link_section = "petros_schema"]
+        #[used]
+        static #section_ident: [u8; #line_len] =
+            ::petros_schema::section_bytes(#name::LINE);
     })
 }
 
@@ -314,4 +342,155 @@ fn docs_of(f: &ItemFn) -> Vec<proc_macro2::TokenStream> {
         .filter(|a| a.path().is_ident("doc"))
         .map(|a| quote!(#a))
         .collect()
+}
+
+/// Declare a query: a read, run wherever it is asked, recorded nowhere.
+///
+/// The same shape as a mutation and for the same reason — one definition. The
+/// body is kept as written, generic over the store so any peer can run it, and
+/// a method on `Peer` is generated for a foreign caller.
+///
+/// A query takes `&mut Db` like a mutation does: SQLite advances a statement to
+/// produce rows, so reading needs `&mut` as much as writing.
+#[proc_macro_attribute]
+pub fn query(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let f = syn::parse_macro_input!(item as ItemFn);
+    match expand_query(f) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let parsed = parse(&f)?;
+    if parsed.ctx.iter().any(|(_, k)| *k != Ctx::Db) {
+        return Err(syn::Error::new_spanned(
+            &f.sig,
+            "a query takes only `db: &mut Db` from the engine. `NewId` and `Now` are \
+             frozen into a log entry, and a query does not write one; `Actor` is who \
+             authored an entry, and a query reads every peer's.",
+        ));
+    }
+    let name = f.sig.ident.clone();
+    let docs = docs_of(&f);
+    let body = &f.block;
+    let vis = &f.vis;
+    let ret = match &f.sig.output {
+        ReturnType::Type(_, ty) => quote!(#ty),
+        ReturnType::Default => {
+            return Err(syn::Error::new_spanned(
+                &f.sig,
+                "a query returns something; that is what makes it a query",
+            ))
+        }
+    };
+    let db = parsed
+        .ctx
+        .iter()
+        .find(|(_, k)| *k == Ctx::Db)
+        .map(|(n, _)| n.clone())
+        .expect("checked in parse");
+    let arg_names: Vec<_> = parsed.args.iter().map(|a| a.name.clone()).collect();
+    let arg_tys: Vec<_> = parsed.args.iter().map(|a| a.ty.clone()).collect();
+
+    Ok(quote! {
+        #(#docs)*
+        #vis fn #name<S: ::petros_schema::Store>(
+            #db: &mut S,
+            #(#arg_names: #arg_tys),*
+        ) -> #ret {
+            #body
+        }
+    })
+}
+
+/// Wire a crate's mutations together: dispatch, `fill_auto`, and the schema.
+///
+/// One line naming the mutations, and only the mutations — a query needs no
+/// listing, because nothing dispatches to it by name.
+///
+/// ```ignore
+/// petros::peer!(add_song, favorite, unfavorite, favorite_all, remove_song);
+/// ```
+///
+/// Why a list at all: dispatch has to turn a verb read out of the log into a
+/// call, and an attribute macro cannot see its sibling items. The alternative
+/// is a registry crate resolved at link time, which is more machinery than one
+/// line of names.
+#[proc_macro]
+pub fn peer(item: TokenStream) -> TokenStream {
+    let names = syn::parse_macro_input!(item with
+        syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated);
+    let names: Vec<Ident> = names.into_iter().collect();
+    let applies: Vec<Ident> = names
+        .iter()
+        .map(|n| format_ident!("__petros_apply_{}", n))
+        .collect();
+
+    quote! {
+        /// Applying a mutation: `Ok`, or a deterministic refusal every replica
+        /// reaches identically.
+        pub fn apply<S: ::petros_schema::Store>(
+            db: &mut S,
+            mutation: &::petros_schema::cbor::Value,
+            actor: &str,
+        ) -> ::core::result::Result<(), ::std::string::String> {
+            let tag = ::petros_schema::cbor::field(mutation, "t")
+                .and_then(::petros_schema::cbor::as_text)
+                .unwrap_or_default();
+            match tag.as_str() {
+                #( #names::VERB => #applies(db, mutation, actor), )*
+                // A verb this build has never heard of. The log is permanent and
+                // verbs are only ever added, so this is a peer newer than us.
+                // Saying what this one *does* know turns "why did nothing
+                // happen" into an answer.
+                other => ::core::result::Result::Err(::std::format!(
+                    "unknown mutation \"{}\"; this build knows {}",
+                    other,
+                    ::std::vec![#(#names::VERB),*].join(", ")
+                )),
+            }
+        }
+
+        /// Hoist the non-deterministic arguments in. Runs exactly once, at the
+        /// originating client; from here the values are frozen in the log
+        /// forever.
+        ///
+        /// Which fields a verb wants is not written here — it is what the
+        /// function asked for by taking a `NewId` or a `Now`.
+        pub fn fill_auto(
+            mutation: &mut ::petros_schema::cbor::Value,
+            uuid: ::std::vec::Vec<u8>,
+            now_ms: i64,
+        ) {
+            let tag = ::petros_schema::cbor::field(mutation, "t")
+                .and_then(::petros_schema::cbor::as_text)
+                .unwrap_or_default();
+            let auto: &[(&str, bool)] = match tag.as_str() {
+                #( #names::VERB => #names::AUTO, )*
+                _ => &[],
+            };
+            for (field, is_id) in auto {
+                let value = if *is_id {
+                    ::petros_schema::cbor::Value::Bytes(uuid.clone())
+                } else {
+                    ::petros_schema::cbor::Value::Integer(now_ms.into())
+                };
+                ::petros_schema::cbor::set(mutation, field, value);
+            }
+        }
+
+        /// Every mutation a caller may author.
+        pub fn schema() -> ::petros_schema::AppSchema {
+            ::petros_schema::AppSchema::new([
+                #(
+                    #names::ARGS.iter().fold(
+                        ::petros_schema::Verb::new(#names::VERB),
+                        |v, (name, ty)| v.arg(*name, *ty),
+                    ),
+                )*
+            ])
+        }
+    }
+    .into()
 }
