@@ -60,7 +60,10 @@ iced = { workspace = true, features = ["smol"] }
 console_error_panic_hook = "0.1"
 # The query string, so two browser tabs can be two peers. Declared rather than
 # leaned on transitively: iced pulls web-sys but that is not a promise.
-web-sys = { version = "0.3", features = ["Window", "Location"] }
+# `Storage` and the base64 pair are what let the page carry the database
+# across a reload; `Location` is the query string that makes two tabs two peers.
+web-sys = { version = "0.3", features = ["Window", "Location", "Storage"] }
+sqlite-wasm-rs.workspace = true
 # WebGL rather than WebGPU, for reach. Without it wgpu finds no backend, iced
 # falls back to its software renderer, and that cannot have the canvas because
 # WebGL already claimed it — which surfaces as a blank page and a panic about

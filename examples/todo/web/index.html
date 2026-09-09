@@ -30,20 +30,24 @@
       No server here, and it is worth saying rather than letting the status line
       say "cannot reach 127.0.0.1:8787" and look broken.
 
-      Two things are true of this page and not of a desktop peer. The database is
-      in memory — `sqlite-wasm-rs` registers a memory VFS and the example does not
-      ask for OPFS — so a reload starts over. And a page served over https cannot
-      open a `ws://` socket, so pointing this at a local server needs `wss://` or
-      a server on the same origin.
+      The database is a memory VFS that the page carries in and out of
+      localStorage, so a reload keeps your list. Not OPFS, which would be the
+      proper answer: `sqlite-wasm-rs` ships only a memory VFS, and an OPFS one
+      has to be written against `rsqlite-vfs`'s traits. What is here writes the
+      whole file on every change — fine for a to-do list, wrong for anything
+      large.
+
+      There is no server, and a page served over https cannot open a `ws://`
+      socket, so pointing this at one needs `wss://` or the same origin.
 
       What it does show is the whole engine running in a browser: mutations apply
       optimistically against real SQLite compiled to wasm, `pos` is recomputed by
       replay, and a refusal comes back from the same `apply` every other peer runs.
     -->
     <p id="note">
-      A single peer, with no server and an in-memory database — a reload starts
-      over. What is running is the whole engine: real SQLite compiled to wasm,
-      and the same <code>apply</code> the server and the phone use.
+      A single peer, with no server. The database is real SQLite compiled to
+      wasm, kept in <code>localStorage</code> between visits, and the
+      <code>apply</code> it runs is the one the desktop peer links.
       <a href="https://github.com/k2on/petros">Source</a>.
     </p>
   </body>

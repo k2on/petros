@@ -4166,6 +4166,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "sqlite-wasm-rs",
  "web-sys",
 ]
 

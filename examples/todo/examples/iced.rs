@@ -70,12 +70,62 @@ fn open(user: &str) -> petros::Result<petros::Connection> {
     petros::open_path(std::env::temp_dir().join(format!("petros-demo-{user}.db")))
 }
 
-/// In the browser, in memory: `sqlite-wasm-rs` registers a memory VFS by
-/// default. It can also persist to OPFS, which needs an async handshake before
-/// the first query — worth doing, and not what this example is for.
+/// In a browser the database lives in a memory VFS, and survives a reload
+/// because the page carries it in and out of `localStorage`.
+///
+/// Not OPFS, which would be the proper answer: `sqlite-wasm-rs` ships only a
+/// memory VFS, and an OPFS one has to be written against `rsqlite-vfs`'s traits.
+/// What is here instead is the whole file, base64'd, on a debounce — fine for a
+/// to-do list and wrong for anything large, since every save writes all of it.
 #[cfg(target_arch = "wasm32")]
-fn open(_user: &str) -> petros::Result<petros::Connection> {
-    petros::open_memory()
+fn open(user: &str) -> petros::Result<petros::Connection> {
+    let name = db_name(user);
+    // Import before opening: the VFS has to have the file before SQLite asks
+    // for it.
+    if let Some(bytes) = load(&name) {
+        let _ = sqlite_wasm_rs::MemVfsUtil::<sqlite_wasm_rs::WasmOsCallback>::new()
+            .import_db(&name, &bytes);
+    }
+    petros::open_named(&name)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn db_name(user: &str) -> String {
+    format!("petros-demo-{user}.db")
+}
+
+/// The stored database, if this browser has one.
+#[cfg(target_arch = "wasm32")]
+fn load(name: &str) -> Option<Vec<u8>> {
+    let store = web_sys::window()?.local_storage().ok()??;
+    let text = store.get_item(name).ok()??;
+    let binary = web_sys::window()?.atob(&text).ok()?;
+    Some(binary.chars().map(|c| c as u8).collect())
+}
+
+/// Hand the database to the page.
+///
+/// `localStorage` holds strings, so the bytes go through base64 — which is what
+/// `btoa` is for, given a string whose chars are all under 256.
+#[cfg(target_arch = "wasm32")]
+fn save(name: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(Some(store)) = window.local_storage() else {
+        return;
+    };
+    let Ok(bytes) =
+        sqlite_wasm_rs::MemVfsUtil::<sqlite_wasm_rs::WasmOsCallback>::new().export_db(name)
+    else {
+        return;
+    };
+    let binary: String = bytes.iter().map(|b| *b as char).collect();
+    if let Ok(text) = window.btoa(&binary) {
+        // A full browser quota is not worth a panic: the peer keeps working and
+        // this reload is simply the last one it remembers.
+        let _ = store.set_item(name, &text);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +279,11 @@ impl App {
         let arrived = self.pump();
         if edited || arrived {
             self.refresh();
+            // Whole-file, so it waits for something to have changed rather than
+            // running on every tick. A to-do list is small enough that this is
+            // cheaper than deciding when to do it properly.
+            #[cfg(target_arch = "wasm32")]
+            save(&db_name(&self.user));
         }
         Task::none()
     }

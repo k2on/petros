@@ -108,6 +108,18 @@ pub fn open_memory() -> Result<Connection> {
 }
 
 /// A database on disk, with the pragmas Petros expects.
+/// A database by name, without WAL.
+///
+/// For a browser. `sqlite-wasm-rs` keeps files in a memory VFS, and WAL wants
+/// shared memory it does not provide — [`open_path`] would fail on the pragma.
+/// The name is what makes the file exportable: a browser peer persists by
+/// handing those bytes to the page and importing them back on the next load.
+pub fn open_named(name: &str) -> Result<Connection> {
+    let mut conn = Connection::establish(name)?;
+    tune(&mut conn)?;
+    Ok(conn)
+}
+
 pub fn open_path(path: impl AsRef<std::path::Path>) -> Result<Connection> {
     let mut conn = Connection::establish(&path.as_ref().to_string_lossy())?;
     conn.batch_execute("PRAGMA journal_mode = WAL;")?;
