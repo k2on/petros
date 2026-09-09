@@ -206,7 +206,7 @@ fn a_mutation_costs_the_same_at_any_depth() {
     use std::time::Instant;
 
     let mut client = client("alice");
-    let mut at = |c: &mut Client<Todo>, n: usize| {
+    let at = |c: &mut Client<Todo>, n: usize| {
         while c.pending_len() < n {
             c.mutate(TodoMutation::add("filler")).unwrap();
         }
