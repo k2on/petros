@@ -25,6 +25,7 @@
 
 #[cfg(feature = "author")]
 pub mod author;
+pub mod ffi_row;
 pub mod seed;
 pub mod store;
 pub use seed::Seed;
