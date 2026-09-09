@@ -322,3 +322,42 @@ fn a_filter_can_ask_for_null() {
     assert_eq!(present.len(), 1);
     assert_eq!(present[0].notes, Some("only this one".to_string()));
 }
+
+/// A limit on the related side is per parent, as it is in a maintained view.
+///
+/// It used to be dropped: every parent got all of its children and nothing said
+/// the limit had done nothing. One statement cannot express "two each" without
+/// a window function, so it is applied to each parent's children after they
+/// arrive — but it is applied.
+#[test]
+fn a_limit_on_the_related_side_is_per_parent() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&song(2, "Opal", 2)).unwrap();
+    for i in 0..3u8 {
+        store
+            .put(&Note {
+                id: vec![i * 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                song_id: vec![1; 16],
+                text: "on Glue".into(),
+            })
+            .unwrap();
+        store
+            .put(&Note {
+                id: vec![i * 2 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                song_id: vec![2; 16],
+                text: "on Opal".into(),
+            })
+            .unwrap();
+    }
+
+    let rows = store.select_with(
+        Song::all().order_by(Song::pos.asc()),
+        Song::note,
+        Note::all().order_by(Note::id.asc()).limit(2),
+    );
+
+    let counts: Vec<usize> = rows.iter().map(|r| r.related.len()).collect();
+    assert_eq!(counts, vec![2, 2], "two each, not two altogether");
+}

@@ -261,10 +261,13 @@ is a real case and does not need an orphan to exist.
    deeper than that is `nodes()`, which is untyped. A type describing arbitrary
    nesting is real type-level work in `tables!` and is not worth it until a
    screen wants one.
-8. **Per-partition take state.** A limit on a *child* relationship means "this
-   many per parent", which one statement cannot say. `select_with` refuses it
-   and a constrained `Take` does not cache. Zero keys take state by partition;
-   this would too.
+8. ~~Per-partition take state~~ — done, and it was not an optimisation. A limit
+   on a child relationship was silently *wrong*: the first parent took the whole
+   limit and every other parent showed nothing. `Take` keys its window by the
+   column the relationship joins on now, as Zero does, and a refill seeks within
+   its own partition. `select_with` had the same bug from the other side — it
+   dropped a child limit entirely — and now applies it per parent, so the run
+   query and the maintained one agree.
 9. **Aggregates**, which is where the flat comparison below stops being kind to
    the re-run: `COUNT` and `MAX` over a table are O(n) every time, and O(1) to
    maintain.

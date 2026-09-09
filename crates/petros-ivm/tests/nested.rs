@@ -305,3 +305,71 @@ fn a_page_costs_one_pull_per_level() {
         counting.rows
     );
 }
+
+/// A limit on a *child* means "this many per parent", not that many altogether.
+///
+/// Note ids interleave across songs — song 1 owns 1, 4, 7 and song 2 owns 2, 5,
+/// 8 — so the next note in the *table* after one of song 1's belongs to another
+/// song. A refill that forgets its partition therefore steals, and the first
+/// version of these ids could not tell the difference because each song's notes
+/// were contiguous.
+#[test]
+fn a_limit_on_a_relationship_is_per_parent() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    for s in 1..=3u8 {
+        store.put(&song(s, &format!("song {s}"), s as i64)).unwrap();
+    }
+    for round in 0..3u8 {
+        for s in 1..=3u8 {
+            store.put(&note(round * 3 + s, s, "a note")).unwrap();
+        }
+    }
+    store.take_changes();
+
+    let mut view = View::<Song>::over(
+        Pipeline::of(
+            Song::all()
+                .order_by(Song::pos.asc())
+                .order_by(Song::id.asc()),
+        )
+        .related(
+            Song::note,
+            Pipeline::of(Note::all().order_by(Note::id.asc()).limit(2)),
+        ),
+    );
+    view.hydrate(&mut store);
+
+    let notes = |view: &View<Song>| -> Vec<Vec<u8>> {
+        view.nodes()
+            .iter()
+            .map(|s| {
+                s.children(Note::DEF.name)
+                    .iter()
+                    .map(|n| n.row[0].as_blob().expect("a blob id")[0])
+                    .collect()
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        notes(&view),
+        vec![vec![1, 4], vec![2, 5], vec![3, 6]],
+        "each song keeps its own first two"
+    );
+
+    // Already full: past this song's bound, so nothing reaches the view.
+    store.put(&note(99, 1, "a fourth for song 1")).unwrap();
+    settle(&mut view, &mut store);
+    assert_eq!(notes(&view), vec![vec![1, 4], vec![2, 5], vec![3, 6]]);
+
+    // A gap in song 1's window. The replacement is song 1's own next note (7),
+    // and emphatically not note 5, which is what comes next in the table.
+    store.delete::<Note>(&Note::key_of(&vec![1u8; 16])).unwrap();
+    settle(&mut view, &mut store);
+    assert_eq!(
+        notes(&view),
+        vec![vec![4, 7], vec![2, 5], vec![3, 6]],
+        "song 1 refilled from its own notes"
+    );
+}

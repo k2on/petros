@@ -325,10 +325,12 @@ pub trait Rows: Store {
             Some(existing) => crate::Node::All(vec![existing, constraint]),
             None => constraint,
         });
-        // A limit belongs to each parent's children, not to all of them at
-        // once, and one statement cannot say that. Refusing beats quietly
-        // truncating somebody else's list.
-        plan.limit = None;
+        // A limit here means "this many per parent", which one statement cannot
+        // say without a window function the plan has no room for. So it is
+        // taken off the statement and applied to each parent's children below.
+        // Dropping it silently — which this did — gives every parent all of its
+        // children and the caller no hint that the limit did nothing.
+        let per_parent = plan.limit.take().map(|n| n as usize);
 
         let Some(back) = C::DEF.columns.iter().position(|c| *c == rel.to) else {
             return Vec::new();
@@ -349,11 +351,14 @@ pub trait Rows: Store {
             .into_iter()
             .map(|p| {
                 let key = p.to_row()[at].clone();
-                let related = grouped
+                let mut related = grouped
                     .iter_mut()
                     .find(|(k, _)| *k == key)
                     .map(|(_, list)| std::mem::take(list))
                     .unwrap_or_default();
+                if let Some(n) = per_parent {
+                    related.truncate(n);
+                }
                 crate::With { row: p, related }
             })
             .collect()

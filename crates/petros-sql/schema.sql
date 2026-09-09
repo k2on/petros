@@ -13,3 +13,9 @@ CREATE TABLE IF NOT EXISTS favorite (
 CREATE TABLE IF NOT EXISTS sleeve (
     song_id BLOB NOT NULL REFERENCES song(id), notes TEXT, year BIGINT,
     PRIMARY KEY (song_id));
+-- A relationship that can have several children, which `favorite` cannot: its
+-- `song_id` is the primary key, so a song has at most one. A limit on the
+-- related side is only testable against a parent with more than one child.
+CREATE TABLE IF NOT EXISTS note (
+    id BLOB NOT NULL, song_id BLOB NOT NULL REFERENCES song(id),
+    text TEXT NOT NULL, PRIMARY KEY (id));

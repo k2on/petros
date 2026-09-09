@@ -533,13 +533,25 @@ impl<I: Operator, C: Operator> Operator for Join<I, C> {
 /// short and the one that should replace it was never in memory. Because an
 /// operator can pull, that is a seek from the last node it still holds, and
 /// costs one row rather than a re-run.
+///
+/// # Partitions
+///
+/// Under a join, a limit means "this many *per parent*" — three notes for each
+/// song, not three notes altogether. So the state is one window per parent
+/// rather than one window, keyed by the column the relationship joins on, and
+/// that is what `partition` carries. Zero keys its take state the same way and
+/// for the same reason. Without it a limited relationship is not merely slower
+/// but wrong, and quietly: the first parent takes the whole limit and every
+/// other parent shows nothing.
 pub struct Take<I> {
     input: I,
     limit: usize,
     order: Vec<(usize, Dir)>,
-    /// The window, in order. The last of these is the bound.
-    window: Vec<Tree>,
-    hydrated: bool,
+    /// The column a limit is counted within, and its position in a row.
+    partition: Option<(String, usize)>,
+    /// One window per partition, in order. `Value::Null` is the key when there
+    /// is no partition, so there is one code path rather than two.
+    windows: Vec<(Value, Vec<Tree>)>,
 }
 
 impl<I: Operator> Take<I> {
@@ -548,63 +560,126 @@ impl<I: Operator> Take<I> {
             input,
             limit,
             order,
-            window: Vec::new(),
-            hydrated: false,
+            partition: None,
+            windows: Vec::new(),
         }
+    }
+
+    /// Count the limit within this column. Set by the join above.
+    pub fn per(mut self, column: &str, at: usize) -> Self {
+        self.partition = Some((column.to_string(), at));
+        self
+    }
+
+    /// Which window a row belongs in.
+    fn key_of(&self, row: &Row) -> Value {
+        match &self.partition {
+            Some((_, at)) => row[*at].clone(),
+            None => Value::Null,
+        }
+    }
+
+    fn window(&mut self, key: &Value) -> &mut Vec<Tree> {
+        if let Some(at) = self.windows.iter().position(|(k, _)| k == key) {
+            return &mut self.windows[at].1;
+        }
+        self.windows.push((key.clone(), Vec::new()));
+        &mut self.windows.last_mut().expect("just pushed").1
+    }
+
+    fn held(&self, key: &Value) -> Option<&Vec<Tree>> {
+        self.windows.iter().find(|(k, _)| k == key).map(|(_, w)| w)
     }
 
     fn before(&self, a: &Row, b: &Row) -> std::cmp::Ordering {
         compare(a, b, &self.order)
     }
 
-    /// The cursor for a seek: the last row held.
-    fn bound(&self) -> Option<Row> {
-        self.window.last().map(|tree| tree.row.clone())
-    }
-
-    /// Pull the node that comes after the window, to replace one that left it.
-    fn refill(&mut self, store: &mut dyn Store) -> Option<Tree> {
-        let bound = self.bound();
-        let req = match &bound {
-            Some(row) => Fetch::after(row),
-            None => Fetch::default(),
+    /// Pull the node after this partition's window, to replace one that left.
+    ///
+    /// Constrained to the partition, so a song short of a note asks for that
+    /// song's next note rather than the next note in the table.
+    fn refill(&mut self, store: &mut dyn Store, key: &Value) -> Option<Tree> {
+        let bound = self.held(key).and_then(|w| w.last()).map(|t| t.row.clone());
+        let constraint = self.partition.as_ref().map(|(column, _)| Node::Cmp {
+            column: column.clone(),
+            op: Op::Eq,
+            value: key.clone(),
+        });
+        let req = Fetch {
+            start: bound.as_deref(),
+            constraint: constraint.as_ref(),
+            limit: Some(1),
         };
-        // Exactly one: this replaces a single row that left the window.
-        self.input.fetch(store, req.at_most(1)).into_iter().next()
+        self.input.fetch(store, req).into_iter().next()
     }
 
     fn insert(&mut self, tree: Tree) {
-        let at = self
-            .window
-            .partition_point(|held| self.before(&held.row, &tree.row).is_lt());
-        self.window.insert(at, tree);
+        let key = self.key_of(&tree.row);
+        let order = self.order.clone();
+        let window = self.window(&key);
+        let at = window.partition_point(|held| compare(&held.row, &tree.row, &order).is_lt());
+        window.insert(at, tree);
     }
 }
 
 impl<I: Operator> Operator for Take<I> {
     fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree> {
-        // A constraint means a different partition — the top N *of these
-        // parents' children*, not of everything — and the cached window is
-        // about the unconstrained one. Zero keys take state per partition; this
-        // simply does not cache the constrained case, which is correct and
-        // costs a seek of `limit` rows rather than of the table.
         if req.constraint.is_some() {
-            let mut rows = self.input.fetch(store, req);
+            // A page of parents at once. One statement for all of them — that
+            // is what the constraint is for — and then `limit` kept from each,
+            // because the limit is per parent and SQL cannot say that without a
+            // window function the plan has no room for.
+            //
+            // The cost is that a parent with many children has them all read
+            // and most thrown away. Fine for the handful a screen shows under a
+            // row; the fix if it is ever not, is a seek per partition, which is
+            // a statement per parent and only better when the children are
+            // many.
+            let rows = self.input.fetch(store, req);
+            if self.partition.is_none() {
+                let mut rows = rows;
+                rows.truncate(self.limit);
+                return rows;
+            }
+            let mut kept: Vec<(Value, usize)> = Vec::new();
+            let mut out = Vec::new();
+            for tree in rows {
+                let key = self.key_of(&tree.row);
+                let seen = match kept.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, n)) => n,
+                    None => {
+                        kept.push((key, 0));
+                        &mut kept.last_mut().expect("just pushed").1
+                    }
+                };
+                if *seen < self.limit {
+                    *seen += 1;
+                    out.push(tree);
+                }
+            }
+            // Remember them, so a later push maintains the same windows a pull
+            // produced rather than a different set.
+            self.windows.clear();
+            for tree in &out {
+                let key = self.key_of(&tree.row);
+                self.window(&key).push(tree.clone());
+            }
+            return out;
+        }
+
+        let key = Value::Null;
+        if self.held(&key).is_none() {
+            let mut rows = self.input.fetch(store, req.at_most(self.limit));
             rows.truncate(self.limit);
-            return rows;
+            *self.window(&key) = rows;
         }
-        if !self.hydrated {
-            self.window = self.input.fetch(store, req.at_most(self.limit));
-            self.window.truncate(self.limit);
-            self.hydrated = true;
-        }
+        let window = self.held(&key).cloned().unwrap_or_default();
         match req.start {
-            None => self.window.clone(),
-            Some(start) => self
-                .window
-                .iter()
+            None => window,
+            Some(start) => window
+                .into_iter()
                 .filter(|tree| compare(&tree.row, &start.to_vec(), &self.order).is_gt())
-                .cloned()
                 .collect(),
         }
     }
@@ -632,48 +707,55 @@ impl<I: Operator> Operator for Take<I> {
             for step in steps {
                 match step {
                     Delta::Add(tree) => {
-                        // Past the bound and the window is already full: it
-                        // does not belong on screen, and nothing above needs
-                        // to hear about it. This is the case that makes an
-                        // append to a big table cost nothing.
-                        if self.window.len() >= self.limit
+                        let key = self.key_of(&tree.row);
+                        // Past the bound and this partition's window is already
+                        // full: it does not belong on screen, and nothing above
+                        // needs to hear about it. The case that makes an append
+                        // to a big table cost nothing.
+                        let full = self.held(&key).is_some_and(|w| w.len() >= self.limit)
                             && self
-                                .window
-                                .last()
-                                .is_some_and(|last| self.before(&tree.row, &last.row).is_gt())
-                        {
+                                .held(&key)
+                                .and_then(|w| w.last())
+                                .is_some_and(|last| self.before(&tree.row, &last.row).is_gt());
+                        if full {
                             continue;
                         }
                         self.insert(tree.clone());
                         out.push(Delta::Add(tree));
-                        if self.window.len() > self.limit {
-                            let evicted = self.window.pop().expect("longer than the limit");
+                        if self.held(&key).is_some_and(|w| w.len() > self.limit) {
+                            let evicted = self.window(&key).pop().expect("longer than the limit");
                             out.push(Delta::Remove(evicted.row));
                         }
                     }
                     Delta::Remove(row) => {
-                        let Some(at) = self.window.iter().position(|held| held.row == row) else {
+                        let key = self.key_of(&row);
+                        let Some(at) = self
+                            .held(&key)
+                            .and_then(|w| w.iter().position(|held| held.row == row))
+                        else {
                             continue;
                         };
-                        self.window.remove(at);
+                        self.window(&key).remove(at);
                         out.push(Delta::Remove(row));
-                        // The window is a node short. Pull the next one rather
-                        // than re-running the query.
-                        if let Some(next) = self.refill(store) {
-                            self.window.push(next.clone());
+                        // This partition is a node short. Pull the next one
+                        // rather than re-running the query.
+                        if let Some(next) = self.refill(store, &key) {
+                            self.window(&key).push(next.clone());
                             out.push(Delta::Add(next));
                         }
                     }
                     // A child moved under a row. The row itself has not, so the
                     // window's shape is unchanged — but the copy it holds has
-                    // to be updated too, or the next refill hands the view a
-                    // node with stale children.
+                    // to be updated too, or a later pull hands back a node with
+                    // stale children.
                     Delta::Child {
                         parent,
                         name,
                         change,
                     } => {
-                        let Some(held) = self.window.iter_mut().find(|held| held.row == parent)
+                        let key = self.key_of(&parent);
+                        let Some(held) =
+                            self.window(&key).iter_mut().find(|held| held.row == parent)
                         else {
                             continue;
                         };
@@ -762,20 +844,32 @@ impl Pipeline {
         child: Pipeline,
     ) -> Self {
         let parent = self.plan.clone();
+        let within = (rel.to, position(C::DEF.columns, rel.to));
         self.top = Box::new(Join::new(
             self.top,
             parent,
             C::DEF.name,
             rel,
-            child.finish(),
+            child.finish(Some(within)),
         ));
         self
     }
 
-    /// Put the take on top, where it counts parents.
-    fn finish(self) -> Box<dyn Operator> {
+    /// Put the take on top.
+    ///
+    /// `within` is the column a limit is counted inside, which the join above
+    /// supplies: under a relationship a limit means "this many per parent", and
+    /// a take that does not know that gives the whole limit to the first parent
+    /// and nothing to the rest.
+    fn finish(self, within: Option<(&str, usize)>) -> Box<dyn Operator> {
         match self.limit {
-            Some(limit) => Box::new(Take::new(self.top, limit as usize, self.order)),
+            Some(limit) => {
+                let take = Take::new(self.top, limit as usize, self.order);
+                Box::new(match within {
+                    Some((column, at)) => take.per(column, at),
+                    None => take,
+                })
+            }
             None => self.top,
         }
     }
@@ -818,7 +912,7 @@ impl<P: Table + 'static> View<P> {
     pub fn over(pipeline: Pipeline) -> Self {
         let order = pipeline.order.clone();
         View {
-            top: pipeline.finish(),
+            top: pipeline.finish(None),
             nodes: Vec::new(),
             order,
             hydrated: false,
