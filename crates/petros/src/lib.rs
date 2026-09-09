@@ -122,7 +122,20 @@ pub fn open_named(name: &str) -> Result<Connection> {
 
 pub fn open_path(path: impl AsRef<std::path::Path>) -> Result<Connection> {
     let mut conn = Connection::establish(&path.as_ref().to_string_lossy())?;
-    conn.batch_execute("PRAGMA journal_mode = WAL;")?;
+    // WAL, and `synchronous = NORMAL` with it.
+    //
+    // FULL fsyncs on every commit, and a commit is every mutation. Measured here
+    // that is 4.03ms against 0.33ms — 92% of a mutation — and on phone flash an
+    // fsync is one to two orders of magnitude slower again, which is where
+    // 200-300ms taps came from.
+    //
+    // NORMAL in WAL is the documented-safe setting: a power cut can lose the
+    // last transactions, and cannot corrupt the database. Losing them matters
+    // less here than in most applications, because the log is what is true. A
+    // confirmed entry is already on the server, and a pending one that never
+    // reached disk is a mutation that did not happen — which is a state the
+    // rebase already handles, since it is what being offline looks like.
+    conn.batch_execute("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
     tune(&mut conn)?;
     Ok(conn)
 }
