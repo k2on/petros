@@ -7,7 +7,7 @@
 use diesel::connection::SimpleConnection;
 use petros::backend::SqliteStore;
 use petros_ivm::View;
-use petros_schema::{Rows, Store};
+use petros_schema::{Rows, Store, Table};
 
 const SCHEMA: &str = include_str!("../schema.sql");
 petros_sql::tables!();
@@ -42,7 +42,9 @@ fn titles(songs: &[Song]) -> Vec<&str> {
 /// applying an entry from the log.
 fn settle(view: &mut View<Song>, store: &mut SqliteStore) -> usize {
     let changes = store.take_changes();
-    view.apply(store, &changes)
+    // The count, which is what these tests assert on. The patches themselves
+    // are what a client splices its rendered list with.
+    view.apply(store, &changes).len()
 }
 
 #[test]
@@ -288,6 +290,104 @@ fn a_maintained_view_agrees_with_a_re_run_over_a_random_session() {
             view.rows(),
             rerun(&mut store, query()),
             "diverged at step {step}"
+        );
+    }
+}
+
+/// The property a patch stream lives or dies by: a list spliced with them ends
+/// equal to the view's own.
+///
+/// Positions are only meaningful *in sequence* — each one is where the view
+/// was when it made that patch, not where it ended up — so this applies them
+/// one at a time to a parallel list and compares after every step. A stream
+/// that is right only at the end would still leave a screen wrong mid-frame.
+/// Both with a limit and without, because they take different paths: a `Take`
+/// splits an edit into a remove and an add, so an unlimited view is the only
+/// one whose `Delta::Edit` reaches the top — and an edit that moves a row is a
+/// move, not a replacement in place.
+#[test]
+fn a_list_spliced_with_the_patches_matches_the_view() {
+    splice_session(Some(6));
+    splice_session(None);
+}
+
+fn splice_session(limit: Option<u32>) {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    let query = move || {
+        let q = Song::all()
+            .filter(Song::done.eq(false))
+            .order_by(Song::pos.asc())
+            .order_by(Song::id.asc());
+        match limit {
+            Some(n) => q.limit(n),
+            None => q,
+        }
+    };
+    let mut view = View::<Song>::new(query());
+    view.hydrate(&mut store);
+
+    // The rendered list, decoded once at the start and never again.
+    let mut rendered: Vec<Song> = view.rows();
+
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+
+    for step in 0..1500u64 {
+        let id = (next() % 20) as u8;
+        let key = Song::key_of(&vec![id; 16]);
+        match next() % 4 {
+            0 => store.delete::<Song>(&key).unwrap(),
+            1 => {
+                if let Some(mut s) = store.get::<Song>(&key) {
+                    s.done = !s.done;
+                    store.put(&s).unwrap();
+                }
+            }
+            2 => {
+                if let Some(mut s) = store.get::<Song>(&key) {
+                    s.pos = (next() % 40) as i64;
+                    store.put(&s).unwrap();
+                }
+            }
+            _ => store
+                .put(&Song {
+                    id: vec![id; 16],
+                    title: format!("song {id}"),
+                    done: next() % 6 == 0,
+                    pos: (next() % 40) as i64,
+                })
+                .unwrap(),
+        }
+
+        let changes = store.take_changes();
+        for patch in view.apply(&mut store, &changes) {
+            match patch {
+                petros_ivm::Patch::Insert { at, node } => {
+                    rendered.insert(at, Song::from_row(&node.row).expect("decodes"));
+                }
+                petros_ivm::Patch::Remove { at } => {
+                    rendered.remove(at);
+                }
+                petros_ivm::Patch::Update { at, node } => {
+                    rendered[at] = Song::from_row(&node.row).expect("decodes");
+                }
+            }
+        }
+        assert_eq!(
+            rendered,
+            view.rows(),
+            "diverged at step {step}, limit {limit:?}"
+        );
+        assert_eq!(
+            rendered,
+            rerun(&mut store, query()),
+            "wrong at step {step}, limit {limit:?}"
         );
     }
 }

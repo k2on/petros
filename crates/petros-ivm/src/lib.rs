@@ -72,6 +72,20 @@ impl Tree {
         }
     }
 
+    /// This node as a typed row and one typed relationship — the same shape
+    /// `select_with` returns, for a caller holding a single node rather than a
+    /// whole answer.
+    pub fn decode<P: Table, C: Table>(&self) -> Option<With<P, C>> {
+        Some(With {
+            row: P::from_row(&self.row)?,
+            related: self
+                .children(C::DEF.name)
+                .iter()
+                .filter_map(|kid| C::from_row(&kid.row))
+                .collect(),
+        })
+    }
+
     /// One named relationship's children.
     pub fn children(&self, name: &str) -> &[Tree] {
         self.related
@@ -767,6 +781,25 @@ impl Pipeline {
     }
 }
 
+/// What a view did to its own list, in the order it did it.
+///
+/// The point is a caller who keeps a *rendered* list beside the view — decoded
+/// rows, widgets, whatever a screen holds. Maintaining the query and then
+/// decoding every row again is still O(n), and past a few hundred rows that
+/// decode is most of what is left; these say which entries moved so the rest
+/// are not touched.
+///
+/// Positions are valid in sequence: apply them in order to a list that started
+/// equal to the view's and it ends equal again. The node travels with the patch
+/// rather than being looked up afterwards, because by then the view has already
+/// applied the rest of them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Patch {
+    Insert { at: usize, node: Tree },
+    Remove { at: usize },
+    Update { at: usize, node: Tree },
+}
+
 // ------------------------------------------------------------------- the view
 
 /// A query, materialised and kept right.
@@ -817,36 +850,49 @@ impl<P: Table + 'static> View<P> {
 
     /// Take account of one change to the database.
     ///
-    /// Returns how many changes actually reached the view, which is zero when
-    /// the change misses it — a different table, a row the filter refuses, an
-    /// append past a full window. That is the common case in a long list and
-    /// the reason any of this is worth doing, so it is a number a caller can
-    /// see rather than a claim: a UI can skip a render on nothing, and a test
-    /// can hold the cost to zero instead of only checking the answer.
-    pub fn push(&mut self, store: &mut dyn Store, change: &Change) -> usize {
+    /// Returns what it did to its own list — empty when the change misses the
+    /// view entirely: a different table, a row the filter refuses, an append
+    /// past a full window. That is the common case in a long list and the
+    /// reason any of this is worth doing, so it is something a caller can see
+    /// rather than a claim: a UI can skip a render on nothing, splice a
+    /// rendered list rather than rebuild it, and a test can hold the cost to
+    /// zero instead of only checking the answer.
+    pub fn push(&mut self, store: &mut dyn Store, change: &Change) -> Vec<Patch> {
         debug_assert!(self.hydrated, "hydrate the view before pushing to it");
-        let mut moved = 0;
+        let mut patches = Vec::new();
         for delta in self.top.push(store, change) {
-            moved += 1;
             match delta {
                 Delta::Add(tree) => {
                     let at = self
                         .nodes
                         .partition_point(|held| compare(&held.row, &tree.row, &self.order).is_lt());
+                    patches.push(Patch::Insert {
+                        at,
+                        node: tree.clone(),
+                    });
                     self.nodes.insert(at, tree);
                 }
                 Delta::Remove(row) => {
                     if let Some(at) = self.nodes.iter().position(|held| held.row == row) {
                         self.nodes.remove(at);
+                        patches.push(Patch::Remove { at });
                     }
                 }
                 Delta::Edit { old, new } => {
+                    // A move, not an update: an edit can change where the row
+                    // sorts, and a list that only replaced in place would show
+                    // it in the old position.
                     if let Some(at) = self.nodes.iter().position(|held| held.row == old) {
                         self.nodes.remove(at);
+                        patches.push(Patch::Remove { at });
                     }
                     let at = self
                         .nodes
                         .partition_point(|held| compare(&held.row, &new.row, &self.order).is_lt());
+                    patches.push(Patch::Insert {
+                        at,
+                        node: new.clone(),
+                    });
                     self.nodes.insert(at, new);
                 }
                 Delta::Child {
@@ -854,19 +900,23 @@ impl<P: Table + 'static> View<P> {
                     name,
                     change,
                 } => {
-                    if let Some(held) = self.nodes.iter_mut().find(|held| held.row == parent) {
-                        apply_child(held, name, &change);
+                    if let Some(at) = self.nodes.iter().position(|held| held.row == parent) {
+                        apply_child(&mut self.nodes[at], name, &change);
+                        patches.push(Patch::Update {
+                            at,
+                            node: self.nodes[at].clone(),
+                        });
                     }
                 }
             }
         }
-        moved
+        patches
     }
 
     /// Everything a mutation changed, in one call. What a client does after
-    /// applying an entry. Returns how much of it reached the view.
-    pub fn apply(&mut self, store: &mut dyn Store, changes: &[Change]) -> usize {
-        changes.iter().map(|c| self.push(store, c)).sum()
+    /// applying an entry.
+    pub fn apply(&mut self, store: &mut dyn Store, changes: &[Change]) -> Vec<Patch> {
+        changes.iter().flat_map(|c| self.push(store, c)).collect()
     }
 
     /// The answer, decoded.

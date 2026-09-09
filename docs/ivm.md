@@ -251,15 +251,21 @@ is a real case and does not need an orphan to exist.
    describes it. `Changes::Rebuilt` says so instead of lying, and costs one
    query in the case where the server speaks while something of ours is
    pending.
-6. **A typed accessor for a nested view.** `with::<C>()` reads one relationship;
+6. ~~A patch stream~~ — `View::push` returns what it did to its own list, as
+   positions: `Insert { at, node }`, `Remove { at }`, `Update { at, node }`.
+   Maintaining the query and then decoding every row again is still O(n), and
+   that decode turned out to be most of what was left on the client path. The
+   node travels with the patch rather than being looked up afterwards, because
+   by then the view has applied the rest of them.
+7. **A typed accessor for a nested view.** `with::<C>()` reads one relationship;
    deeper than that is `nodes()`, which is untyped. A type describing arbitrary
    nesting is real type-level work in `tables!` and is not worth it until a
    screen wants one.
-7. **Per-partition take state.** A limit on a *child* relationship means "this
+8. **Per-partition take state.** A limit on a *child* relationship means "this
    many per parent", which one statement cannot say. `select_with` refuses it
    and a constrained `Take` does not cache. Zero keys take state by partition;
    this would too.
-8. **Aggregates**, which is where the flat comparison below stops being kind to
+9. **Aggregates**, which is where the flat comparison below stops being kind to
    the re-run: `COUNT` and `MAX` over a table are O(n) every time, and O(1) to
    maintain.
 

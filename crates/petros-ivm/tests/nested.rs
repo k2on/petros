@@ -67,7 +67,9 @@ fn view() -> View<Song> {
 
 fn settle(view: &mut View<Song>, store: &mut SqliteStore) -> usize {
     let changes = store.take_changes();
-    view.apply(store, &changes)
+    // The count, which is what these tests assert on. The patches themselves
+    // are what a client splices its rendered list with.
+    view.apply(store, &changes).len()
 }
 
 /// What the tree holds, two levels down, as names.
