@@ -1,24 +1,28 @@
-//! The demo to-do list: the table, the rows, and the mutations that produce
-//! them.
+//! The worked example: a to-do list, in two files.
 //!
-//! [`domain`] holds `apply` and `fill_auto` and knows nothing about where it
-//! runs. This module gives it a [`Host`](domain::Host) backed by Diesel, which
-//! is what the server, the terminal peers and the iced window use — they are
-//! ordinary Rust programs and a mutation is an ordinary function call.
+//! [`storage`] is the model — what a row is, and what the tables are.
+//! [`functions`] is every mutation and every query, each written once as an
+//! ordinary Rust function. Everything else on this page is generated from them.
 //!
-//! The phone is the exception. It loads the same domain compiled to wasm
-//! (`crates/todo-wasm`) so a new mutation reaches it over Metro without a
-//! native build. Two builds of one source, held to that by
-//! `tests/conformance.rs`, which runs the same mutations through both and
-//! compares the rows.
+//! The server and the linked peers call these directly. `crates/todo-wasm`
+//! compiles the same functions to wasm, so `petros-wasm-host`'s conformance
+//! test can drive every verb through both builds and compare the rows.
 //!
-//! The `storage` feature is what the wasm build turns off: it has no SQLite of
-//! its own, only a channel to the host's, so it wants the domain and none of
-//! this.
+//! The `storage` feature is what the wasm build turns off. It has no SQLite of
+//! its own, only a channel to the host's, so it wants the mutations and none of
+//! the rest.
 
-pub mod domain;
-
+pub mod functions;
 #[cfg(feature = "storage")]
-mod storage;
+pub mod storage;
+
+pub use functions::*;
 #[cfg(feature = "storage")]
 pub use storage::*;
+
+#[cfg(feature = "storage")]
+petros::app!(TodoApp {
+    schema: crate::storage::SCHEMA,
+    apply: crate::functions::apply,
+    fill_auto: crate::functions::fill_auto,
+});

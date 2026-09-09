@@ -37,7 +37,10 @@ pub use seed::Seed;
 /// the function reads as ordinary Rust, and so rustfmt, rust-analyzer and
 /// `cargo doc` all understand it before expansion.
 pub mod prelude {
-    pub use crate::{Actor, Db, NewId, Now, Store};
+    pub use crate::{Actor, Db, Id, NewId, Now, Store};
+    /// Imported rather than written as a path, so a function carries a bare
+    /// `#[mutation]` and reads like ordinary Rust.
+    pub use petros_macros::{mutation, peer, query};
 
     /// The store, as a function reaches it. Erased by the attribute into
     /// `&mut impl Store`, so the real type is whatever the caller has.

@@ -9,4 +9,4 @@
 //! replace without a rebuild, and it is the same file, from the same source,
 //! that every other peer compiled in.
 
-petros_wasm_guest::export!(todo::domain, todo::domain::SCHEMA_TEXT);
+petros_wasm_guest::export!(todo::functions);

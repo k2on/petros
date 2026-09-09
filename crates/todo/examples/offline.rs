@@ -22,7 +22,7 @@ fn main() -> petros::Result<()> {
         Client::<TodoApp>::open(petros::open_path(&path)?, "alice", AutoCtx::system())?;
 
     let mut ui = Ui::new();
-    let restored = list(client.conn())?.len();
+    let restored = list(&mut client.store())?.len();
     ui.note(format!("opened {}", path.display()));
     ui.note(match restored {
         0 => "a fresh database — nothing to restore".to_string(),
@@ -31,7 +31,7 @@ fn main() -> petros::Result<()> {
 
     let mut term = Tui::start()?;
     loop {
-        let items = list(client.conn())?;
+        let items = list(&mut client.store())?;
         ui.clamp(items.len());
         let status = Status {
             title: " petros · offline ".into(),
@@ -51,18 +51,21 @@ fn main() -> petros::Result<()> {
             Action::Add(text) => {
                 // A mutation the app itself refuses never reaches the pending
                 // queue, and would never have reached a log either.
-                if let Err(e) = client.mutate(mutators::add(&text)) {
+                if let Err(e) = client.mutate(mutators::add(text)) {
                     ui.note(format!("refused: {e}"));
                 }
             }
             Action::ToggleDone => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(mutators::set_done(item.id.as_uuid().as_bytes(), !item.done))?;
+                    client.mutate(mutators::set_done(
+                        item.id.as_uuid().as_bytes().to_vec(),
+                        !item.done,
+                    ))?;
                 }
             }
             Action::Delete => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(mutators::remove(item.id.as_uuid().as_bytes()))?;
+                    client.mutate(mutators::remove(item.id.as_uuid().as_bytes().to_vec()))?;
                 }
             }
             Action::ToggleLink | Action::Nothing => {}

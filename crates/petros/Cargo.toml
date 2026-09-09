@@ -15,6 +15,7 @@ ws = ["dep:tungstenite", "dep:wasm-bindgen", "dep:web-sys"]
 [dependencies]
 # The store contract. `apply` sees the typed half; `backend.rs` implements the
 # dynamic half over SQLite.
+petros-macros.workspace = true
 petros-schema.workspace = true
 ciborium.workspace = true
 diesel.workspace = true
@@ -55,6 +56,7 @@ web-sys = { version = "0.3", optional = true, features = [
 ] }
 
 [dev-dependencies]
+petros-macros.workspace = true
 petros-schema.workspace = true
 # The simulated network. A dev-dependency cycle — it depends on this crate —
 # which cargo resolves without complaint and which is the only honest shape:

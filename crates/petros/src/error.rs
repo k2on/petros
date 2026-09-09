@@ -51,6 +51,10 @@ pub enum Error {
     /// The transport broke. Only ever produced by `petros::transport`.
     #[error("transport: {0}")]
     Transport(String),
+    /// A query refused. Its own sentence, not a database failure — see
+    /// `petros_schema::prelude::Result` for why a refusal is a `String`.
+    #[error("{0}")]
+    Query(String),
     /// An entry reached the log without the sequence number that orders it.
     #[error("entry {0} is missing a sequence number")]
     MissingSeq(Id),
@@ -66,3 +70,10 @@ impl From<std::io::Error> for Error {
 
 /// Result alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// So `?` works on a query inside a function returning [`Result`].
+impl From<String> for Error {
+    fn from(reason: String) -> Self {
+        Error::Query(reason)
+    }
+}

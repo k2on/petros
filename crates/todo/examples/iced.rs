@@ -145,7 +145,7 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.items = list(self.client.conn()).unwrap_or_default();
+        self.items = list(&mut self.client.store()).unwrap_or_default();
         self.pending = self.client.pending_len();
     }
 
@@ -195,15 +195,18 @@ impl App {
             }
             Message::Add => {
                 let text = std::mem::take(&mut self.input);
-                self.client.mutate(mutators::add(&text)).map(|_| ())
+                self.client.mutate(mutators::add(text)).map(|_| ())
             }
             Message::Toggle(id, done) => self
                 .client
-                .mutate(mutators::set_done(id.as_uuid().as_bytes(), done))
+                .mutate(mutators::set_done(
+                    id.as_uuid().as_bytes().to_vec().to_vec(),
+                    done,
+                ))
                 .map(|_| ()),
             Message::Remove(id) => self
                 .client
-                .mutate(mutators::remove(id.as_uuid().as_bytes()))
+                .mutate(mutators::remove(id.as_uuid().as_bytes().to_vec().to_vec()))
                 .map(|_| ()),
             Message::ToggleLink => {
                 match self.link {

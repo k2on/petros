@@ -94,6 +94,14 @@ impl<A: App> Client<A> {
         &mut self.conn
     }
 
+    /// The connection as a store, which is what a query takes.
+    ///
+    /// A query is generic over `Store` so it can run inside the sandbox as well
+    /// as here; this saves every call site wrapping the connection itself.
+    pub fn store(&mut self) -> crate::backend::SqliteStore<'_> {
+        crate::backend::SqliteStore(&mut self.conn)
+    }
+
     pub fn actor(&self) -> &ActorId {
         &self.actor
     }
@@ -110,7 +118,11 @@ impl<A: App> Client<A> {
 
     /// Author a mutation: fill its non-deterministic arguments, apply it
     /// optimistically, and queue it for the server.
-    pub fn mutate(&mut self, mut mutation: A::Mutation) -> Result<Id> {
+    /// Takes anything that becomes the app's mutation, so an authoring
+    /// function can hand back the payload value and the newtype is applied
+    /// here rather than at every call site.
+    pub fn mutate(&mut self, mutation: impl Into<A::Mutation>) -> Result<Id> {
+        let mut mutation = mutation.into();
         // Exactly once, here at the origin. From now on these arguments are
         // frozen: no replay of this entry will ever regenerate them.
         mutation.fill_auto(&mut self.auto);

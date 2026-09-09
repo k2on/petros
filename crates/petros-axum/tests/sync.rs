@@ -80,11 +80,11 @@ fn two_peers_on_an_axum_server_see_each_other() {
         );
     }
     assert!(
-        todo::list(bob.conn()).unwrap().is_empty(),
+        todo::list(&mut bob.store()).unwrap().is_empty(),
         "bob is caught up and there is nothing to catch up on"
     );
 
-    alice.mutate(todo::add("from alice")).unwrap();
+    alice.mutate(todo::add("from alice".into())).unwrap();
 
     // From here bob sends nothing at all — no second `Hello`, no pending of his
     // own. Anything that reaches him is a push the server chose to make.
@@ -101,7 +101,7 @@ fn two_peers_on_an_axum_server_see_each_other() {
             &b_link,
             Instant::now() + Duration::from_millis(20),
         );
-        seen = todo::list(bob.conn()).unwrap();
+        seen = todo::list(&mut bob.store()).unwrap();
         if !seen.is_empty() && alice.pending_len() == 0 {
             break;
         }

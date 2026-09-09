@@ -12,7 +12,7 @@ fn a_real_domain_converges_across_a_broken_network() {
     let mut sim = Sim::<TodoApp>::new(7, 3);
     for round in 0..4 {
         for i in 0..sim.clients() {
-            sim.mutate(i, todo::add(&format!("c{i}-{round}")));
+            sim.mutate(i, todo::add(format!("c{i}-{round}")));
             sim.step();
         }
     }
@@ -22,9 +22,9 @@ fn a_real_domain_converges_across_a_broken_network() {
     sim.partition(1);
     sim.partition(2);
     for round in 0..5 {
-        sim.mutate(1, todo::add(&format!("offline-b-{round}")));
-        sim.mutate(2, todo::add(&format!("offline-c-{round}")));
-        sim.mutate(0, todo::add(&format!("online-{round}")));
+        sim.mutate(1, todo::add(format!("offline-b-{round}")));
+        sim.mutate(2, todo::add(format!("offline-c-{round}")));
+        sim.mutate(0, todo::add(format!("online-{round}")));
         sim.step();
     }
     // Deliberately no `heal` here. `settle` reconnects every client itself,
@@ -40,7 +40,9 @@ fn a_real_domain_converges_across_a_broken_network() {
     }
     assert_eq!(first, sim.server_hash(), "the server disagrees");
     assert_eq!(
-        todo::list(sim.conn(0)).unwrap().len(),
+        todo::list(&mut petros::backend::SqliteStore(sim.conn(0)))
+            .unwrap()
+            .len(),
         27,
         "12 online + 15 offline, none lost and none duplicated"
     );
@@ -53,11 +55,11 @@ fn a_seed_is_the_whole_run() {
     let hash = |seed: u64| {
         let mut sim = Sim::<TodoApp>::new(seed, 2);
         for n in 0..6 {
-            sim.mutate(n % 2, todo::add(&format!("item {n}")));
+            sim.mutate(n % 2, todo::add(format!("item {n}")));
             sim.step();
         }
         sim.partition(0);
-        sim.mutate(0, todo::add("while dark"));
+        sim.mutate(0, todo::add("while dark".into()));
         sim.step();
         sim.settle();
         (sim.state_hash(0), sim.state_hash(1))

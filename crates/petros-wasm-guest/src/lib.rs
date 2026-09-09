@@ -8,7 +8,7 @@
 //! So it is one macro:
 //!
 //! ```ignore
-//! petros_wasm_guest::export!(todo::domain, todo::domain::SCHEMA_TEXT);
+//! petros_wasm_guest::export!(todo::functions);
 //! ```
 //!
 //! # What crosses the boundary
@@ -36,14 +36,16 @@ pub const IMPORT_MODULE: &str = "petros";
 /// Everything the host calls, and everything the guest calls back.
 ///
 /// Takes the path to a module exporting `apply` and `fill_auto` — the two
-/// halves of a domain — and the path to its `SCHEMA_TEXT`. Both come from one
-/// declaration if the domain used `petros_schema::declare!`.
+/// halves of a domain, which `petros::peer!` generates.
+///
+/// The declaration the module carries is not passed in: each `#[mutation]`
+/// emits its own line into the schema section, and the linker concatenates
+/// them. Nothing has to hold the list.
 #[macro_export]
 macro_rules! export {
-    ($domain:path, $schema:path) => {
+    ($domain:path) => {
         $crate::export!(@imports);
         $crate::export!(@abi $domain);
-        $crate::petros_schema::embed!($schema);
     };
 
     // Without this the imports land in a module called `env`, and the host —

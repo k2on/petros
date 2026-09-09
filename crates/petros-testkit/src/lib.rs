@@ -109,7 +109,9 @@ where
 
     /// Author a mutation at one client. A locally invalid intent is the app's
     /// business, not the simulation's.
-    pub fn mutate(&mut self, i: usize, m: A::Mutation) {
+    /// Takes anything that becomes the app's mutation, like `Client::mutate`,
+    /// so an authoring function's result goes straight in.
+    pub fn mutate(&mut self, i: usize, m: impl Into<A::Mutation>) {
         let _ = self.nodes[i].client.mutate(m);
     }
 

@@ -394,6 +394,11 @@ fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let arg_tys: Vec<_> = parsed.args.iter().map(|a| a.ty.clone()).collect();
 
     Ok(quote! {
+        // A query never runs inside the sandbox — the module applies mutations
+        // and reads nothing back — so it is built only where there is a real
+        // database. Gated here rather than at the call site, because it is a
+        // fact about queries and not about any one of them.
+        #[cfg(feature = "storage")]
         #(#docs)*
         #vis fn #name<S: ::petros_schema::Store>(
             #db: &mut S,

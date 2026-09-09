@@ -74,6 +74,13 @@ pub use mutation::{App, Mutation, Transaction};
 pub use proto::{decode, encode, ActorId, ClientMsg, Entry, Seq, ServerMsg};
 pub use server::{ConnId, Server};
 
+// One definition per function. See `petros_macros`.
+pub use petros_macros::{mutation, peer, query};
+#[doc(hidden)]
+pub use petros_schema;
+/// The names those attributes recognise, and what a function returns.
+pub use petros_schema::prelude;
+
 pub use diesel::{self, SqliteConnection as Connection};
 pub use uuid;
 
@@ -110,4 +117,93 @@ pub fn open_path(path: impl AsRef<std::path::Path>) -> Result<Connection> {
 fn tune(conn: &mut Connection) -> Result<()> {
     conn.batch_execute("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
     Ok(())
+}
+
+/// Wire an app's functions to the engine.
+///
+/// `apply` and `fill_auto` come from `peer!`, and the schema from wherever the
+/// app keeps its DDL. What this adds is the part that needs the engine itself
+/// and so cannot live in a domain crate compiled to wasm: the payload type, its
+/// `Mutation` impl, and the `App`.
+///
+/// ```ignore
+/// petros::app!(HarkenApp {
+///     schema: crate::schema::SCHEMA,
+///     apply: crate::functions::apply,
+///     fill_auto: crate::functions::fill_auto,
+/// });
+/// ```
+#[macro_export]
+macro_rules! app {
+    ($app:ident {
+        schema: $schema:expr,
+        apply: $apply:path,
+        fill_auto: $fill_auto:path $(,)?
+    }) => {
+        /// One mutation, as the bytes the log stores.
+        ///
+        /// Not a Rust enum mirroring the verbs, and that is deliberate: a peer
+        /// that has never heard of a verb still carries it through the log
+        /// intact, and applies it as soon as it has a build that knows what it
+        /// means.
+        #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+        #[serde(transparent)]
+        pub struct Payload(pub $crate::petros_schema::cbor::Value);
+
+        impl ::core::convert::From<$crate::petros_schema::cbor::Value> for Payload {
+            fn from(v: $crate::petros_schema::cbor::Value) -> Self {
+                Payload(v)
+            }
+        }
+
+        impl $crate::Mutation for Payload {
+            fn fill_auto(&mut self, ctx: &mut $crate::AutoCtx) {
+                let uuid = ctx.uuid().as_uuid().as_bytes().to_vec();
+                $fill_auto(&mut self.0, uuid, ctx.now_ms());
+            }
+
+            fn apply(
+                &self,
+                tx: &mut $crate::Transaction,
+                actor: &$crate::ActorId,
+            ) -> ::core::result::Result<(), $crate::MutationError> {
+                $apply(
+                    &mut $crate::backend::SqliteStore(tx.conn()),
+                    &self.0,
+                    actor.as_str(),
+                )
+                .map_err($crate::MutationError::rejected)
+            }
+        }
+
+        /// As [`from_json`], for a caller that already has the arguments as a
+        /// JSON value — a test, usually.
+        pub fn from_value(
+            kind: &str,
+            args: ::serde_json::Value,
+        ) -> ::core::result::Result<Payload, ::std::string::String> {
+            $crate::petros_schema::author::from_value(kind, args).map(Payload)
+        }
+
+        /// Author a mutation by name, through the same encoder every peer
+        /// uses.
+        ///
+        /// The generic entry point: a foreign caller has a verb and some JSON
+        /// and no way to call a typed authoring function.
+        pub fn from_json(
+            kind: &str,
+            args_json: &str,
+        ) -> ::core::result::Result<Payload, ::std::string::String> {
+            $crate::petros_schema::author::from_json(kind, args_json).map(Payload)
+        }
+
+        /// The app: Petros's tables plus this one's.
+        #[derive(Debug)]
+        pub struct $app;
+
+        impl $crate::App for $app {
+            type Mutation = Payload;
+            const SCHEMA: &'static str = $schema;
+        }
+    };
 }

@@ -82,7 +82,7 @@ fn run_peer(user: &str, addr: &str) -> petros::Result<()> {
             ui.note(format!("the server refused a change: {}", r.reason));
         }
 
-        let items = list(client.conn())?;
+        let items = list(&mut client.store())?;
         ui.clamp(items.len());
         let status = Status {
             title: format!(" petros · {user} "),
@@ -98,18 +98,21 @@ fn run_peer(user: &str, addr: &str) -> petros::Result<()> {
         match action_for(key, &mut ui, items.len()) {
             Action::Quit => return Ok(()),
             Action::Add(text) => {
-                if let Err(e) = client.mutate(mutators::add(&text)) {
+                if let Err(e) = client.mutate(mutators::add(text)) {
                     ui.note(format!("refused: {e}"));
                 }
             }
             Action::ToggleDone => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(mutators::set_done(item.id.as_uuid().as_bytes(), !item.done))?;
+                    client.mutate(mutators::set_done(
+                        item.id.as_uuid().as_bytes().to_vec(),
+                        !item.done,
+                    ))?;
                 }
             }
             Action::Delete => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(mutators::remove(item.id.as_uuid().as_bytes()))?;
+                    client.mutate(mutators::remove(item.id.as_uuid().as_bytes().to_vec()))?;
                 }
             }
             Action::ToggleLink => {

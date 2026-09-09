@@ -52,7 +52,7 @@ fn rows(conn: &mut Connection) -> Vec<Row> {
 /// The native side, exactly as `todo::Payload`'s `Mutation::apply` runs it:
 /// the same checked SQL, through a store backed by a real connection.
 fn native_apply(conn: &mut Connection, payload: &todo::Payload, actor: &str) -> Result<(), String> {
-    todo::domain::apply(&mut petros::backend::SqliteStore(conn), &payload.0, actor)
+    todo::apply(&mut petros::backend::SqliteStore(conn), &payload.0, actor)
 }
 
 fn encode(p: &todo::Payload) -> Vec<u8> {
@@ -106,7 +106,6 @@ fn every_verb_produces_the_same_rows_natively_and_in_wasm() {
         ("Add", json!({ "text": "  buy oats  " })),
         // Refused by both, and refused identically.
         ("Add", json!({ "text": "   " })),
-        ("AddFive", json!({})),
         ("MarkAllDone", json!({})),
         ("Add", json!({ "text": "after the sweep" })),
         // A row nobody has: a no-op, not an error.
@@ -126,21 +125,9 @@ fn every_verb_produces_the_same_rows_natively_and_in_wasm() {
     // And the rows are the ones the script describes, so a shared bug that
     // wrote nothing at all could not pass.
     let texts: Vec<&str> = native.iter().map(|r| r.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec![
-            "buy milk",
-            "buy oats",
-            "item 1",
-            "item 2",
-            "item 3",
-            "item 4",
-            "item 5",
-            "after the sweep"
-        ]
-    );
-    assert!(native.iter().take(7).all(|r| r.done == 1), "MarkAllDone");
-    assert_eq!(native[7].done, 0, "added after the sweep");
+    assert_eq!(texts, vec!["buy milk", "buy oats", "after the sweep"]);
+    assert!(native.iter().take(2).all(|r| r.done == 1), "MarkAllDone");
+    assert_eq!(native[2].done, 0, "added after the sweep");
 }
 
 #[test]
@@ -181,7 +168,7 @@ fn refusals_match_too() {
 fn fill_auto_agrees_between_the_two_builds() {
     let module = Mutators::load(MODULE).expect("load");
 
-    for kind in ["Add", "AddFive", "MarkAllDone", "SetDone"] {
+    for kind in ["Add", "MarkAllDone", "SetDone"] {
         let args = match kind {
             "SetDone" => {
                 serde_json::json!({ "id": "67e55084-765d-446c-9191-4ff9861f6d8e", "done": true })
@@ -200,7 +187,7 @@ fn fill_auto_agrees_between_the_two_builds() {
         let (uuid, now) = seeded();
 
         let mut native = todo::from_value(kind, args.clone()).expect("author").0;
-        todo::domain::fill_auto(&mut native, uuid.clone(), now);
+        todo::fill_auto(&mut native, uuid.clone(), now);
 
         let authored = todo::from_value(kind, args).expect("author");
         let from_wasm = module

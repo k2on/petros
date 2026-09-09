@@ -12,6 +12,10 @@ rust-version.workspace = true
 # generator that turns it into TypeScript. Anything heavier here would be paid
 # by all four, including the one compiled to `wasm32-unknown-unknown`.
 [dependencies]
+# The attributes, re-exported through the prelude. A proc-macro crate runs at
+# build time and adds nothing to any target, so a domain compiled to wasm can
+# have it while `petros` itself stays out.
+petros-macros.workspace = true
 ciborium = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
