@@ -13,6 +13,8 @@ rust-version.workspace = true
 # by all four, including the one compiled to `wasm32-unknown-unknown`.
 [dependencies]
 ciborium = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
 [features]
@@ -24,3 +26,7 @@ serde = ["dep:serde"]
 # crate and by nothing else — the code generator reads schemas, it never
 # decodes a payload, and paying for ciborium there would put it in the loop.
 cbor = ["dep:ciborium"]
+# Authoring a mutation from JSON. Wanted by the native side of an app and by
+# nothing else: a domain compiled to wasm decodes payloads and never writes one,
+# and `serde_json` has no business in a module Metro pushes on every save.
+author = ["cbor", "dep:serde_json", "dep:uuid"]

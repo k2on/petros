@@ -154,7 +154,7 @@ pub fn fill_auto(mutation: &mut Value, uuid: Vec<u8>, now_ms: i64) {
         // thing it can reach is [`Host`]. So the one uuid is expanded here, in
         // the single place non-determinism is allowed, and the log freezes it.
         Some("AddFive") => {
-            let mut seed = Seed::from(&uuid);
+            let mut seed = petros_schema::Seed::from(&uuid);
             let items = (1..=HOW_MANY)
                 .map(|n| {
                     Value::Map(vec![
@@ -171,41 +171,3 @@ pub fn fill_auto(mutation: &mut Value, uuid: Vec<u8>, now_ms: i64) {
 }
 
 const HOW_MANY: usize = 5;
-
-/// xorshift128+, seeded from the uuid the caller supplied.
-///
-/// Deliberately not a good random number generator — it is a *deterministic
-/// expansion* of one non-deterministic seed, which is the only shape the log
-/// can hold. The unpredictability is the uuid; everything after it is a pure
-/// function of that, which is why replaying the entry reproduces the rows.
-struct Seed(u64, u64);
-
-impl Seed {
-    fn from(bytes: &[u8]) -> Self {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in bytes {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x1000_0000_01b3);
-        }
-        Seed(h | 1, h.rotate_left(31) | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        let y = self.1;
-        self.0 = y;
-        x ^= x << 23;
-        x ^= x >> 17;
-        x ^= y ^ (y >> 26);
-        self.1 = x;
-        x.wrapping_add(y)
-    }
-
-    fn id(&mut self) -> Vec<u8> {
-        let (a, b) = (self.next(), self.next());
-        let mut out = Vec::with_capacity(16);
-        out.extend_from_slice(&a.to_be_bytes());
-        out.extend_from_slice(&b.to_be_bytes());
-        out
-    }
-}

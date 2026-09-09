@@ -84,72 +84,21 @@ pub const SCHEMA: &str = include_str!("../schema.sql");
 
 // ------------------------------------------------------------------ authoring
 
-/// Build a mutation from a verb name and its arguments, without knowing what
-/// either means.
+/// Author a mutation, as [`petros_schema::author`] does it, wrapped in this
+/// app's payload type.
 ///
-/// The payload is just `{ "t": kind, ...args }`. Auto-filled fields are not
-/// this function's problem: `fill_auto` appends whatever the verb needs
-/// afterwards, so `Add` here is `{"text": "..."}` and the id and the timestamp
-/// arrive later, chosen by the domain.
-///
-/// One convention, and it is protocol rather than domain: a field named `id`
-/// holding a canonical uuid becomes the sixteen-byte string the log uses.
+/// The conversion is protocol rather than domain — the verb goes in `t`, and a
+/// field named `id` or ending `_id` becomes the sixteen bytes the log uses — so
+/// it lives in the schema crate, beside the macro that declares the verbs and
+/// the generator that emits the TypeScript calling them.
 pub fn from_value(kind: &str, args: serde_json::Value) -> Result<Payload, String> {
-    let serde_json::Value::Object(args) = args else {
-        return Err("the arguments should be a json object".into());
-    };
-    let mut fields = vec![(Value::Text("t".into()), Value::Text(kind.to_string()))];
-    for (name, value) in args {
-        let is_id = name == "id" || name.ends_with("_id");
-        fields.push((Value::Text(name), json_to_cbor(value, is_id)?));
-    }
-    Ok(Payload(Value::Map(fields)))
+    petros_schema::author::from_value(kind, args).map(Payload)
 }
 
 /// As [`from_value`], for a caller that has the arguments as JSON text — which
 /// is every foreign one, since it has no CBOR encoder.
 pub fn from_json(kind: &str, args_json: &str) -> Result<Payload, String> {
-    let args: serde_json::Value = if args_json.trim().is_empty() {
-        serde_json::Value::Object(Default::default())
-    } else {
-        serde_json::from_str(args_json).map_err(|e| format!("the arguments are not json: {e}"))?
-    };
-    from_value(kind, args)
-}
-
-fn json_to_cbor(value: serde_json::Value, is_id: bool) -> Result<Value, String> {
-    use serde_json::Value as J;
-    Ok(match value {
-        J::Null => Value::Null,
-        J::Bool(b) => Value::Bool(b),
-        J::Number(n) => match n.as_i64() {
-            Some(i) => Value::Integer(i.into()),
-            // `docs/decisions.md`: no floats anywhere near the log.
-            None => return Err(format!("{n} is not an integer")),
-        },
-        J::String(s) if is_id => Value::Bytes(
-            petros::uuid::Uuid::parse_str(&s)
-                .map_err(|e| format!("not an id: {e}"))?
-                .as_bytes()
-                .to_vec(),
-        ),
-        J::String(s) => Value::Text(s),
-        J::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(|v| json_to_cbor(v, false))
-                .collect::<Result<_, _>>()?,
-        ),
-        J::Object(entries) => Value::Map(
-            entries
-                .into_iter()
-                .map(|(k, v)| {
-                    let is_id = k == "id" || k.ends_with("_id");
-                    Ok((Value::Text(k), json_to_cbor(v, is_id)?))
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        ),
-    })
+    petros_schema::author::from_json(kind, args_json).map(Payload)
 }
 
 // The three verbs the Rust peers spell out. Conveniences over [`from_value`],

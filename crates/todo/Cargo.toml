@@ -18,7 +18,7 @@ ws = ["storage", "petros/ws"]
 
 [dependencies]
 ciborium.workspace = true
-petros-schema = { workspace = true, features = ["cbor"] }
+petros-schema = { workspace = true, features = ["cbor", "author"] }
 petros-sql.workspace = true
 diesel = { workspace = true, optional = true }
 petros = { workspace = true, optional = true }

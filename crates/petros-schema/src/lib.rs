@@ -23,7 +23,11 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "author")]
+pub mod author;
+pub mod seed;
 pub mod store;
+pub use seed::Seed;
 pub use store::{Bind, Cell, ColumnTy, Request, Store, Value};
 
 /// Every mutation an app understands.
