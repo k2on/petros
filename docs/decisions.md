@@ -736,3 +736,89 @@ vacuous in the same way: the assertion was satisfied by a path other than the
 one under test. It is worth running the falsification every time, because it
 costs a minute and it has never once been a waste.
 
+
+## Reads and writes are the same shape, and neither is SQL
+
+An app wrote with checked SQL and read with checked SQL, which was consistent
+and still wrong for what came next. A statement reports how many rows it
+touched, not *which* — and "which" is the only thing an incrementally
+maintained view can work from.
+
+So a write is typed and says what it changed, a read is a query builder, and
+both go over row types `petros_sql::tables!` generates by asking SQLite what is
+in `schema.sql`:
+
+```rust
+db.select(Song::all().filter(Song::done.eq(false)).order_by(Song::pos.asc()))
+db.put(&song)?;
+```
+
+`exec!` and `query!` are gone. What survives of them is the technique — SQLite
+is still the judge at build time — and `petros-sql` is now only the part that
+has to understand DDL.
+
+A query being *data* rather than a string is what makes the rest possible. A
+`Plan` carries a filter, an order, a limit and a cursor, so the same query is
+one statement today and a maintained pipeline afterwards, and a filter is one
+`Node` read two ways: compiled to SQL for a pull, interpreted in Rust for a
+push. That equivalence is load-bearing and has bitten twice — once over `NULL`,
+where SQL says `x = NULL` matches nothing and Rust said it matched, and once
+over a limit on a relationship.
+
+The cursor is in the plan from the beginning, before anything used it, because
+`Take` seeks with it and retrofitting one means rewriting every source.
+
+## A relationship is declared in the DDL and nowhere else
+
+`REFERENCES song(id)` is what `PRAGMA foreign_key_list` reports, so `tables!`
+generates both directions of it — `Song::favorite` reaching down and
+`Favorite::song` reaching up. Neither the relationship nor its inverse is
+written in Rust.
+
+A read through one returns a *tree*: a song with its favourites grouped under
+it, not a product repeating the song once per child. Which end you read from is
+the join. Reading down, a childless parent is still a row — that is the LEFT
+JOIN; reading up, a child whose parent is missing is dropped — that is the INNER
+one. Neither word appears.
+
+The shape is Zero's and was chosen for Zero's reason rather than for taste: a
+change to a child is a change to one node of a tree, which can be maintained,
+where the same change to a flat join alters every row the join produced.
+
+## A refusal from the database is a refusal, not silence
+
+`put_row` returned `()`. A foreign key would reject a row, the mutation would
+carry on as though it had written it, and nothing said so.
+
+A constraint the database enforces is a *deterministic verdict* — every replica
+applying that entry reaches it — which makes it the same kind of thing as a
+mutation's own refusal and not a failure some peers might have and others not.
+So it travels in the same channel, and a mutation body propagates it with `?`.
+
+Across the sandbox it comes back as the answer rather than as a host failure,
+because the mutation asked for the write and should decide what a refused one
+means. An empty answer means it worked, which is what every write used to send,
+so neither side needed a version bump to start or to keep ignoring it.
+
+## An incremental view is a cost argument, so the tests have to measure cost
+
+`petros-ivm` is the operators — source, filter, join, take — and a view that
+holds the answer. The design notes are in `docs/ivm.md`; what belongs here is
+what the exercise taught about testing it.
+
+Three times, deliberately breaking the code failed nothing, and every time the
+reason was the same: the answer was still right and only the work had changed.
+An append past a full window was admitted and then evicted. A join's constraint
+never reached the child pipeline, so every level read its whole table. A `Take`
+fetched its input entire and truncated, so hydrating the top twenty of a hundred
+thousand rows read a hundred thousand — a real bug, not just an untested claim.
+
+None of those are visible to a test that compares rows. They are visible to
+`push` returning what it did, and to a `Store` wrapper that counts pulls and
+rows. A view exists to make work small, so a test that only checks the answer is
+testing the wrong half.
+
+The measurements are in `docs/ivm.md` rather than here, including the one that
+argues *against* enthusiasm: given the right index, SQLite already answers a
+top-twenty in O(limit), and maintaining it is a constant factor of six. The case
+is the queries where the planner has no such way.
