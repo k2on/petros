@@ -11,14 +11,18 @@ rust-version.workspace = true
 # real SQLite. The wasm build turns this off: it has no SQLite of its own, only
 # a channel to the host's, so it wants `domain` and `schema` and nothing else.
 default = ["storage"]
-storage = ["dep:diesel", "dep:petros", "dep:serde", "dep:serde_json"]
+# `petros-schema/author` belongs here and not on the dependency line:
+# features are unified per target, so asking for it there would put
+# serde_json and uuid in the wasm module even though `default-features =
+# false` turns this whole feature off. Checked with `cargo tree -p todo-wasm`.
+storage = ["dep:diesel", "dep:petros", "dep:serde", "dep:serde_json", "petros-schema/author"]
 # A transport, for the example peers. The domain itself has no opinion about
 # sockets and neither does the engine; only a program that runs does.
 ws = ["storage", "petros/ws"]
 
 [dependencies]
 ciborium.workspace = true
-petros-schema = { workspace = true, features = ["cbor", "author"] }
+petros-schema = { workspace = true, features = ["cbor"] }
 petros-sql.workspace = true
 diesel = { workspace = true, optional = true }
 petros = { workspace = true, optional = true }
