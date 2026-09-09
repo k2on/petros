@@ -112,6 +112,26 @@ pub fn tables(_input: TokenStream) -> TokenStream {
     }
 }
 
+/// The single-column primary key of a table, for a `REFERENCES` that named no
+/// column.
+fn primary_key(conn: &rusqlite::Connection, table: &str) -> Result<String, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (name, pk) = row.map_err(|e| e.to_string())?;
+        if pk == 1 {
+            return Ok(name);
+        }
+    }
+    Err(format!(
+        "`REFERENCES {table}` names no column and `{table}` has no primary key."
+    ))
+}
+
 fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
     let schema = schema_path()?;
     let ddl = std::fs::read_to_string(&schema)
@@ -148,13 +168,70 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
             for row in rows {
                 columns.push(row.map_err(|e| e.to_string())?);
             }
-            out.push((table, columns));
+            // Relationships come from the DDL too. `PRAGMA foreign_key_list`
+            // reports what `REFERENCES` declared, which means a relationship is
+            // written once, in the schema, and both directions of it are
+            // generated rather than typed.
+            let mut keys = Vec::new();
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA foreign_key_list({table})"))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(1)?,            // seq, within a composite key
+                        r.get::<_, String>(2)?,         // the table referenced
+                        r.get::<_, String>(3)?,         // the column here
+                        r.get::<_, Option<String>>(4)?, // the column there
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (seq, parent, from, to) = row.map_err(|e| e.to_string())?;
+                // A composite foreign key would need a relationship over
+                // several columns, which `Relation` does not carry. Ignoring it
+                // is better than generating half of one.
+                if seq != 0 {
+                    continue;
+                }
+                // An omitted `to` means the parent's primary key.
+                let to = match to {
+                    Some(to) => to,
+                    None => primary_key(conn, &parent)?,
+                };
+                keys.push((parent, from, to));
+            }
+
+            out.push((table, columns, keys));
         }
         Ok(out)
     })?;
 
+    // Both ends, indexed by the table the relationship is *read from*.
+    let mut relations: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> =
+        std::collections::BTreeMap::new();
+    for (child, _, keys) in &tables {
+        for (parent, from, to) in keys {
+            // Reading down: every favourite of this song.
+            relations.entry(parent.clone()).or_default().push((
+                child.clone(),
+                to.clone(),
+                child.clone(),
+                from.clone(),
+            ));
+            // Reading up: the song of this favourite.
+            relations.entry(child.clone()).or_default().push((
+                parent.clone(),
+                from.clone(),
+                parent.clone(),
+                to.clone(),
+            ));
+        }
+    }
+
     let mut items = Vec::new();
-    for (table, columns) in tables {
+    for (table, columns, _) in &tables {
+        let (table, columns) = (table.clone(), columns.clone());
         if columns.is_empty() {
             continue;
         }
@@ -197,6 +274,26 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
                 }
             })
             .collect();
+        // One constant per relationship this table can be read through.
+        let mut relation_consts = Vec::new();
+        for (name, from, far, to) in relations.get(&table).into_iter().flatten() {
+            if names.contains(name) {
+                return Err(format!(
+                    "table `{table}` has both a column and a relationship named \
+                     `{name}`. Rename the column, or the foreign key's table."
+                ));
+            }
+            let ident = format_ident!("{}", name);
+            let far_ty = format_ident!("{}", camel(far));
+            let doc = format!("`{table}.{from}` to `{far}.{to}`, from `schema.sql`.");
+            relation_consts.push(quote! {
+                #[doc = #doc]
+                #[allow(non_upper_case_globals)]
+                pub const #ident: ::petros_schema::Relation<Self, #far_ty> =
+                    ::petros_schema::Relation::new(#from, #to);
+            });
+        }
+
         let doc = format!("The `{table}` table, from `schema.sql`.");
 
         items.push(quote! {
@@ -216,6 +313,8 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
                 // is what makes `Song::pos.eq("x")` a compile error, and
                 // `Favorite::pos` unusable in a `Song` query.
                 #(#column_consts)*
+
+                #(#relation_consts)*
 
                 /// A key, for `get` and `delete`.
                 pub fn key_of(#(#key_names: &#key_tys),*) -> ::std::vec::Vec<::petros_schema::Value> {

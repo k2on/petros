@@ -159,3 +159,103 @@ fn a_query_can_start_after_a_row() {
     );
     assert_eq!(after.iter().map(|s| s.pos).collect::<Vec<_>>(), vec![2, 1]);
 }
+
+fn favorite(song: u8, pos: i64) -> Favorite {
+    Favorite {
+        song_id: vec![song; 16],
+        pos,
+        favorited_ms: 0,
+        actor: "alice".into(),
+    }
+}
+
+/// `REFERENCES` is the declaration. Both directions of it are generated, so
+/// neither the relationship nor its inverse is written down twice.
+#[test]
+fn a_foreign_key_generates_a_relationship_both_ways() {
+    assert_eq!(Song::favorite.from, "id");
+    assert_eq!(Song::favorite.to, "song_id");
+    assert_eq!(Favorite::song.from, "song_id");
+    assert_eq!(Favorite::song.to, "id");
+}
+
+/// A result is a tree: each song arrives with its own favourites hanging off
+/// it, already grouped. A flat join would repeat the song once per favourite
+/// and leave the caller to do this.
+#[test]
+fn related_rows_hang_off_their_parent() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    for (i, title) in ["Glue", "Apricots", "Opal"].iter().enumerate() {
+        store.put(&song(i as u8, title, i as i64));
+    }
+    // Two on the first song, none on the second, one on the third.
+    store.put(&favorite(0, 1));
+    store.put(&favorite(2, 2));
+
+    let rows = store.select_with(
+        Song::all().order_by(Song::pos.asc()),
+        Song::favorite,
+        Favorite::all(),
+    );
+
+    let shape: Vec<(&str, usize)> = rows
+        .iter()
+        .map(|r| (r.row.title.as_str(), r.related.len()))
+        .collect();
+    assert_eq!(shape, vec![("Glue", 1), ("Apricots", 0), ("Opal", 1)]);
+    assert_eq!(rows[0].one().unwrap().pos, 1);
+    assert_eq!(rows[2].one().unwrap().pos, 2);
+    // A parent with no children is still a row. This is the LEFT JOIN, and
+    // dropping it would silently hide every unfavourited song from a library.
+    assert!(rows[1].one().is_none());
+}
+
+/// The relationship reads the other way too, from the child to its parent,
+/// which is the INNER JOIN a playlist screen wants: favourites, in playlist
+/// order, each carrying the song it points at.
+#[test]
+fn a_relationship_reads_from_either_end() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(0, "Glue", 0));
+    store.put(&song(1, "Apricots", 1));
+    store.put(&favorite(1, 1));
+    store.put(&favorite(0, 2));
+
+    let rows = store.select_with(
+        Favorite::all().order_by(Favorite::pos.asc()),
+        Favorite::song,
+        Song::all(),
+    );
+
+    let titles: Vec<&str> = rows
+        .iter()
+        .map(|r| r.one().unwrap().title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["Apricots", "Glue"]);
+}
+
+/// The related side is a query like any other, so it filters and orders. It is
+/// fetched for the whole page at once — one statement, not one per parent —
+/// which is why the child rows have to be grouped rather than merely appended.
+#[test]
+fn the_related_side_is_a_query() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(0, "Glue", 0));
+    store.put(&song(1, "Apricots", 1));
+    store.put(&favorite(0, 5));
+    store.put(&favorite(1, 3));
+
+    let rows = store.select_with(
+        Song::all().order_by(Song::pos.asc()),
+        Song::favorite,
+        Favorite::all().filter(Favorite::pos.gt(4)),
+    );
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].related.len(), 1);
+    assert_eq!(rows[0].one().unwrap().pos, 5);
+    assert!(rows[1].related.is_empty());
+}

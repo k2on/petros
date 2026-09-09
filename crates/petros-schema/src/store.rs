@@ -261,6 +261,70 @@ pub trait Rows: Store {
             .collect()
     }
 
+    /// Run a query and hang a related table off each row.
+    ///
+    /// Two statements, not one per parent: the children are fetched for the
+    /// whole page with a single `IN`, then grouped. The result is a tree — a
+    /// row with its children — rather than a flat join that repeats the parent
+    /// and leaves the caller to regroup.
+    fn select_with<P: Table, C: Table>(
+        &mut self,
+        query: crate::Query<P>,
+        rel: crate::Relation<P, C>,
+        children: crate::Query<C>,
+    ) -> Vec<crate::With<P, C>> {
+        let parents: Vec<P> = self.select(query);
+        let Some(at) = P::DEF.columns.iter().position(|c| *c == rel.from) else {
+            return Vec::new();
+        };
+        let keys: Vec<Value> = parents.iter().map(|p| p.to_row()[at].clone()).collect();
+        if keys.is_empty() {
+            return Vec::new();
+        }
+
+        let mut plan = children.into_plan();
+        let constraint = crate::Node::In {
+            column: rel.to.to_string(),
+            values: keys,
+        };
+        plan.filter = Some(match plan.filter.take() {
+            Some(existing) => crate::Node::All(vec![existing, constraint]),
+            None => constraint,
+        });
+        // A limit belongs to each parent's children, not to all of them at
+        // once, and one statement cannot say that. Refusing beats quietly
+        // truncating somebody else's list.
+        plan.limit = None;
+
+        let Some(back) = C::DEF.columns.iter().position(|c| *c == rel.to) else {
+            return Vec::new();
+        };
+        let mut grouped: Vec<(Value, Vec<C>)> = Vec::new();
+        for row in self.fetch(&plan) {
+            let Some(child) = C::from_row(&row) else {
+                continue;
+            };
+            let key = row[back].clone();
+            match grouped.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, list)) => list.push(child),
+                None => grouped.push((key, vec![child])),
+            }
+        }
+
+        parents
+            .into_iter()
+            .map(|p| {
+                let key = p.to_row()[at].clone();
+                let related = grouped
+                    .iter_mut()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, list)| std::mem::take(list))
+                    .unwrap_or_default();
+                crate::With { row: p, related }
+            })
+            .collect()
+    }
+
     fn get<T: Table>(&mut self, key: &[Value]) -> Option<T> {
         self.get_row(T::DEF.name, key)
             .as_deref()

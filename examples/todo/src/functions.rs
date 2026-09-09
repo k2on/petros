@@ -11,7 +11,6 @@
 //! there is no list to keep in step.
 
 use petros_schema::prelude::*;
-use petros_schema::Rows;
 
 use crate::schema::Todo as TodoRow;
 

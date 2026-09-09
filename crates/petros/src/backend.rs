@@ -276,6 +276,22 @@ fn condition(q: &mut Sql, node: &Node) {
             ));
             q.bind(value.clone());
         }
+        Node::In { column, values } => {
+            // An empty `IN ()` is not valid SQLite and would not mean what it
+            // reads as anyway. `0` is the empty set, which is what it means.
+            if values.is_empty() {
+                q.sql("0");
+                return;
+            }
+            q.sql(&format!("{} IN (", ident(column)));
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 {
+                    q.sql(", ");
+                }
+                q.bind(value.clone());
+            }
+            q.sql(")");
+        }
         Node::All(nodes) | Node::Any(nodes) => {
             let joiner = if matches!(node, Node::All(_)) {
                 " AND "

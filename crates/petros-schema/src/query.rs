@@ -115,6 +115,15 @@ pub enum Dir {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Node {
+    /// One column against many values.
+    ///
+    /// How a relationship is fetched: every child of a page of parents in one
+    /// statement, rather than one statement per parent. Zero calls the same
+    /// thing a multi-constraint and its joins are built on it.
+    In {
+        column: String,
+        values: Vec<Value>,
+    },
     Cmp {
         /// Owned, because a plan crosses a wasm boundary and a borrow does not.
         column: String,
@@ -244,4 +253,58 @@ impl<T: Table> Query<T> {
 /// Every row of a table, in some order. The start of every read.
 pub fn all<T: Table>() -> Query<T> {
     Query::new()
+}
+
+// ------------------------------------------------------------- relationships
+
+/// A path from one table to another, generated from a foreign key.
+///
+/// `favorite.song_id REFERENCES song(id)` generates both directions:
+/// `Song::favorite` reaches the favourites of a song, `Favorite::song` reaches
+/// the song of a favourite. The schema already says this; nothing declares it
+/// twice, and neither direction is written by hand.
+#[derive(Debug)]
+pub struct Relation<P, C> {
+    /// The column on the table being queried.
+    pub from: &'static str,
+    /// The column on the related table that matches it.
+    pub to: &'static str,
+    marker: PhantomData<fn() -> (P, C)>,
+}
+
+impl<P, C> Clone for Relation<P, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<P, C> Copy for Relation<P, C> {}
+
+impl<P, C> Relation<P, C> {
+    pub const fn new(from: &'static str, to: &'static str) -> Self {
+        Relation {
+            from,
+            to,
+            marker: PhantomData,
+        }
+    }
+}
+
+/// A row and what hangs off it.
+///
+/// Zero's results are trees rather than flat joins, and this is the shape a
+/// screen actually wants: a song *with* its place in the playlist, arriving as
+/// one thing. A flat join would repeat the parent once per child and leave the
+/// caller to regroup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct With<P, C> {
+    pub row: P,
+    pub related: Vec<C>,
+}
+
+impl<P, C> With<P, C> {
+    /// The first related row, for a relationship that is at most one — which is
+    /// most of them, and the only kind SQLite's `UNIQUE` can promise.
+    pub fn one(&self) -> Option<&C> {
+        self.related.first()
+    }
 }

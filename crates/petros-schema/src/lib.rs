@@ -38,7 +38,7 @@ pub use seed::Seed;
 /// the function reads as ordinary Rust, and so rustfmt, rust-analyzer and
 /// `cargo doc` all understand it before expansion.
 pub mod prelude {
-    pub use crate::{Actor, Db, Id, NewId, Now, Store};
+    pub use crate::{Actor, Db, Id, NewId, Now, Rows, Store, With};
     /// Imported rather than written as a path, so a function carries a bare
     /// `#[mutation]` and reads like ordinary Rust.
     pub use petros_macros::{mutation, peer, query};
@@ -123,7 +123,7 @@ impl IntoCbor for Id {
         cbor::Value::Bytes(self)
     }
 }
-pub use query::{all, Column, Cond, Dir, Node, Op, Order, Plan, Query};
+pub use query::{all, Column, Cond, Dir, Node, Op, Order, Plan, Query, Relation, With};
 pub use store::{Bind, Cell, Change, ColumnTy, Request, Rows, Store, Table, TableDef, Value};
 
 /// Every mutation an app understands.

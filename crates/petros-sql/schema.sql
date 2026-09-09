@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS song (
     id BLOB NOT NULL, title TEXT NOT NULL, artist TEXT NOT NULL,
     pos BIGINT NOT NULL, PRIMARY KEY (id));
+-- The REFERENCES is what generates `Song::favorite` and `Favorite::song`.
 CREATE TABLE IF NOT EXISTS favorite (
-    song_id BLOB NOT NULL, pos BIGINT NOT NULL,
+    song_id BLOB NOT NULL REFERENCES song(id), pos BIGINT NOT NULL,
     favorited_ms BIGINT NOT NULL, actor TEXT NOT NULL, PRIMARY KEY (song_id));
