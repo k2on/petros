@@ -22,10 +22,19 @@ pub use functions::*;
 #[cfg(feature = "storage")]
 pub use schema::*;
 
-// The module the browser peer loads. Only on wasm, and it is the whole of what
-// a separate `todo-wasm` crate used to be: what keeps SQLite and the engine out is
-// `--no-default-features`, a flag on the build rather than a package.
-#[cfg(target_arch = "wasm32")]
+// The module a peer loads, and the whole of what a separate `todo-wasm` crate
+// used to be.
+//
+// `not(feature = "storage")` is doing real work, not tidiness. There are two
+// wasm builds of this crate: the mutator module, built with
+// `--no-default-features`, and the browser client, which links it with storage
+// on. Only the first should carry the guest ABI — its imports come from a module
+// called `petros` that a host supplies, and in a browser there is no host, so
+// wasm-bindgen emits `import * as … from "petros"` and the page dies on a bare
+// specifier before it renders anything.
+//
+// The module is by definition the storage-less build, so that is the condition.
+#[cfg(all(target_arch = "wasm32", not(feature = "storage")))]
 petros_wasm_guest::export!(functions);
 
 #[cfg(feature = "storage")]

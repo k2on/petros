@@ -89,6 +89,14 @@ web-build:
     "$bindgen" --target web --no-typescript \
         --out-dir examples/todo/web/pkg \
         target/wasm32-unknown-unknown/release/examples/iced.wasm
+    # A browser build that carries the guest ABI imports a module called
+    # `petros` that only a host supplies, and the page dies on the bare
+    # specifier before rendering anything — with a clean compile and a clean
+    # deploy. Cheap to check, invisible otherwise.
+    if grep -q 'from "petros"' examples/todo/web/pkg/iced.js; then
+      echo "web-build: the bundle imports \"petros\" — the guest ABI is in a browser build" >&2
+      exit 1
+    fi
 
 # Build it and serve it at http://localhost:8080
 web: web-build
