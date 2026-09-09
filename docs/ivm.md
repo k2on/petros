@@ -216,9 +216,15 @@ graph — the child source connected to the join as well. Here the raw change is
 in hand at every level on the way down, so the join simply looks at it. No
 second edge, and the pipeline is still a chain.
 
-`Child` is not recursive, and Zero's is. Zero's trees nest arbitrarily; this one
-nests one level, the same level `select_with` reads. A recursive type that can
-only ever be one deep would be a lie about what the code does.
+`Child` was not recursive at first, on the argument that a type which can only
+ever be one deep would be a lie about what the code does. That was right about
+the code and wrong about where it was going: a level later it *is* recursive,
+carries the relationship's name, and the child side of a join is an operator
+rather than a plan — so a note under a song under an album is a `Child` whose
+inner change is a `Child`.
+
+The argument still holds; it was the code that moved. Depth is now a property of
+the query rather than of the type, which is the version worth keeping.
 
 ## What I got wrong about foreign keys
 
