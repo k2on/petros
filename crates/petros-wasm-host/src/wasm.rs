@@ -432,7 +432,7 @@ fn host_store(mut caller: Caller<'_, HostState>, request: u32, len: u32) -> u32 
             Ok(out)
         };
         Ok(match request {
-            Request::Query { sql, params, types } => encode(store.query(&sql, &params, &types))?,
+            Request::Fetch { plan } => encode(store.fetch(&plan))?,
             Request::Get { table, key } => {
                 encode(store.get_row(&table, &key).into_iter().collect())?
             }

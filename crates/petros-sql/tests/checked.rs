@@ -100,9 +100,9 @@ fn changes_are_drained() {
     assert!(store.take_changes().is_empty());
 }
 
-/// A read is still SQL, still checked, and still binds rather than pastes.
+/// A read is a query, not a string, and its values are bound.
 #[test]
-fn reads_are_sql_and_values_are_bound() {
+fn a_read_is_a_query() {
     let mut conn = db();
     let mut store = SqliteStore::new(&mut conn);
     for (i, title) in ["it's a quote", "'; DROP TABLE song; --", "unicode ✓ ♥ 漢"]
@@ -112,8 +112,50 @@ fn reads_are_sql_and_values_are_bound() {
         store.put(&song(i as u8, title, i as i64));
     }
 
-    let all = petros_sql::query!(store, "SELECT title, pos FROM song ORDER BY pos, title");
+    let all = store.select(Song::all().order_by(Song::pos.asc()));
     assert_eq!(all.len(), 3, "the table is still there");
     assert_eq!(all[1].title, "'; DROP TABLE song; --");
-    assert_eq!(all[2].pos, 2);
+
+    let one = store.select(
+        Song::all()
+            .filter(Song::pos.ge(1))
+            .order_by(Song::pos.asc()),
+    );
+    assert_eq!(one.len(), 2);
+    assert_eq!(one[0].pos, 1);
+}
+
+/// A cursor seeks past a row in the query's order. It is what an incrementally
+/// maintained `limit` uses to find the row that replaces a deleted one, and it
+/// is here from the start because retrofitting it would mean rewriting every
+/// source.
+#[test]
+fn a_query_can_start_after_a_row() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    for i in 0..5u8 {
+        store.put(&song(i, &format!("song {i}"), i as i64));
+    }
+
+    let page = store.select(Song::all().order_by(Song::pos.asc()).limit(2));
+    assert_eq!(page.iter().map(|s| s.pos).collect::<Vec<_>>(), vec![0, 1]);
+
+    let next = store.select(
+        Song::all()
+            .order_by(Song::pos.asc())
+            .start(&page[1])
+            .limit(2),
+    );
+    assert_eq!(next.iter().map(|s| s.pos).collect::<Vec<_>>(), vec![2, 3]);
+
+    // Descending flips the comparison, or a seek would run the wrong way.
+    let down = store.select(Song::all().order_by(Song::pos.desc()).limit(2));
+    assert_eq!(down.iter().map(|s| s.pos).collect::<Vec<_>>(), vec![4, 3]);
+    let after = store.select(
+        Song::all()
+            .order_by(Song::pos.desc())
+            .start(&down[1])
+            .limit(2),
+    );
+    assert_eq!(after.iter().map(|s| s.pos).collect::<Vec<_>>(), vec![2, 1]);
 }

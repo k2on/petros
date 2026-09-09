@@ -25,6 +25,7 @@
 
 #[cfg(feature = "author")]
 pub mod author;
+pub mod query;
 pub mod row;
 pub mod seed;
 pub mod store;
@@ -122,6 +123,7 @@ impl IntoCbor for Id {
         cbor::Value::Bytes(self)
     }
 }
+pub use query::{all, Column, Cond, Dir, Node, Op, Order, Plan, Query};
 pub use store::{Bind, Cell, Change, ColumnTy, Request, Rows, Store, Table, TableDef, Value};
 
 /// Every mutation an app understands.

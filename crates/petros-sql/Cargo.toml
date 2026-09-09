@@ -1,7 +1,7 @@
 [package]
 name = "petros-sql"
 version = "0.1.0"
-description = "Raw SQL for a Petros mutation, verified at build time by preparing it against the app's schema."
+description = "Row types for a Petros app, generated from its schema.sql by asking SQLite what is in it."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -19,7 +19,6 @@ quote = "1"
 # what SQLite declares each result column to be, which is where the field types
 # in `query!` come from.
 rusqlite = { version = "0.32", features = ["bundled", "column_decltype"] }
-syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
 # Running what the macro checked. A dev-dependency on the engine, which does

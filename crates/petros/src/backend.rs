@@ -16,7 +16,7 @@ use diesel::row::{Field, Row as _};
 use diesel::sql_types::{BigInt, Binary, Text, Untyped};
 use diesel::sqlite::Sqlite;
 use diesel::{QueryResult, RunQueryDsl};
-use petros_schema::{Change, ColumnTy, Value};
+use petros_schema::{Change, ColumnTy, Dir, Node, Op, Plan, Value};
 
 use crate::Connection;
 
@@ -118,8 +118,59 @@ impl std::fmt::Debug for SqliteStore<'_> {
 }
 
 impl petros_schema::Store for SqliteStore<'_> {
-    fn query(&mut self, sql: &str, params: &[Value], types: &[ColumnTy]) -> Vec<Vec<Value>> {
-        rows(self.conn, bind(sql, params), types)
+    fn fetch(&mut self, plan: &Plan) -> Vec<Vec<Value>> {
+        let Some(shape) = self.shape(&plan.table) else {
+            return Vec::new();
+        };
+        let (name, cols, types) = (
+            shape.name.clone(),
+            shape.columns.clone(),
+            shape.types.clone(),
+        );
+
+        let mut q = Sql::new();
+        q.sql(&format!("SELECT {} FROM {}", columns(&cols), ident(&name)));
+
+        // The filter and the cursor are both `WHERE`, and the cursor is a
+        // lexicographic comparison over the ordering columns — which is how a
+        // seek past a known row is expressed in SQL, and why the order has to
+        // be a total one.
+        let mut wheres: Vec<()> = Vec::new();
+        if let Some(node) = &plan.filter {
+            q.sql(" WHERE ");
+            condition(&mut q, node);
+            wheres.push(());
+        }
+        if let Some(start) = &plan.start {
+            q.sql(if wheres.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
+            seek(&mut q, plan, &cols, start);
+        }
+
+        if !plan.order.is_empty() {
+            q.sql(" ORDER BY ");
+            for (i, (col, dir)) in plan.order.iter().enumerate() {
+                if i > 0 {
+                    q.sql(", ");
+                }
+                q.sql(&format!(
+                    "{} {}",
+                    ident(col),
+                    match dir {
+                        Dir::Asc => "ASC",
+                        Dir::Desc => "DESC",
+                    }
+                ));
+            }
+        }
+        if let Some(n) = plan.limit {
+            q.sql(&format!(" LIMIT {n}"));
+        }
+
+        rows(self.conn, q, &types)
     }
 
     fn get_row(&mut self, table: &str, key: &[Value]) -> Option<Vec<Value>> {
@@ -206,6 +257,84 @@ impl petros_schema::Store for SqliteStore<'_> {
     }
 }
 
+/// A condition, as SQL. Values are bound; only column names are written, and
+/// they come from `schema.sql`.
+fn condition(q: &mut Sql, node: &Node) {
+    match node {
+        Node::Cmp { column, op, value } => {
+            q.sql(&format!(
+                "{} {} ",
+                ident(column),
+                match op {
+                    Op::Eq => "=",
+                    Op::Ne => "!=",
+                    Op::Lt => "<",
+                    Op::Le => "<=",
+                    Op::Gt => ">",
+                    Op::Ge => ">=",
+                }
+            ));
+            q.bind(value.clone());
+        }
+        Node::All(nodes) | Node::Any(nodes) => {
+            let joiner = if matches!(node, Node::All(_)) {
+                " AND "
+            } else {
+                " OR "
+            };
+            q.sql("(");
+            for (i, n) in nodes.iter().enumerate() {
+                if i > 0 {
+                    q.sql(joiner);
+                }
+                condition(q, n);
+            }
+            q.sql(")");
+        }
+        Node::Not(inner) => {
+            q.sql("NOT (");
+            condition(q, inner);
+            q.sql(")");
+        }
+    }
+}
+
+/// Everything after `start`, in the plan's order.
+///
+/// `(a, b) > (?, ?)` is the whole trick, and SQLite compares row values
+/// lexicographically so it needs no unrolling. A descending term flips to `<`.
+fn seek(q: &mut Sql, plan: &Plan, cols: &[String], start: &[Value]) {
+    let terms: Vec<(&String, &Dir)> = plan.order.iter().map(|(c, d)| (c, d)).collect();
+    if terms.is_empty() {
+        // Nothing to seek along. A cursor without an order is a caller's
+        // mistake, and returning everything is the honest reading of it.
+        q.sql("1 = 1");
+        return;
+    }
+    let descending = matches!(terms[0].1, Dir::Desc);
+    q.sql("(");
+    for (i, (col, _)) in terms.iter().enumerate() {
+        if i > 0 {
+            q.sql(", ");
+        }
+        q.sql(&ident(col));
+    }
+    q.sql(if descending { ") < (" } else { ") > (" });
+    for (i, (col, _)) in terms.iter().enumerate() {
+        if i > 0 {
+            q.sql(", ");
+        }
+        let value = cols
+            .iter()
+            .position(|c| c == *col)
+            .and_then(|i| start.get(i))
+            .cloned()
+            .unwrap_or(Value::Null);
+        q.bind(value);
+    }
+    q.sql(")");
+}
+
 fn where_key(q: &mut Sql, key_cols: &[String], key: &[Value]) {
     for (i, (name, value)) in key_cols.iter().zip(key).enumerate() {
         q.sql(if i == 0 { " WHERE " } else { " AND " });
@@ -225,33 +354,11 @@ fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Split a checked statement on its placeholders and bind a value at each.
-///
-/// The SQL arrives already verified — `petros-sql` prepared it against this
-/// schema at build time and counted the placeholders — so the only work here is
-/// binding.
-fn bind(sql: &str, params: &[Value]) -> Sql {
-    let mut q = Sql::new();
-    let mut rest = sql;
-    for value in params {
-        match rest.find('?') {
-            Some(i) => {
-                q.sql(&rest[..i]);
-                q.bind(value.clone());
-                rest = &rest[i + 1..];
-            }
-            None => break,
-        }
-    }
-    q.sql(rest);
-    q
-}
-
-/// Run a query and read each column as the type the checker reported.
+/// Run a statement and read each column as the table declares it.
 ///
 /// Diesel wants a static type per column and there is not one here, so this
-/// drops to the row API. The types are not guessed: `petros-sql` asked SQLite
-/// what each column is declared as, at build time, and passed the answer in.
+/// drops to the row API. The types are not guessed: they come from the live
+/// schema, which is also where the row types were generated from.
 fn rows(conn: &mut Connection, q: Sql, types: &[ColumnTy]) -> Vec<Vec<Value>> {
     let mut out = Vec::new();
     let Ok(cursor) = LoadConnection::load(conn, q) else {

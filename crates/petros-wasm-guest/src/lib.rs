@@ -116,16 +116,12 @@ macro_rules! export {
                 ::std::vec::Vec::new()
             }
 
-            fn query(
+            fn fetch(
                 &mut self,
-                sql: &str,
-                params: &[$crate::petros_schema::Value],
-                types: &[$crate::petros_schema::ColumnTy],
+                plan: &$crate::petros_schema::Plan,
             ) -> ::std::vec::Vec<::std::vec::Vec<$crate::petros_schema::Value>> {
-                let answer = PetrosStore::ask(&$crate::petros_schema::Request::Query {
-                    sql: sql.to_string(),
-                    params: params.to_vec(),
-                    types: types.to_vec(),
+                let answer = PetrosStore::ask(&$crate::petros_schema::Request::Fetch {
+                    plan: plan.clone(),
                 });
                 $crate::decode_rows(&answer)
             }

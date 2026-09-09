@@ -217,9 +217,13 @@ pub enum Change {
 ///
 /// Calling either of these with a runtime string gives all of that up. Don't.
 pub trait Store {
-    /// A checked query, decoding each column as the type given.
-    /// Use `petros_sql::query!`. Reads need no capture, so they stay SQL.
-    fn query(&mut self, sql: &str, params: &[Value], types: &[ColumnTy]) -> Vec<Vec<Value>>;
+    /// Read rows matching a plan, in the plan's order.
+    ///
+    /// The source contract. A plan carries a filter, an order, a limit and a
+    /// cursor, which is everything one SQL statement needs — and everything an
+    /// incrementally maintained view needs to seek when a delete opens a gap in
+    /// a limit.
+    fn fetch(&mut self, plan: &crate::Plan) -> Vec<Vec<Value>>;
 
     /// Write a row, and say what changed.
     ///
@@ -249,6 +253,14 @@ pub trait Store {
 
 /// The typed half, in terms of the four above.
 pub trait Rows: Store {
+    /// Run a query and decode its rows.
+    fn select<T: Table>(&mut self, query: crate::Query<T>) -> Vec<T> {
+        self.fetch(query.plan())
+            .iter()
+            .filter_map(|row| T::from_row(row))
+            .collect()
+    }
+
     fn get<T: Table>(&mut self, key: &[Value]) -> Option<T> {
         self.get_row(T::DEF.name, key)
             .as_deref()
@@ -272,8 +284,8 @@ impl<S: Store + ?Sized> Rows for S {}
 
 /// So a `&mut Store` is a `Store`, and a helper taking one can pass it on.
 impl<S: Store + ?Sized> Store for &mut S {
-    fn query(&mut self, sql: &str, params: &[Value], types: &[ColumnTy]) -> Vec<Vec<Value>> {
-        (**self).query(sql, params, types)
+    fn fetch(&mut self, plan: &crate::Plan) -> Vec<Vec<Value>> {
+        (**self).fetch(plan)
     }
     fn put_row(&mut self, table: &str, row: &[Value]) {
         (**self).put_row(table, row)
@@ -299,21 +311,8 @@ impl<S: Store + ?Sized> Store for &mut S {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Request {
-    Query {
-        sql: String,
-        params: Vec<Value>,
-        types: Vec<ColumnTy>,
-    },
-    Get {
-        table: String,
-        key: Vec<Value>,
-    },
-    Put {
-        table: String,
-        row: Vec<Value>,
-    },
-    Delete {
-        table: String,
-        key: Vec<Value>,
-    },
+    Fetch { plan: crate::Plan },
+    Get { table: String, key: Vec<Value> },
+    Put { table: String, row: Vec<Value> },
+    Delete { table: String, key: Vec<Value> },
 }

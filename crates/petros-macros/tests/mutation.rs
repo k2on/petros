@@ -1,7 +1,7 @@
 //! What `#[mutation]` generates, exercised against a real store.
 
 use petros_schema::cbor::Value;
-use petros_schema::{ColumnTy, Store};
+use petros_schema::Store;
 
 // Stand-ins for the engine's parameter types. In an app these come from
 // `petros`; the macro recognises them by name, which is what lets a function be
@@ -38,12 +38,7 @@ impl Store for Recorder {
     fn take_changes(&mut self) -> Vec<petros_schema::Change> {
         Vec::new()
     }
-    fn query(
-        &mut self,
-        _sql: &str,
-        _params: &[petros_schema::Value],
-        _types: &[ColumnTy],
-    ) -> Vec<Vec<petros_schema::Value>> {
+    fn fetch(&mut self, _plan: &petros_schema::Plan) -> Vec<Vec<petros_schema::Value>> {
         Vec::new()
     }
 }

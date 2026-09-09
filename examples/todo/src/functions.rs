@@ -31,15 +31,14 @@ pub fn add(db: &mut Db, id: NewId, created_ms: Now, actor: Actor, text: String) 
     if db.exists::<TodoRow>(&TodoRow::key_of(&id)) {
         return Ok(());
     }
-    // `pos` is read out of current state: an intent, not a fact. It is what
-    // makes the rebase visible when an entry lands underneath yours.
-    let last = petros_sql::query!(
-        db,
-        "SELECT COALESCE(MAX(pos), 0) AS \"last: Int\" FROM todo"
-    )
-    .first()
-    .map(|r| r.last)
-    .unwrap_or(0);
+    // `pos` is read out of current state: an intent — "put it at the end" —
+    // not a fact. It is what makes the rebase visible when an entry lands
+    // underneath yours.
+    let last = db
+        .select(TodoRow::all().order_by(TodoRow::pos.desc()).limit(1))
+        .first()
+        .map(|t| t.pos)
+        .unwrap_or(0);
     db.put(&TodoRow {
         id,
         text: text.trim().to_string(),
@@ -62,12 +61,10 @@ pub fn add(db: &mut Db, id: NewId, created_ms: Now, actor: Actor, text: String) 
 /// which rows moved. Reading the set is still one statement.
 #[mutation]
 pub fn mark_all_done(db: &mut Db) -> Result {
-    let ids = petros_sql::query!(db, "SELECT id FROM todo WHERE done = 0");
-    for row in ids {
-        if let Some(mut todo) = db.get::<TodoRow>(&TodoRow::key_of(&row.id)) {
-            todo.done = true;
-            db.put(&todo);
-        }
+    let open = db.select(TodoRow::all().filter(TodoRow::done.eq(false)));
+    for mut todo in open {
+        todo.done = true;
+        db.put(&todo);
     }
     Ok(())
 }
@@ -96,20 +93,22 @@ pub fn remove(db: &mut Db, id: Id) -> Result {
 /// is a bug that only appears on someone else's machine.
 #[query]
 pub fn list(db: &mut Db) -> Result<Vec<Item>> {
-    Ok(petros_sql::query!(
-        db,
-        "SELECT id, text, done, pos, created_ms, actor FROM todo ORDER BY pos, id"
-    )
-    .into_iter()
-    .map(|r| Item {
-        id: crate::schema::id_of(&r.id),
-        text: r.text,
-        done: r.done,
-        pos: r.pos,
-        created_ms: r.created_ms,
-        actor: r.actor,
-    })
-    .collect())
+    Ok(db
+        .select(
+            TodoRow::all()
+                .order_by(TodoRow::pos.asc())
+                .order_by(TodoRow::id.asc()),
+        )
+        .into_iter()
+        .map(|r| Item {
+            id: crate::schema::id_of(&r.id),
+            text: r.text,
+            done: r.done,
+            pos: r.pos,
+            created_ms: r.created_ms,
+            actor: r.actor,
+        })
+        .collect())
 }
 
 peer!(add, mark_all_done, set_done, remove);

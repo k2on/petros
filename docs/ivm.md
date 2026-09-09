@@ -112,19 +112,40 @@ from the schema rather than written by hand — which is a thing we now do.
 deliberate decision made twice, and they are the only option that does not
 require a C API we cannot reach.
 
+## Where it has got to
+
+Steps 1 and 2 are done, on this branch.
+
+**Typed writes**, so a write says what changed: `Add`, `Remove`, or `Edit`
+carrying both versions. `petros_sql::tables!()` generates the row types from
+`schema.sql` by asking SQLite what is in it, so the tables are described once,
+in DDL.
+
+**A query builder**, and reads go through it rather than SQL. A query is *data*
+— a `Plan` with a filter, an order, a limit and a cursor — which is what lets
+the same query be one statement today and a maintained pipeline later. The
+cursor is there from the start because `Take` seeks with it and retrofitting it
+would mean rewriting every source.
+
+`exec!` and `query!` are gone. The domain no longer contains SQL at all: reads
+and writes are the same shape, which was the point of doing both at once rather
+than leaving a seam between them.
+
 ## What I would build, in order
 
-1. **Change capture.** Generated triggers, a `petros_changes` table, and a
-   drain that turns rows into `SourceChange`. Measure the write cost: if a
-   mutation gets meaningfully slower, nothing after this is worth having.
-2. **A source over SQLite.** `fetch(constraint, start, order, limit)` compiled to
-   one statement, plus `push` fanning a `SourceChange` to connected operators.
-   This is the piece we get cheaply.
+1. ~~Change capture~~ and ~~a source over SQLite~~ — done. Triggers turned out
+   to be unnecessary: typed writes report changes directly, which is simpler
+   than reading them back out of a table, and the cost is one point lookup per
+   write rather than an insert.
+2. **`push`.** A source that fans a change to connected operators, and the
+   `Input`/`Output` pair. Nothing is connected to anything yet.
 3. **The operators that earn their place:** filter, join, take. In that order —
    filter is trivial, join is where the value is, take is where the design is
-   tested.
-4. **The builder**, last. It is a typed façade over an AST, and until there are
-   operators to compile to, it is a shape without a body.
+   tested, and take is the one whose seek the `Plan` already supports.
+4. **Relationships.** Zero's results are trees: a row with named children, and
+   `related()` nests a subquery under a parent. That is what a UI wants, and it
+   is also what replaces the joins a flat query builder cannot express — the
+   read model here has two of them.
 
 ## What to measure before any of it
 
@@ -139,6 +160,8 @@ So, first:
   `LIMIT 50` against an index is under a millisecond at 100k rows, this whole
   document is premature and the reactivity problem — *knowing when to re-run* —
   is the one worth solving instead.
-- **The trigger overhead** on a write, at one row and at a thousand.
+- **The extra read on a write.** `put` looks the old row up to report an edit.
+  Measure it at one row and at a thousand; if it is material, an add-only path
+  for rows known to be new is the obvious relief.
 
 Both are an afternoon, and they decide whether the rest is worth a month.
