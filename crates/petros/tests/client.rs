@@ -191,3 +191,41 @@ fn connect_replays_hello_and_pending() {
         other => panic!("expected a Push, got {other:?}"),
     }
 }
+
+/// A mutation costs the same at any pending depth.
+///
+/// This is what "offline indefinitely" means, and it is a property of the
+/// design rather than a happy accident: intents commit to their own database,
+/// so the optimistic transaction on this one never closes and a new mutation
+/// applies on top of the view instead of rebuilding it.
+///
+/// It used to rebuild. A tap was O(pending) and a burst O(n²) — 390ms at forty
+/// pending on a phone.
+#[test]
+fn a_mutation_costs_the_same_at_any_depth() {
+    use std::time::Instant;
+
+    let mut client = client("alice");
+    let mut at = |c: &mut Client<Todo>, n: usize| {
+        while c.pending_len() < n {
+            c.mutate(TodoMutation::add("filler")).unwrap();
+        }
+        let start = Instant::now();
+        for i in 0..20 {
+            c.mutate(TodoMutation::add(&format!("timed {i}"))).unwrap();
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / 20.0
+    };
+
+    let shallow = at(&mut client, 5);
+    let deep = at(&mut client, 400);
+
+    // Ten times the depth of the old measurable slowdown. A ratio, not an
+    // absolute, so a slow machine does not fail this — what is being asserted
+    // is the shape of the curve.
+    assert!(
+        deep < shallow * 4.0 + 1.0,
+        "a tap at 400 pending took {deep:.3}ms against {shallow:.3}ms at 5: \
+         the cost is growing with the depth again"
+    );
+}

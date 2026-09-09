@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc e550bdbb0c404405f11824de57df3ae17a7a65f0ae7c80f4e043b2c8f4eafba3 # shrinks to seed = 1950759401205659552, n_clients = 2, script = [Add(0), Add(0), Add(0), Add(2), Step]
+cc 81f348dee4154dc415a7ebaa9476fa88ce78ca9dbbe729037b8bb60ca734fa1b # shrinks to seed = 7999348111751057674, n_clients = 2, script = [Step, Add(0), Step, Step, ClaimSomething(1), ClaimSomething(0), Step]

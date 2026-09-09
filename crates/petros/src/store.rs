@@ -18,6 +18,7 @@ use crate::{proto, ActorId, Connection, Entry, Id, Result, Seq};
 /// `payload` holds the CBOR encoding of the mutation rather than exploded
 /// columns. That is what lets an old log stay readable — decoding is the app's
 /// versioning problem, and it gets the original bytes to solve it with.
+/// The state database: the confirmed log and the cursor into it.
 const DDL: &str = "
     CREATE TABLE IF NOT EXISTS petros_log (
         seq     BIGINT PRIMARY KEY NOT NULL,
@@ -25,15 +26,29 @@ const DDL: &str = "
         actor   TEXT NOT NULL,
         payload BLOB NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS petros_meta (
+        k TEXT PRIMARY KEY NOT NULL,
+        v BIGINT NOT NULL
+    );
+";
+
+/// The intents database, which is a *separate file* on a *separate connection*.
+///
+/// Not tidiness. A client holds its optimistic view in an open transaction on
+/// the state database, and a mutation has to record its intent durably — which
+/// means committing, which means closing that transaction and replaying every
+/// pending mutation to rebuild the view. That made a tap cost O(pending), and a
+/// burst of taps O(n²): 390ms at forty pending on a phone.
+///
+/// Two files, two write locks. The intent commits while the optimistic
+/// transaction stays open, so a new mutation applies on top of the view instead
+/// of rebuilding it, and a tap is flat.
+const INTENTS_DDL: &str = "
     CREATE TABLE IF NOT EXISTS petros_pending (
         ord     INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
         id      BLOB NOT NULL UNIQUE,
         actor   TEXT NOT NULL,
         payload BLOB NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS petros_meta (
-        k TEXT PRIMARY KEY NOT NULL,
-        v BIGINT NOT NULL
     );
 ";
 
@@ -74,6 +89,31 @@ struct NewPending {
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.batch_execute(DDL)?;
     Ok(())
+}
+
+pub(crate) fn migrate_intents(conn: &mut Connection) -> Result<()> {
+    conn.batch_execute(INTENTS_DDL)?;
+    Ok(())
+}
+
+/// Where a connection's main database lives, if it is a file.
+///
+/// `None` for `:memory:`, which is what tests and the browser use — their
+/// intents go in memory too, since nothing about them was durable anyway.
+pub(crate) fn main_file(conn: &mut Connection) -> Result<Option<String>> {
+    #[derive(QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        file: String,
+    }
+    let rows: Vec<Row> =
+        diesel::sql_query("SELECT file FROM pragma_database_list WHERE name = 'main'")
+            .load(conn)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .map(|r| r.file)
+        .filter(|f| !f.is_empty()))
 }
 
 /// The highest sequence number in the log, or 0 for an empty log.

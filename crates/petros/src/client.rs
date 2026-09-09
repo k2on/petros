@@ -47,6 +47,9 @@ pub struct Client<A: App> {
     cursor: Seq,
     /// Whether the optimistic savepoint is currently held. It is held exactly
     /// when there is something pending.
+    /// Pending intents, in their own file. Committed independently of the
+    /// optimistic transaction on `conn`, which is what keeps a tap flat.
+    intents: Connection,
     savepoint_open: bool,
     out: Vec<ClientMsg<A::Mutation>>,
     rejections: Vec<Rejection>,
@@ -69,9 +72,25 @@ impl<A: App> Client<A> {
     pub fn open(mut conn: Connection, actor: impl Into<ActorId>, auto: AutoCtx) -> Result<Self> {
         store::migrate(&mut conn)?;
         A::migrate(&mut conn)?;
+
+        // Intents live in their own file so they can be committed while the
+        // optimistic transaction on this one stays open. See `INTENTS_DDL`.
+        let mut intents = match store::main_file(&mut conn)? {
+            // `open_path`, not `open_named`: WAL and `synchronous = NORMAL`,
+            // exactly as the state database gets them. Without WAL an intent
+            // commit is a rollback-journal fsync, which measured at 12ms a tap
+            // — flat, but flat and slow.
+            Some(file) => crate::open_path(format!("{file}-intents"))?,
+            // `:memory:` — a test, or a browser. Nothing here was durable to
+            // begin with, so the intents are not either.
+            None => crate::open_memory()?,
+        };
+        store::migrate_intents(&mut intents)?;
+
         let cursor = store::cursor(&mut conn)?;
         let mut client = Client {
             conn,
+            intents,
             actor: actor.into(),
             auto,
             cursor,
@@ -84,6 +103,11 @@ impl<A: App> Client<A> {
         // uncommitted transaction. Finish anything the log is ahead on, then
         // rebuild the view from the pending mutations that did survive.
         client.advance()?;
+        // An intent the server confirmed before we crashed is in the log now and
+        // is not pending any more. Two files means two commits, and a crash can
+        // land between them — this is the one place that shows, and dropping the
+        // duplicate is cheaper than requiring every mutation to be idempotent.
+        client.forget_confirmed_intents()?;
         client.open_optimistic()?;
         Ok(client)
     }
@@ -113,7 +137,7 @@ impl<A: App> Client<A> {
 
     /// How many of this client's own mutations are still unconfirmed.
     pub fn pending_len(&mut self) -> usize {
-        store::pending_len(&mut self.conn).unwrap_or(0)
+        store::pending_len(&mut self.intents).unwrap_or(0)
     }
 
     /// Author a mutation: fill its non-deterministic arguments, apply it
@@ -137,8 +161,7 @@ impl<A: App> Client<A> {
         // At `synchronous = FULL` that is two fsyncs, which measured as the
         // entire cost of a tap: 8.0ms of 8.2ms, against 4.0ms for one fsync on
         // the same machine.
-        self.probe_and_record(&entry)?;
-        self.open_optimistic()?;
+        self.apply_and_record(&entry)?;
 
         let id = entry.id;
         self.out.push(ClientMsg::Push {
@@ -152,7 +175,7 @@ impl<A: App> Client<A> {
     /// dedupes pushes on entry id.
     pub fn connected(&mut self) -> Result<()> {
         self.out.push(ClientMsg::Hello { since: self.cursor });
-        let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.conn)?;
+        let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.intents)?;
         if !pending.is_empty() {
             self.out.push(ClientMsg::Push { entries: pending });
         }
@@ -171,7 +194,7 @@ impl<A: App> Client<A> {
                     store::put_confirmed(&mut self.conn, entry)?;
                     // Our own entry coming back confirmed: it is no longer ours
                     // to replay.
-                    store::drop_pending(&mut self.conn, &entry.id)?;
+                    store::drop_pending(&mut self.intents, &entry.id)?;
                 }
                 if has_more {
                     let since = store::contiguous_after(&mut self.conn, self.cursor, APPLY_CHUNK)?;
@@ -182,7 +205,7 @@ impl<A: App> Client<A> {
                 if ids.len() != seqs.len() {
                     return Err(Error::Protocol("Ack ids and seqs differ in length".into()));
                 }
-                let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.conn)?;
+                let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.intents)?;
                 for (id, seq) in ids.iter().zip(seqs) {
                     // The ack tells us where in the order our entry landed, so
                     // we can promote it from pending to confirmed without
@@ -194,11 +217,11 @@ impl<A: App> Client<A> {
                         };
                         store::put_confirmed(&mut self.conn, &confirmed)?;
                     }
-                    store::drop_pending(&mut self.conn, id)?;
+                    store::drop_pending(&mut self.intents, id)?;
                 }
             }
             ServerMsg::Reject { id, reason } => {
-                store::drop_pending(&mut self.conn, &id)?;
+                store::drop_pending(&mut self.intents, &id)?;
                 self.rejections.push(Rejection { id, reason });
             }
         }
@@ -262,42 +285,57 @@ impl<A: App> Client<A> {
     /// that loses a week of edits to a crash is not offline-first. Rolling back
     /// to `pending` leaves the transaction holding nothing but the insert, so
     /// the commit that follows carries exactly the durable part.
-    fn probe_and_record(&mut self, entry: &Entry<A::Mutation>) -> Result<()> {
-        let ours = !self.savepoint_open;
-        if ours {
-            self.conn.batch_execute("BEGIN")?;
+    /// Apply the mutation on top of the view, then record the intent.
+    ///
+    /// Both used to be one transaction, and recording had to commit — so the
+    /// optimistic savepoint was rolled back first and every pending mutation
+    /// replayed afterwards to rebuild the view. That is what made a tap cost
+    /// O(pending).
+    ///
+    /// The intent goes to its own database now, so committing it touches
+    /// nothing here. The savepoint stays open across mutations and this applies
+    /// one more thing to it.
+    fn apply_and_record(&mut self, entry: &Entry<A::Mutation>) -> Result<()> {
+        if !self.savepoint_open {
+            // Rebuild the view first if a `recv` closed it. Usually a no-op:
+            // between mutations the savepoint simply stays open, which is the
+            // whole point.
+            self.open_optimistic()?;
         }
-        self.conn.batch_execute("SAVEPOINT probe")?;
-        let verdict = entry
+        if !self.savepoint_open {
+            // Nothing was pending, so nothing opened a transaction. Open one for
+            // this mutation to live in.
+            self.conn.batch_execute("BEGIN; SAVEPOINT pending;")?;
+            self.savepoint_open = true;
+        }
+
+        // Its own savepoint, so a refusal undoes this mutation and leaves every
+        // earlier pending one where it was.
+        self.conn.batch_execute("SAVEPOINT one")?;
+        match entry
             .mutation
-            .apply(&mut Transaction::new(&mut self.conn), &entry.actor);
-        // `RELEASE` here never commits: there is always a transaction around
-        // it, either the optimistic one or the one opened just above.
-        self.conn
-            .batch_execute("ROLLBACK TO probe; RELEASE probe;")?;
-
-        if let Err(rejected) = verdict {
-            // Leave the caller's view exactly as it was. Nothing was written,
-            // so there is nothing to commit.
-            if ours {
-                self.conn.batch_execute("ROLLBACK")?;
+            .apply(&mut Transaction::new(&mut self.conn), &entry.actor)
+        {
+            Ok(()) => self.conn.batch_execute("RELEASE one")?,
+            Err(rejected) => {
+                self.conn.batch_execute("ROLLBACK TO one; RELEASE one;")?;
+                return Err(rejected.into());
             }
-            return Err(rejected.into());
         }
 
-        if self.savepoint_open {
-            self.conn
-                .batch_execute("ROLLBACK TO pending; RELEASE pending;")?;
-            self.savepoint_open = false;
+        // A different connection and a different file: this commits on its own
+        // and the transaction above knows nothing about it.
+        store::put_pending(&mut self.intents, entry)
+    }
+
+    /// Drop intents the log already has. See the call in `open`.
+    fn forget_confirmed_intents(&mut self) -> Result<()> {
+        let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.intents)?;
+        for entry in &pending {
+            if store::seq_of(&mut self.conn, &entry.id)?.is_some() {
+                store::drop_pending(&mut self.intents, &entry.id)?;
+            }
         }
-        // A failure here would otherwise leave the transaction open and the
-        // next `BEGIN` would fail on top of it, turning one bad write into a
-        // client that cannot write at all.
-        if let Err(e) = store::put_pending(&mut self.conn, entry) {
-            let _ = self.conn.batch_execute("ROLLBACK");
-            return Err(e);
-        }
-        self.conn.batch_execute("COMMIT")?;
         Ok(())
     }
 
@@ -321,7 +359,7 @@ impl<A: App> Client<A> {
     /// pending this does nothing at all — steady state holds no transaction.
     fn open_optimistic(&mut self) -> Result<()> {
         loop {
-            let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.conn)?;
+            let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.intents)?;
             if pending.is_empty() {
                 return Ok(());
             }
@@ -338,7 +376,7 @@ impl<A: App> Client<A> {
                 Ok(rejected) => {
                     self.discard_optimistic()?;
                     for r in &rejected {
-                        store::drop_pending(&mut self.conn, &r.id)?;
+                        store::drop_pending(&mut self.intents, &r.id)?;
                     }
                     self.rejections.extend(rejected);
                 }
