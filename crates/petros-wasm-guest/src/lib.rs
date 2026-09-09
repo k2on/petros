@@ -17,18 +17,20 @@
 //! coming back is `(ptr << 32) | len` packed into a `u64` — one convention,
 //! used in both directions, because the alternative is two.
 //!
-//! Allocation is one-way: [`petros_alloc`](export!) hands the host a buffer and
-//! forgets it, and returned buffers are leaked the same way. That is sound only
-//! because the host gives each call a fresh `Store` and drops the guest's whole
-//! linear memory with it. A host that reuses an instance would leak — measured
-//! at 1.1MiB after sixty calls — so [`ABI_VERSION`] has to move if that ever
-//! changes.
+//! Allocation is paired. [`petros_alloc`](export!) hands the host a buffer and
+//! `petros_free` takes it back, both through an exact `Layout` so the size is
+//! never guessed. It used to be one-way — allocate and forget, in both
+//! directions — which was sound only while the host built a fresh instance per
+//! call and dropped the whole linear memory with it. That cost a wasm
+//! instantiation on every mutation, and on a phone replaying forty pending
+//! entries that was most of a 390ms tap. Freeing is what lets a host keep one
+//! instance alive.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Bumped when the host/guest contract changes, so a mismatched pair says so
 /// rather than corrupting a database.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// The module the host satisfies the imports from.
 pub const IMPORT_MODULE: &str = "petros";
@@ -113,6 +115,15 @@ macro_rules! export {
             $crate::alloc(len)
         }
 
+        /// Give a buffer back. What lets the host keep one instance alive
+        /// instead of building a new one per call.
+        #[no_mangle]
+        pub extern "C" fn petros_free(ptr: *mut u8, len: u32) {
+            // SAFETY: the host frees only what `petros_alloc` returned, with the
+            // length it was given, once.
+            unsafe { $crate::free(ptr, len) }
+        }
+
         /// Apply one mutation, as the CBOR payload the log stores, verbatim.
         /// Zero for success; otherwise a packed refusal reason.
         ///
@@ -187,21 +198,58 @@ pub use ciborium;
 #[doc(hidden)]
 pub use petros_schema;
 
-/// A buffer the host may write into. Forgotten on purpose: see the module note.
+/// The layout `alloc` and `free` agree on.
+///
+/// Alignment 1 because every buffer crossing here is bytes. Both sides derive
+/// it from the same length, so a free is never a guess about a capacity the
+/// allocator may have rounded up.
+fn layout(len: u32) -> core::alloc::Layout {
+    core::alloc::Layout::from_size_align(len as usize, 1)
+        .expect("a byte buffer always has a layout")
+}
+
+/// A buffer the host may write into. Released by [`free`].
 #[doc(hidden)]
 pub fn alloc(len: u32) -> *mut u8 {
-    let mut buf = Vec::<u8>::with_capacity(len as usize);
-    let ptr = buf.as_mut_ptr();
-    core::mem::forget(buf);
-    ptr
+    if len == 0 {
+        return core::ptr::NonNull::<u8>::dangling().as_ptr();
+    }
+    // SAFETY: a non-zero length, and alignment 1 is always valid.
+    unsafe { std::alloc::alloc(layout(len)) }
+}
+
+/// Give a buffer back, whichever side asked for it.
+///
+/// # Safety
+///
+/// `ptr` must have come from [`alloc`] with this exact `len`, and must not be
+/// freed twice. The only caller is the host, which frees each buffer once, in
+/// the same step that drops its own record of it.
+#[doc(hidden)]
+pub unsafe fn free(ptr: *mut u8, len: u32) {
+    if len == 0 || ptr.is_null() {
+        return;
+    }
+    // SAFETY: the host only frees a pointer this module returned, with the
+    // length it was given alongside it, and only once — it is dropped from the
+    // host's own bookkeeping in the same step.
+    unsafe { std::alloc::dealloc(ptr, layout(len)) }
 }
 
 /// `(ptr << 32) | len`, the one convention everything crossing here uses.
+///
+/// Copied into an `alloc` buffer rather than handed out as the `Vec`'s own, so
+/// the host can free it with the length it already has. A `Vec`'s capacity is
+/// not its length, and freeing on the wrong one is undefined.
 #[doc(hidden)]
 pub fn packed(bytes: Vec<u8>) -> u64 {
-    let len = bytes.len() as u64;
-    let ptr = bytes.leak().as_ptr() as u64;
-    (ptr << 32) | len
+    let len = bytes.len() as u32;
+    let ptr = alloc(len);
+    if len > 0 {
+        // SAFETY: `ptr` is a fresh allocation of exactly `len` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize) };
+    }
+    ((ptr as u64) << 32) | len as u64
 }
 
 #[doc(hidden)]

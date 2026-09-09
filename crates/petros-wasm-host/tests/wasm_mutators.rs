@@ -409,3 +409,41 @@ fn an_unknown_verb_says_what_the_module_does_know() {
         );
     }
 }
+
+/// One instance serves every call, so the guest has to give its buffers back.
+///
+/// It used to leak on purpose — allocate and forget, in both directions — and
+/// that was sound only while each call got a fresh instance and the whole linear
+/// memory went with it. Reusing the instance is what made a mutation cheap; this
+/// is the invariant that makes reusing it safe, and it would regress silently.
+#[test]
+fn a_reused_instance_does_not_grow() {
+    let mutators = Mutators::load(MODULE).expect("load");
+    let mut db = database();
+    let mut auto = AutoCtx::seeded(3);
+
+    // Big enough to matter. A hundred small buffers fit inside the slack the
+    // guest's allocator already holds, so a leak would not show — the text is
+    // 32KiB so a hundred calls would be megabytes if nothing came back.
+    let bulk = "x".repeat(32 * 1024);
+    let mut pages = Vec::new();
+    for i in 0..120 {
+        let raw = todo::add(format!("item {i} {bulk}"));
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&raw, &mut bytes).unwrap();
+        let filled = mutators.fill_auto(&bytes, &mut auto).unwrap();
+        mutators.apply(&mut db, &filled, "alice").unwrap().unwrap();
+        if i % 20 == 19 {
+            pages.push(mutators.memory_pages());
+        }
+    }
+
+    // Some growth on the way up is fine — the allocator claims pages and keeps
+    // them. What must not happen is growth that tracks the call count.
+    let first = pages.first().copied().unwrap_or(0);
+    let last = pages.last().copied().unwrap_or(0);
+    assert_eq!(
+        first, last,
+        "guest memory grew from {first} to {last} pages over 120 calls of 32KiB: {pages:?}"
+    );
+}

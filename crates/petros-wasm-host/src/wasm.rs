@@ -44,14 +44,20 @@ const MUTATOR_STACK: usize = 64 * 1024 * 1024;
 /// of running wasm; instantiation is not, so this is what gets cached and what
 /// [`Mutators::swap`] replaces.
 pub struct Mutators {
+    /// Kept so `swap` can build the next worker from the same engine.
+    #[allow(dead_code)]
     engine: Engine,
+    #[allow(dead_code)]
     module: Arc<Module>,
+    /// The thread and the instance every call runs on, kept alive.
+    worker: std::sync::Mutex<Worker>,
     /// Bumped on every swap, so a caller can tell which module produced a row.
     pub generation: u64,
 }
 
 /// What a host function can reach while the guest is running: the very
 /// connection the engine has a transaction open on.
+#[derive(Default)]
 struct HostState {
     /// Valid only for the duration of one call, and absent for `fill_auto`,
     /// which touches no database. The `Store` never outlives the borrow that
@@ -79,6 +85,132 @@ impl HostState {
     }
 }
 
+/// Build the instance a worker will keep, and remember the two exports every
+/// call needs.
+fn instantiate(
+    engine: &Engine,
+    module: &Module,
+    store: &mut Store<HostState>,
+) -> Result<wasmi::Instance, String> {
+    let mut linker = Linker::new(engine);
+    linker
+        .func_wrap("petros", "store", host_store)
+        .and_then(|l| l.func_wrap("petros", "take", host_take))
+        .map_err(|e| format!("could not define the host imports: {e}"))?;
+
+    let instance = linker
+        .instantiate_and_start(&mut *store, module)
+        .map_err(|e| format!("could not instantiate: {e}"))?;
+
+    let memory = instance
+        .get_memory(&*store, "memory")
+        .ok_or("the module exports no memory")?;
+    let alloc = instance
+        .get_typed_func::<u32, u32>(&*store, "petros_alloc")
+        .map_err(|e| format!("petros_alloc has the wrong shape: {e}"))?;
+    store.data_mut().memory = Some(memory);
+    store.data_mut().alloc = Some(alloc);
+    Ok(instance)
+}
+
+/// A raw `&mut Connection` on its way to the worker.
+///
+/// The caller blocks on the reply for the whole call, so the borrow it came
+/// from is live and exclusive throughout — the same argument the scoped thread
+/// used to make structurally, now made by hand because the thread outlives any
+/// one call.
+struct Borrowed(Option<*mut Connection>);
+
+// SAFETY: only ever moved to the worker while the caller that produced the
+// borrow is blocked, and cleared before the reply is sent.
+unsafe impl Send for Borrowed {}
+
+/// One thread, one instance, both alive for the life of the module.
+///
+/// The thread is not optional. A host import runs *inside* wasmi's execution
+/// loop, so its frames sit on top of the interpreter's, and this one then calls
+/// Diesel — whose query machinery is many layers of deeply nested generics.
+/// Together they overflowed a default 2MB thread stack in the tests, and iOS
+/// gives React Native's JS thread about half of that. So a mutation gets a stack
+/// sized for the job rather than borrowing whichever one happened to call in.
+struct Worker {
+    jobs: std::sync::mpsc::Sender<Job>,
+}
+
+type Job = Box<dyn FnOnce(&mut Store<HostState>, &wasmi::Instance) + Send>;
+/// The same job before it is promised to live as long as the channel wants.
+type BorrowedJob<'a> = Box<dyn FnOnce(&mut Store<HostState>, &wasmi::Instance) + Send + 'a>;
+
+impl Worker {
+    fn start(engine: Engine, module: Arc<Module>) -> Result<Worker, String> {
+        let (jobs, rx) = std::sync::mpsc::channel::<Job>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        std::thread::Builder::new()
+            .name("petros-mutator".into())
+            .stack_size(MUTATOR_STACK)
+            .spawn(move || {
+                let mut store = Store::new(&engine, HostState::default());
+                match instantiate(&engine, &module, &mut store) {
+                    Ok(instance) => {
+                        let _ = ready_tx.send(Ok(()));
+                        // Ends when the sender drops, which is when the module
+                        // is swapped or the process goes away.
+                        while let Ok(job) = rx.recv() {
+                            job(&mut store, &instance);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                    }
+                }
+            })
+            .map_err(|e| format!("could not start the mutator thread: {e}"))?;
+        ready_rx
+            .recv()
+            .map_err(|_| "the mutator thread died before it was ready".to_string())??;
+        Ok(Worker { jobs })
+    }
+
+    fn run<R: Send>(
+        &self,
+        conn: Option<&mut Connection>,
+        call: impl FnOnce(&mut Store<HostState>, &wasmi::Instance) -> Result<R, String> + Send,
+    ) -> Result<R, String> {
+        let borrowed = Borrowed(conn.map(|c| c as *mut Connection));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Boxed with a borrowed lifetime first, because that is what the
+        // closure honestly is.
+        let job: BorrowedJob<'_> = Box::new(move |store, instance| {
+            let borrowed = borrowed;
+            store.data_mut().conn = borrowed.0;
+            store.data_mut().failure = None;
+            let out = call(store, instance);
+            store.data_mut().conn = None;
+            // A host function that failed reports through the store rather
+            // than through the guest, which only knows it got no answer.
+            let out = match store.data_mut().failure.take() {
+                Some(e) => Err(e),
+                None => out,
+            };
+            let _ = tx.send(out);
+        });
+        // SAFETY: the job runs to completion before `rx.recv()` below returns,
+        // so nothing it borrows outlives this call. `'static` is what a channel
+        // demands and what the scoped thread used to provide structurally.
+        let job: Job = unsafe { std::mem::transmute::<BorrowedJob<'_>, Job>(job) };
+
+        self.jobs
+            .send(job)
+            .map_err(|_| "the mutator thread is gone".to_string())?;
+        rx.recv()
+            // A guest that traps is caught by wasmi and reported; a panic here
+            // is ours, and losing the thread is better than losing the process
+            // with a transaction open.
+            .map_err(|_| "the mutator thread panicked".to_string())?
+    }
+}
+
 impl std::fmt::Debug for Mutators {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Mutators")
@@ -94,19 +226,32 @@ impl Mutators {
         let engine = Engine::default();
         let module = Module::new(&engine, bytes).map_err(|e| format!("not a wasm module: {e}"))?;
         let names: Vec<&str> = module.exports().map(|e| e.name()).collect();
-        for required in ["petros_alloc", "petros_apply", "petros_fill_auto", "memory"] {
+        for required in [
+            "petros_alloc",
+            "petros_free",
+            "petros_apply",
+            "petros_fill_auto",
+            "memory",
+        ] {
             if !names.contains(&required) {
                 return Err(format!("the module does not export `{required}`"));
             }
         }
+        let module = Arc::new(module);
+        let worker = Worker::start(engine.clone(), module.clone())?;
         Ok(Mutators {
             engine,
-            module: Arc::new(module),
+            module,
+            worker: std::sync::Mutex::new(worker),
             generation: 1,
         })
     }
 
     /// Replace the module in place, keeping the generation counter moving.
+    ///
+    /// The old worker's thread ends when its sender drops with the old
+    /// `Mutators`, so a swap is also how the instance is rebuilt — which is
+    /// where the guest's memory is reclaimed wholesale if it ever needed to be.
     pub fn swap(&mut self, bytes: &[u8]) -> Result<(), String> {
         let next = Mutators::load(bytes)?;
         let generation = self.generation + 1;
@@ -115,11 +260,14 @@ impl Mutators {
         Ok(())
     }
 
-    /// Instantiate and call one exported function, on a stack of our own.
+    /// Call one exported function on the worker's stack and instance.
     ///
-    /// A fresh `Store` per call, because a `Store` owns the guest's linear
-    /// memory and one mutation must not see the leftovers of the last. It costs
-    /// a memory allocation, which is cheap next to the SQL underneath it.
+    /// Both are kept alive. It used to build a thread and an instance per call,
+    /// which was defensible when the guest leaked every buffer — a fresh
+    /// instance was how the leak was collected. The guest frees now, so the
+    /// instance can live, and on a phone that mattered: replaying forty pending
+    /// entries meant forty 64MB thread spawns and forty instantiations, and was
+    /// most of a 390ms tap.
     ///
     /// The thread is not optional. A host import runs *inside* wasmi's
     /// execution loop, so its frames sit on top of the interpreter's, and this
@@ -133,59 +281,11 @@ impl Mutators {
         conn: Option<&mut Connection>,
         call: impl FnOnce(&mut Store<HostState>, &wasmi::Instance) -> Result<R, String> + Send,
     ) -> Result<R, String> {
-        std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .name("petros-mutator".into())
-                .stack_size(MUTATOR_STACK)
-                .spawn_scoped(scope, || self.run_here(conn, call))
-                .map_err(|e| format!("could not start the mutator thread: {e}"))?
-                .join()
-                // A guest that traps is caught by wasmi and reported; a panic
-                // here is ours, and losing the thread is better than losing the
-                // process with a transaction open.
-                .map_err(|_| "the mutator thread panicked".to_string())?
-        })
-    }
-
-    fn run_here<R>(
-        &self,
-        conn: Option<&mut Connection>,
-        call: impl FnOnce(&mut Store<HostState>, &wasmi::Instance) -> Result<R, String>,
-    ) -> Result<R, String> {
-        let mut store = Store::new(
-            &self.engine,
-            HostState {
-                conn: conn.map(|c| c as *mut Connection),
-                memory: None,
-                alloc: None,
-                failure: None,
-                answer: Vec::new(),
-            },
-        );
-        let mut linker = Linker::new(&self.engine);
-        linker
-            .func_wrap("petros", "store", host_store)
-            .and_then(|l| l.func_wrap("petros", "take", host_take))
-            .map_err(|e| format!("could not define the host imports: {e}"))?;
-
-        let instance = linker
-            .instantiate_and_start(&mut store, &self.module)
-            .map_err(|e| format!("could not instantiate: {e}"))?;
-
-        let memory = instance
-            .get_memory(&store, "memory")
-            .ok_or("the module exports no memory")?;
-        let alloc = instance
-            .get_typed_func::<u32, u32>(&store, "petros_alloc")
-            .map_err(|e| format!("petros_alloc has the wrong shape: {e}"))?;
-        store.data_mut().memory = Some(memory);
-        store.data_mut().alloc = Some(alloc);
-
-        let out = call(&mut store, &instance)?;
-        match store.data_mut().failure.take() {
-            Some(e) => Err(e),
-            None => Ok(out),
-        }
+        let worker = self
+            .worker
+            .lock()
+            .map_err(|_| "the mutator worker was poisoned by an earlier panic".to_string())?;
+        worker.run(conn, call)
     }
 
     /// Hoist the non-deterministic arguments in, exactly once, at the
@@ -211,8 +311,24 @@ impl Mutators {
             let packed = f
                 .call(&mut *store, (p.0, p.1, u.0, now))
                 .map_err(|e| format!("petros_fill_auto trapped: {e}"))?;
-            read_packed(store, packed)
+            let out = read_packed(store, packed);
+            free_bytes(store, instance, p.0, p.1)?;
+            free_bytes(store, instance, u.0, u.1)?;
+            free_bytes(store, instance, (packed >> 32) as u32, packed as u32)?;
+            out
         })
+    }
+
+    /// How many pages of linear memory the guest is holding.
+    ///
+    /// For the test that keeps instance reuse honest: the guest frees what it
+    /// is given, so this must not climb with the number of calls.
+    pub fn memory_pages(&self) -> u32 {
+        self.run(None, |store, _| {
+            let memory = store.data().memory.ok_or("no memory yet")?;
+            Ok(memory.size(&*store) as u32)
+        })
+        .unwrap_or(0)
     }
 
     /// Apply one mutation, as the payload the log stores.
@@ -231,10 +347,13 @@ impl Mutators {
             let packed = f
                 .call(&mut *store, (p.0, p.1, a.0, a.1))
                 .map_err(|e| format!("petros_apply trapped: {e}"))?;
+            free_bytes(store, instance, p.0, p.1)?;
+            free_bytes(store, instance, a.0, a.1)?;
             if packed == 0 {
                 return Ok(Ok(()));
             }
             let reason = read_packed(store, packed)?;
+            free_bytes(store, instance, (packed >> 32) as u32, packed as u32)?;
             Ok(Err(String::from_utf8_lossy(&reason).into_owned()))
         })
     }
@@ -257,6 +376,27 @@ fn write_bytes(store: &mut Store<HostState>, bytes: &[u8]) -> Result<(u32, u32),
 }
 
 /// Read a `(ptr << 32) | len` pair out of guest memory.
+/// Give a buffer back to the guest.
+///
+/// Every `write_bytes` and every packed return has to be matched by one of
+/// these, or a reused instance grows without bound — which is what a fresh
+/// instance per call used to hide.
+fn free_bytes(
+    store: &mut Store<HostState>,
+    instance: &wasmi::Instance,
+    ptr: u32,
+    len: u32,
+) -> Result<(), String> {
+    if len == 0 {
+        return Ok(());
+    }
+    let f = instance
+        .get_typed_func::<(u32, u32), ()>(&*store, "petros_free")
+        .map_err(|e| format!("petros_free has the wrong shape: {e}"))?;
+    f.call(&mut *store, (ptr, len))
+        .map_err(|e| format!("petros_free trapped: {e}"))
+}
+
 fn read_packed(store: &mut Store<HostState>, packed: u64) -> Result<Vec<u8>, String> {
     let ptr = (packed >> 32) as usize;
     let len = (packed & 0xffff_ffff) as usize;
