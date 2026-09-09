@@ -30,9 +30,13 @@ cbor = ["dep:ciborium"]
 # nothing else: a domain compiled to wasm decodes payloads and never writes one,
 # and `serde_json` has no business in a module Metro pushes on every save.
 author = ["cbor", "dep:serde_json", "dep:uuid"]
+# `row!` generates its `foreign` module behind this, so the feature has to exist
+# in the crate that calls the macro — the cfg is evaluated where it expands, not
+# here. Declared in this crate too so its own doctest can turn it on.
+foreign = []
 
 [dev-dependencies]
-# For `ffi_row!`'s doctest. The macro emits a `uniffi::Record` derive and
+# For `row!`'s doctest. The macro emits a `uniffi::Record` derive and
 # nothing else of uniffi's, so a caller that is not building an FFI never sees
 # it — but a macro whose only test is "it compiled once" is not tested.
 uniffi = "0.31"
