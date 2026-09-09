@@ -17,6 +17,9 @@ ws = ["dep:tungstenite", "dep:wasm-bindgen", "dep:web-sys"]
 # dynamic half over SQLite.
 petros-macros.workspace = true
 petros-schema.workspace = true
+# The view layer. A dev-dependency cycle again — it tests against this crate —
+# and re-exported as `petros::ivm` so an app needs one dependency line, not two.
+petros-ivm.workspace = true
 ciborium.workspace = true
 diesel.workspace = true
 rand.workspace = true
@@ -58,9 +61,16 @@ web-sys = { version = "0.3", optional = true, features = [
 [dev-dependencies]
 petros-macros.workspace = true
 petros-schema.workspace = true
+# The view layer. A dev-dependency cycle again — it tests against this crate —
+# and re-exported as `petros::ivm` so an app needs one dependency line, not two.
+petros-ivm.workspace = true
 # The simulated network. A dev-dependency cycle — it depends on this crate —
 # which cargo resolves without complaint and which is the only honest shape:
 # the testkit is for apps, and the engine is just another user of it.
 petros-testkit.workspace = true
+# The example app, because it writes through the store — which is what makes a
+# change reportable at all. The hand-rolled fixture in `tests/common` writes
+# with diesel to demonstrate the low-level API, and reports nothing by design.
+todo = { workspace = true, features = ["storage"] }
 proptest = "1"
 tempfile = "3"

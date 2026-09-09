@@ -16,6 +16,10 @@ use crate::{ActorId, AutoCtx, MutationError, Result};
 /// the optimistic rebase possible.
 pub struct Transaction<'a> {
     conn: &'a mut Connection,
+    /// What the rows did, for anything maintained from changes rather than
+    /// re-read. Collected here because a mutation's store is created and
+    /// dropped inside `apply`, and the client outlives it.
+    changes: Vec<petros_schema::Change>,
 }
 
 impl std::fmt::Debug for Transaction<'_> {
@@ -26,7 +30,20 @@ impl std::fmt::Debug for Transaction<'_> {
 
 impl<'a> Transaction<'a> {
     pub(crate) fn new(conn: &'a mut Connection) -> Self {
-        Transaction { conn }
+        Transaction {
+            conn,
+            changes: Vec::new(),
+        }
+    }
+
+    /// Report what a store did. Called by the `apply` an app generates, once
+    /// per mutation, with what the store recorded.
+    pub fn record(&mut self, changes: Vec<petros_schema::Change>) {
+        self.changes.extend(changes);
+    }
+
+    pub(crate) fn take_recorded(&mut self) -> Vec<petros_schema::Change> {
+        std::mem::take(&mut self.changes)
     }
 
     /// The underlying connection. Diesel needs `&mut` for every query, hence

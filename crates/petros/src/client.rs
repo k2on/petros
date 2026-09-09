@@ -20,6 +20,25 @@ pub struct Rejection {
     pub reason: String,
 }
 
+/// What the rows have done, for a caller maintaining a view.
+///
+/// Not simply a list, because a rebase does not produce one. Replaying pending
+/// mutations begins by rolling the optimistic view back — `ROLLBACK TO pending`
+/// — and a rollback undoes rows without reporting a thing. Every change already
+/// handed out since that savepoint opened is void, and no forward sequence gets
+/// a view from where it thinks it is to where the database now is.
+///
+/// So that case is named instead of papered over. It costs a re-hydrate, which
+/// is one query, and it happens when the server speaks while something is
+/// pending — not on the local taps that have to be fast.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Changes {
+    /// Rows changed, in the order they changed.
+    Applied(Vec<petros_schema::Change>),
+    /// State was rolled back and rebuilt. Hydrate again.
+    Rebuilt,
+}
+
 /// The client half of the sync engine.
 ///
 /// The view it presents is always
@@ -51,6 +70,10 @@ pub struct Client<A: App> {
     /// optimistic transaction on `conn`, which is what keeps a tap flat.
     intents: Connection,
     savepoint_open: bool,
+    /// What the rows have done since the caller last asked.
+    changes: Vec<petros_schema::Change>,
+    /// Whether a rollback made those changes meaningless. See [`Changes`].
+    rebuilt: bool,
     out: Vec<ClientMsg<A::Mutation>>,
     rejections: Vec<Rejection>,
     /// `fn() -> A` rather than `A`: the marker should not drag the app's
@@ -95,6 +118,8 @@ impl<A: App> Client<A> {
             auto,
             cursor,
             savepoint_open: false,
+            changes: Vec::new(),
+            rebuilt: false,
             out: Vec::new(),
             rejections: Vec::new(),
             _app: PhantomData,
@@ -122,6 +147,19 @@ impl<A: App> Client<A> {
     ///
     /// A query is generic over `Store` so it can run inside the sandbox as well
     /// as here; this saves every call site wrapping the connection itself.
+    /// What the rows have done since you last asked.
+    ///
+    /// For a caller maintaining a view rather than re-reading: hand
+    /// [`Changes::Applied`] to it, and re-hydrate on [`Changes::Rebuilt`].
+    pub fn take_changes(&mut self) -> Changes {
+        if self.rebuilt {
+            self.rebuilt = false;
+            self.changes.clear();
+            return Changes::Rebuilt;
+        }
+        Changes::Applied(std::mem::take(&mut self.changes))
+    }
+
     pub fn store(&mut self) -> crate::backend::SqliteStore<'_> {
         crate::backend::SqliteStore::new(&mut self.conn)
     }
@@ -258,10 +296,12 @@ impl<A: App> Client<A> {
             let entries: Vec<Entry<A::Mutation>> =
                 store::entries_after(&mut self.conn, self.cursor, count)?;
             self.conn.batch_execute("BEGIN")?;
-            match apply_confirmed(&mut self.conn, &entries, next) {
+            let mut applied = Vec::new();
+            match apply_confirmed(&mut self.conn, &entries, next, &mut applied) {
                 Ok(()) => {
                     self.conn.batch_execute("COMMIT")?;
                     self.cursor = next;
+                    self.changes.extend(applied);
                 }
                 Err(e) => {
                     self.conn.batch_execute("ROLLBACK")?;
@@ -312,11 +352,16 @@ impl<A: App> Client<A> {
         // Its own savepoint, so a refusal undoes this mutation and leaves every
         // earlier pending one where it was.
         self.conn.batch_execute("SAVEPOINT one")?;
-        match entry
-            .mutation
-            .apply(&mut Transaction::new(&mut self.conn), &entry.actor)
-        {
-            Ok(()) => self.conn.batch_execute("RELEASE one")?,
+        let (outcome, changes) = {
+            let mut tx = Transaction::new(&mut self.conn);
+            let outcome = entry.mutation.apply(&mut tx, &entry.actor);
+            (outcome, tx.take_recorded())
+        };
+        match outcome {
+            Ok(()) => {
+                self.conn.batch_execute("RELEASE one")?;
+                self.changes.extend(changes);
+            }
             Err(rejected) => {
                 self.conn.batch_execute("ROLLBACK TO one; RELEASE one;")?;
                 return Err(rejected.into());
@@ -350,6 +395,11 @@ impl<A: App> Client<A> {
             self.conn
                 .batch_execute("ROLLBACK TO pending; RELEASE pending; COMMIT;")?;
             self.savepoint_open = false;
+            // Every change reported since the savepoint opened has just been
+            // undone, and a rollback reports nothing of its own. There is no
+            // forward sequence that gets a view from where it thinks it is to
+            // where the database now is, so say so rather than lie.
+            self.rebuilt = true;
         }
         Ok(())
     }
@@ -395,14 +445,16 @@ fn apply_confirmed<M: Mutation>(
     conn: &mut Connection,
     entries: &[Entry<M>],
     next: Seq,
+    changes: &mut Vec<petros_schema::Change>,
 ) -> Result<()> {
     for entry in entries {
         // A confirmed entry that will not apply means this client and the
         // server disagree about what the same arguments mean — a determinism
         // bug. Fail loudly rather than diverge quietly.
-        entry
-            .mutation
-            .apply(&mut Transaction::new(conn), &entry.actor)?;
+        let mut tx = Transaction::new(conn);
+        let outcome = entry.mutation.apply(&mut tx, &entry.actor);
+        changes.extend(tx.take_recorded());
+        outcome?;
     }
     store::set_cursor(conn, next)
 }

@@ -68,10 +68,15 @@ mod foreign;
 pub mod transport;
 
 pub use auto::AutoCtx;
-pub use client::{Client, Rejection};
+pub use client::{Changes, Client, Rejection};
+
 pub use error::{Error, MutationError, Result};
 pub use id::Id;
 pub use mutation::{App, Mutation, Transaction};
+/// Incrementally maintained views: a query that stays right without being run
+/// again. Re-exported so an app declares one dependency rather than two, and
+/// so the version it gets is the one this engine was built against.
+pub use petros_ivm as ivm;
 pub use proto::{decode, encode, ActorId, ClientMsg, Entry, Seq, ServerMsg};
 pub use server::{ConnId, Server};
 
@@ -193,12 +198,21 @@ macro_rules! app {
                 tx: &mut $crate::Transaction,
                 actor: &$crate::ActorId,
             ) -> ::core::result::Result<(), $crate::MutationError> {
-                $apply(
-                    &mut $crate::backend::SqliteStore::new(tx.conn()),
-                    &self.0,
-                    actor.as_str(),
-                )
-                .map_err($crate::MutationError::rejected)
+                // The store is scoped so that its borrow of the connection
+                // ends before the changes are handed to the transaction. They
+                // are reported whether the mutation was accepted or refused —
+                // a refused one is rolled back by the caller, and a change it
+                // recorded on the way is not a change that happened.
+                let (outcome, changes) = {
+                    let mut store = $crate::backend::SqliteStore::new(tx.conn());
+                    let outcome = $apply(&mut store, &self.0, actor.as_str());
+                    let changes = $crate::petros_schema::Store::take_changes(&mut store);
+                    (outcome, changes)
+                };
+                if outcome.is_ok() {
+                    tx.record(changes);
+                }
+                outcome.map_err($crate::MutationError::rejected)
             }
         }
 
