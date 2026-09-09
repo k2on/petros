@@ -1,6 +1,6 @@
 //! The two builds of one `apply` have to agree.
 //!
-//! `crates/todo` holds the domain. The server and the terminal peers link it
+//! `examples/todo` holds the domain. The server and the terminal peers link it
 //! and call it; the phone loads it compiled to wasm so a new mutation reaches
 //! it over Metro without a native build. That is two builds of one source,
 //! which is not two implementations — but "not two implementations" is a claim,
@@ -18,8 +18,7 @@ use petros_wasm_host::Mutators;
 /// The module under test, read straight from where `just mutators` puts it.
 /// A test fixture rather than part of the crate: `petros-wasm-host` runs
 /// modules and has no idea which one you mean.
-const MODULE: &[u8] =
-    include_bytes!("../../../target/wasm32-unknown-unknown/mutators/todo_wasm.wasm");
+const MODULE: &[u8] = include_bytes!("../../../target/wasm32-unknown-unknown/mutators/todo.wasm");
 
 #[derive(QueryableByName, Debug, PartialEq)]
 struct Row {

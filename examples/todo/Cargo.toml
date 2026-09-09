@@ -14,11 +14,20 @@ default = ["storage"]
 # `petros-schema/author` belongs here and not on the dependency line:
 # features are unified per target, so asking for it there would put
 # serde_json and uuid in the wasm module even though `default-features =
-# false` turns this whole feature off. Checked with `cargo tree -p todo-wasm`.
+# false` turns this whole feature off. Checked with:
+#   cargo tree -p todo --no-default-features -e normal --target wasm32-unknown-unknown
 storage = ["dep:diesel", "dep:petros", "dep:serde", "dep:serde_json", "petros-schema/author"]
 # A transport, for the example peers. The domain itself has no opinion about
 # sockets and neither does the engine; only a program that runs does.
 ws = ["storage", "petros/ws"]
+# The terminal peers. Off for a browser build, which has no terminal.
+tui = ["storage"]
+
+[lib]
+# `cdylib` for the module the browser peer loads. As a dependency other crates
+# take the rlib, so the extra link is only done when this package is built
+# directly.
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 ciborium.workspace = true
@@ -31,11 +40,16 @@ serde_json = { workspace = true, optional = true }
 
 # The demo peers. They live with the domain rather than with the engine: they
 # are programs that use an app, and `petros` has no idea what a to-do is.
-[dev-dependencies]
-crossterm = "0.28"
-ratatui = "0.29"
+# Only the wasm build has an ABI to export, and only it should pay for the guest.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+petros-wasm-guest.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The terminal peers, and a browser has no terminal. Target-gated rather than
+# plain dev-dependencies because `cargo build --target wasm32` builds the whole
+# dev graph, and crossterm does not compile for it.
+crossterm = "0.28"
+ratatui = "0.29"
 # `smol` gives iced a timer to drive the example's transport pump. In a browser
 # it already has one.
 iced = { workspace = true, features = ["smol"] }
@@ -44,18 +58,24 @@ iced = { workspace = true, features = ["smol"] }
 # reports "unreachable executed".
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 console_error_panic_hook = "0.1"
+# The query string, so two browser tabs can be two peers. Declared rather than
+# leaned on transitively: iced pulls web-sys but that is not a promise.
+web-sys = { version = "0.3", features = ["Window", "Location"] }
 # WebGL rather than WebGPU, for reach. Without it wgpu finds no backend, iced
 # falls back to its software renderer, and that cannot have the canvas because
 # WebGL already claimed it — which surfaces as a blank page and a panic about
 # canvas contexts.
 iced = { workspace = true, features = ["webgl"] }
 
+# The terminal peers only exist where there is a terminal. Without this, a wasm
+# build tries to compile them.
 [[example]]
 name = "offline"
+required-features = ["tui"]
 
 [[example]]
 name = "multiplayer"
-required-features = ["ws"]
+required-features = ["ws", "tui"]
 
 [[example]]
 name = "iced"

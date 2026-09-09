@@ -346,6 +346,9 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
         #[cfg(target_arch = "wasm32")]
         #[link_section = "petros_schema"]
         #[used]
+        // Named after the function so two of them cannot collide, which means
+        // it cannot also be SHOUTING_CASE.
+        #[allow(non_upper_case_globals)]
         static #section_ident: [u8; #line_len] =
             ::petros_schema::section_bytes(#name::LINE);
     })

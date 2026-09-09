@@ -16,8 +16,7 @@ use petros_wasm_host::Mutators;
 /// The module under test, read straight from where `just mutators` puts it.
 /// A test fixture rather than part of the crate: `petros-wasm-host` runs
 /// modules and has no idea which one you mean.
-const MODULE: &[u8] =
-    include_bytes!("../../../target/wasm32-unknown-unknown/mutators/todo_wasm.wasm");
+const MODULE: &[u8] = include_bytes!("../../../target/wasm32-unknown-unknown/mutators/todo.wasm");
 
 #[derive(QueryableByName, Debug)]
 struct Row {

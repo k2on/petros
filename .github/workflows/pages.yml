@@ -1,0 +1,64 @@
+# The browser peer, published to GitHub Pages.
+#
+# It is the iced client from `examples/todo`, compiled to wasm — the same source
+# the desktop peer runs, which is the point worth demonstrating: a sync engine
+# whose client is sans-io does not need a different implementation to run in a
+# browser, only a different transport and a different place to put the database.
+#
+# Nix does the same job here it does locally. The Rust toolchain, the wasm target
+# and `wasm-bindgen` all come out of `flake.nix` and the lockfile, so what is
+# published is built the way a contributor builds it.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "examples/todo/**"
+      - "flake.*"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# One deployment at a time, and let a run in progress finish: cancelling a
+# half-done deploy is how a site ends up serving nothing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build the browser peer
+        run: nix develop --command just web-build
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: examples/todo/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

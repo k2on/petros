@@ -1,7 +1,7 @@
 # petros
 
 A general-purpose, offline-first sync engine that knows nothing about your
-domain. `crates/todo` is the worked example it is exercised with — a to-do list,
+domain. `examples/todo` is the worked example it is exercised with — a to-do list,
 compiled both natively and to wasm, which is what lets `conformance.rs` prove
 those two builds agree.
 
@@ -56,8 +56,11 @@ crates/petros-wasm-host/     wasmi, for a peer that replaces `apply` at runtime.
 crates/petros-codegen/       reads a module's schema section, writes TypeScript
 crates/petros-axum/          one handler; the app keeps its routes and its auth
 crates/petros-testkit/       the seeded in-process network, generic over an app
-crates/todo/                 the worked example: domain.rs, storage.rs, examples
-crates/todo-wasm/            the same domain as wasm — one `export!`
+examples/todo/               the worked example
+  schema.sql, src/schema.rs  the model
+  src/functions.rs           every mutation and query, each written once
+  examples/                  offline and multiplayer (TUI), iced (native + web)
+  web/                       the browser shell, published to GitHub Pages
 docs/decisions.md            why everything is the way it is — read this first
 ```
 
@@ -67,6 +70,7 @@ docs/decisions.md            why everything is the way it is — read this first
 just              # fmt, lint, test
 just test         # must stay under 30s
 just mutators     # rebuild the wasm module and its TypeScript types
+just web          # the browser peer, at localhost:8080
 just offline      # a client with no server in existence
 just serve        # one server…
 just peer alice   # …a TUI peer…

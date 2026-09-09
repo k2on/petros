@@ -31,7 +31,7 @@ fn main() -> std::io::Result<()> {
     let encoded = base64(&bytes);
 
     let body = format!(
-        "// Generated from crates/todo-wasm by `just mutators`. Do not edit.\n\
+        "// Generated from the domain module by `just mutators`. Do not edit.\n\
          //\n\
          // The domain — every mutation and every query — as a wasm module Metro can\n\
          // hot-reload. Editing the Rust rewrites this file, Metro pushes it, and the\n\

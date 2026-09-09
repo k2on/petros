@@ -1,11 +1,11 @@
 //! The worked example: a to-do list, in two files.
 //!
-//! [`storage`] is the model — what a row is, and what the tables are.
+//! [`schema`] is the model — what a row is, and what the tables are.
 //! [`functions`] is every mutation and every query, each written once as an
 //! ordinary Rust function. Everything else on this page is generated from them.
 //!
-//! The server and the linked peers call these directly. `crates/todo-wasm`
-//! compiles the same functions to wasm, so `petros-wasm-host`'s conformance
+//! The server and the linked peers call these directly. The same functions
+//! compile to wasm, so `petros-wasm-host`'s conformance
 //! test can drive every verb through both builds and compare the rows.
 //!
 //! The `storage` feature is what the wasm build turns off. It has no SQLite of
@@ -13,16 +13,24 @@
 //! the rest.
 
 pub mod functions;
+/// The model. Only where there is a database: the sandbox applies mutations and
+/// never reads a row back.
 #[cfg(feature = "storage")]
-pub mod storage;
+pub mod schema;
 
 pub use functions::*;
 #[cfg(feature = "storage")]
-pub use storage::*;
+pub use schema::*;
+
+// The module the browser peer loads. Only on wasm, and it is the whole of what
+// a separate `todo-wasm` crate used to be: what keeps SQLite and the engine out is
+// `--no-default-features`, a flag on the build rather than a package.
+#[cfg(target_arch = "wasm32")]
+petros_wasm_guest::export!(functions);
 
 #[cfg(feature = "storage")]
 petros::app!(TodoApp {
-    schema: crate::storage::SCHEMA,
+    schema: crate::schema::SCHEMA,
     apply: crate::functions::apply,
     fill_auto: crate::functions::fill_auto,
 });

@@ -397,7 +397,7 @@ the user touching anything.
 `examples/shared/todo.rs` was a file three examples included with `#[path]`.
 That worked while every caller was an example in the same crate. It stopped
 working the moment the Expo client needed the same mutations, because an
-example cannot be depended on. So the to-do domain is `crates/todo`: the same
+example cannot be depended on. So the to-do domain is `examples/todo`: the same
 code, in a place `crates/ffi` can reach. `crates/petros` takes it as a
 dev-dependency, which is a cycle — `todo` depends on `petros` — and one cargo
 resolves without complaint.

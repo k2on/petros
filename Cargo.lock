@@ -4162,17 +4162,11 @@ dependencies = [
  "petros",
  "petros-schema",
  "petros-sql",
+ "petros-wasm-guest",
  "ratatui",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "todo-wasm"
-version = "0.1.0"
-dependencies = [
- "petros-wasm-guest",
- "todo",
+ "web-sys",
 ]
 
 [[package]]

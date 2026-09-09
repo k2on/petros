@@ -1,8 +1,8 @@
 /target
 result
 result-*
-crates/todo/examples/web/pkg
+examples/todo/web/pkg
 
 # Generated from crates/todo-wasm by `just mutators`.
-crates/todo/mutators.gen.ts
+examples/todo/mutators.gen.ts
 .direnv

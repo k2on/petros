@@ -13,7 +13,7 @@
 use petros_schema::prelude::*;
 
 #[cfg(feature = "storage")]
-use crate::storage::Item;
+use crate::schema::Item;
 
 // ------------------------------------------------------------------ mutations
 
@@ -90,7 +90,7 @@ pub fn list(db: &mut Db) -> Result<Vec<Item>> {
     )
     .into_iter()
     .map(|r| Item {
-        id: crate::storage::id_of(&r.id),
+        id: crate::schema::id_of(&r.id),
         text: r.text,
         done: r.done,
         pos: r.pos,

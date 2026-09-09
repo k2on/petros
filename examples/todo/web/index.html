@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>petros · to-do</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #fff; font-family: system-ui, sans-serif; }
+      /* iced appends its canvas to <body> and sizes it to 100%. */
+      canvas { display: block; }
+      #boot { padding: 24px; color: #555; }
+      #note {
+        position: fixed; bottom: 0; left: 0; right: 0; margin: 0;
+        padding: 8px 14px; font-size: 12px; line-height: 1.5;
+        color: #555; background: #f6f6f6; border-top: 1px solid #e3e3e3;
+      }
+      #note a { color: #36c; }
+      #note code { background: #ececec; padding: 1px 4px; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <p id="boot">loading petros…</p>
+    <script type="module">
+      import init from "./pkg/iced.js";
+      // The wasm module's `start` runs the app; drop the placeholder once it has.
+      await init();
+      document.getElementById("boot")?.remove();
+    </script>
+    <!--
+      No server here, and it is worth saying rather than letting the status line
+      say "cannot reach 127.0.0.1:8787" and look broken.
+
+      Two things are true of this page and not of a desktop peer. The database is
+      in memory — `sqlite-wasm-rs` registers a memory VFS and the example does not
+      ask for OPFS — so a reload starts over. And a page served over https cannot
+      open a `ws://` socket, so pointing this at a local server needs `wss://` or
+      a server on the same origin.
+
+      What it does show is the whole engine running in a browser: mutations apply
+      optimistically against real SQLite compiled to wasm, `pos` is recomputed by
+      replay, and a refusal comes back from the same `apply` every other peer runs.
+    -->
+    <p id="note">
+      A single peer, with no server and an in-memory database — a reload starts
+      over. What is running is the whole engine: real SQLite compiled to wasm,
+      and the same <code>apply</code> the server and the phone use.
+      <a href="https://github.com/k2on/petros">Source</a>.
+    </p>
+  </body>
+</html>

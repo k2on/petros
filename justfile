@@ -77,7 +77,7 @@ web-build:
         fi
     fi
 
-    mkdir -p target/wasm-sqlite-stub crates/todo/examples/web/pkg
+    mkdir -p target/wasm-sqlite-stub examples/todo/web/pkg
     printf '!<arch>\n' > target/wasm-sqlite-stub/libsqlite3.a
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
     CC_wasm32_unknown_unknown="$cc" \
@@ -87,17 +87,17 @@ web-build:
         cargo build -p todo --features ws --example iced \
             --target wasm32-unknown-unknown --release
     "$bindgen" --target web --no-typescript \
-        --out-dir crates/todo/examples/web/pkg \
+        --out-dir examples/todo/web/pkg \
         target/wasm32-unknown-unknown/release/examples/iced.wasm
 
 # Build it and serve it at http://localhost:8080
 web: web-build
     @echo "serving on http://localhost:8080"
-    cd crates/todo/examples/web && python3 -m http.server 8080
+    cd examples/todo/web && python3 -m http.server 8080
 
 # ------------------------------------------------------------- the wasm module
 #
-# `crates/todo` is compiled to wasm as well as linked, so the same `apply` can
+# `examples/todo` is compiled to wasm as well as linked, so the same `apply` can
 # be checked both ways. `tests/conformance.rs` is what makes that a claim rather
 # than a hope.
 
@@ -105,7 +105,8 @@ web: web-build
 # come out of it. The `.ts` has no consumer in this repository — an app is what
 # consumes it — but generating it here is what keeps petros-codegen honest.
 mutators:
-    cargo build -p todo-wasm --target wasm32-unknown-unknown --profile mutators
+    cargo build -p todo --no-default-features \
+        --target wasm32-unknown-unknown --profile mutators
     cargo run -q -p petros-codegen -- \
-        target/wasm32-unknown-unknown/mutators/todo_wasm.wasm \
-        crates/todo/mutators.gen.ts
+        target/wasm32-unknown-unknown/mutators/todo.wasm \
+        examples/todo/mutators.gen.ts
