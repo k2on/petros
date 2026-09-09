@@ -35,6 +35,7 @@ fn note(id: u8, song: u8, text: &str) -> Note {
         id: vec![id; 16],
         song_id: vec![song; 16],
         text: text.into(),
+        tag: None,
     }
 }
 

@@ -275,6 +275,7 @@ fn note(id: u8, song: u8, text: &str) -> Note {
         id: vec![id; 16],
         song_id: vec![song; 16],
         text: text.into(),
+        tag: None,
     }
 }
 
@@ -396,4 +397,61 @@ fn a_write_a_foreign_key_refuses_says_so() {
     store.put(&song(9, "Sundial", 1)).unwrap();
     store.put(&heart(9, 1)).unwrap();
     assert_eq!(store.select(Favorite::all()).len(), 1);
+}
+
+/// A filter over a nullable column has to mean the same thing on both paths.
+///
+/// The source compiles the filter to SQL, so a hydrate goes through SQLite; the
+/// filter operator evaluates the same `Node` in Rust, so a push does not. If
+/// they disagree about `NULL` the view drifts from the database the moment
+/// anything is written, and only under exactly the rows that hold a `NULL`.
+#[test]
+fn a_null_filter_agrees_between_sql_and_rust() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&note(1, 1, "untagged")).unwrap();
+    store.take_changes();
+
+    let query = || {
+        Note::all()
+            .filter(Note::tag.eq(None))
+            .order_by(Note::id.asc())
+    };
+    let mut view = View::<Note>::new(query());
+    view.hydrate(&mut store);
+    assert_eq!(view.len(), 1, "SQL found the untagged note");
+
+    // Pushed, not pulled: a second untagged note has to be admitted by the
+    // filter operator on the same terms.
+    store.put(&note(2, 1, "also untagged")).unwrap();
+    let changes = store.take_changes();
+    view.apply(&mut store, &changes);
+    assert_eq!(view.rows().len(), store.select(query()).len());
+    assert_eq!(view.len(), 2);
+
+    // And a tagged one is refused by both.
+    let mut tagged = note(3, 1, "tagged");
+    tagged.tag = Some("live".into());
+    store.put(&tagged).unwrap();
+    let changes = store.take_changes();
+    view.apply(&mut store, &changes);
+    assert_eq!(view.len(), 2, "the tagged note is not in this view");
+    assert_eq!(view.rows().len(), store.select(query()).len());
+
+    // Giving a note a tag takes it out; taking the tag away puts it back.
+    let mut edited = store.get::<Note>(&Note::key_of(&vec![1u8; 16])).unwrap();
+    edited.tag = Some("demo".into());
+    store.put(&edited).unwrap();
+    let changes = store.take_changes();
+    view.apply(&mut store, &changes);
+    assert_eq!(view.len(), 1);
+    assert_eq!(view.rows().len(), store.select(query()).len());
+
+    edited.tag = None;
+    store.put(&edited).unwrap();
+    let changes = store.take_changes();
+    view.apply(&mut store, &changes);
+    assert_eq!(view.len(), 2);
+    assert_eq!(view.rows().len(), store.select(query()).len());
 }

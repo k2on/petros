@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS other (
 -- this shape can tell them apart.
 CREATE TABLE IF NOT EXISTS note (
     id BLOB NOT NULL, song_id BLOB NOT NULL REFERENCES song(id),
-    text TEXT NOT NULL, PRIMARY KEY (id));
+    text TEXT NOT NULL,
+    -- Nullable, so that a filter over a NULL is exercised on both paths: the
+    -- source compiles it to SQL and the filter operator evaluates it in Rust.
+    tag TEXT, PRIMARY KEY (id));
 -- A third level, so nesting is tested rather than asserted: a song has notes
 -- and a note has authors. `Song::note` then `Note::author`.
 CREATE TABLE IF NOT EXISTS author (

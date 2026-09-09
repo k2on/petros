@@ -113,6 +113,31 @@ impl<T: Bind + ?Sized> Bind for &T {
     }
 }
 
+/// A nullable column.
+///
+/// `None` is `NULL` and `NULL` is `None`, in both directions, which is what a
+/// `NOT NULL`-less column in `schema.sql` generates. Without this the generated
+/// field is `i64`, a `NULL` fails to decode, and `from_row` returns nothing —
+/// so the row does not appear in the answer at all. A silently missing row is
+/// the worst shape a bug can take here.
+impl<T: Cell> Cell for Option<T> {
+    fn from_value(v: &Value) -> Option<Self> {
+        match v {
+            Value::Null => Some(None),
+            other => T::from_value(other).map(Some),
+        }
+    }
+}
+
+impl<T: Bind> Bind for Option<T> {
+    fn to_value(&self) -> Value {
+        match self {
+            Some(v) => v.to_value(),
+            None => Value::Null,
+        }
+    }
+}
+
 impl Cell for i64 {
     fn from_value(v: &Value) -> Option<Self> {
         v.as_int()

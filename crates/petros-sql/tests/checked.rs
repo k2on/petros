@@ -259,3 +259,66 @@ fn the_related_side_is_a_query() {
     assert_eq!(rows[0].one().unwrap().pos, 5);
     assert!(rows[1].related.is_empty());
 }
+
+/// A column without `NOT NULL` generates an `Option`, and a `NULL` survives the
+/// round trip.
+///
+/// It used to generate `String`. A `NULL` then failed to decode, `from_row`
+/// returned nothing, and the row simply was not in the answer — no error, no
+/// log line, just a missing song.
+#[test]
+fn a_nullable_column_holds_a_null() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store
+        .put(&Sleeve {
+            song_id: vec![1; 16],
+            notes: None,
+            year: Some(2017),
+        })
+        .unwrap();
+
+    let back = store.select(Sleeve::all());
+    assert_eq!(back.len(), 1, "the row is in the answer");
+    assert_eq!(back[0].notes, None);
+    assert_eq!(back[0].year, Some(2017));
+
+    let mut filled = back[0].clone();
+    filled.notes = Some("a sleeve note".into());
+    store.put(&filled).unwrap();
+    assert_eq!(
+        store.select(Sleeve::all())[0].notes,
+        Some("a sleeve note".to_string())
+    );
+}
+
+/// `eq(None)` means `IS NULL`, because `= NULL` is unknown in SQL and matches
+/// nothing — which is neither what the caller wrote nor what the same filter
+/// does when it is evaluated in Rust against a row.
+#[test]
+fn a_filter_can_ask_for_null() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    for i in 1..=3u8 {
+        store.put(&song(i, &format!("song {i}"), i as i64)).unwrap();
+        store
+            .put(&Sleeve {
+                song_id: vec![i; 16],
+                notes: if i == 2 {
+                    Some("only this one".into())
+                } else {
+                    None
+                },
+                year: None,
+            })
+            .unwrap();
+    }
+
+    let missing = store.select(Sleeve::all().filter(Sleeve::notes.eq(None)));
+    assert_eq!(missing.len(), 2, "two sleeves have no notes");
+
+    let present = store.select(Sleeve::all().filter(Sleeve::notes.ne(None)));
+    assert_eq!(present.len(), 1);
+    assert_eq!(present[0].notes, Some("only this one".to_string()));
+}

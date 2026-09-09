@@ -263,6 +263,22 @@ impl petros_schema::Store for SqliteStore<'_> {
 /// they come from `schema.sql`.
 fn condition(q: &mut Sql, node: &Node) {
     match node {
+        // `x = NULL` is unknown in SQL and never matches, which is not what
+        // `Column::eq(None)` reads as and not what the same filter does when it
+        // is evaluated in Rust against a row. `IS` is the operator that means
+        // what the caller wrote, and it makes the pushed and pulled paths agree
+        // — which is the whole reason a filter is one `Node` read two ways.
+        Node::Cmp {
+            column,
+            op: op @ (Op::Eq | Op::Ne),
+            value: Value::Null,
+        } => {
+            q.sql(&format!(
+                "{} IS {}NULL",
+                ident(column),
+                if matches!(op, Op::Ne) { "NOT " } else { "" }
+            ));
+        }
         Node::Cmp { column, op, value } => {
             q.sql(&format!(
                 "{} {} ",

@@ -8,3 +8,8 @@ CREATE TABLE IF NOT EXISTS song (
 CREATE TABLE IF NOT EXISTS favorite (
     song_id BLOB NOT NULL REFERENCES song(id), pos BIGINT NOT NULL,
     favorited_ms BIGINT NOT NULL, actor TEXT NOT NULL, PRIMARY KEY (song_id));
+-- A nullable column, because they are ordinary and used to generate a type that
+-- could not hold a NULL. `notes` is absent for most songs.
+CREATE TABLE IF NOT EXISTS sleeve (
+    song_id BLOB NOT NULL REFERENCES song(id), notes TEXT, year BIGINT,
+    PRIMARY KEY (song_id));

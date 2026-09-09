@@ -159,9 +159,10 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
             let rows = stmt
                 .query_map([], |r| {
                     Ok((
-                        r.get::<_, String>(1)?, // name
-                        r.get::<_, String>(2)?, // declared type
-                        r.get::<_, i64>(5)?,    // pk position, 0 for not-a-key
+                        r.get::<_, String>(1)?,   // name
+                        r.get::<_, String>(2)?,   // declared type
+                        r.get::<_, i64>(5)?,      // pk position, 0 for not-a-key
+                        r.get::<_, i64>(3)? == 0, // nullable
                     ))
                 })
                 .map_err(|e| e.to_string())?;
@@ -241,10 +242,10 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
         let mut kinds = Vec::new();
         let mut key_names = Vec::new();
         let mut key_tys = Vec::new();
-        for (name, decl, pk) in &columns {
+        for (name, decl, pk, null) in &columns {
             let ident = format_ident!("{}", name);
             let kind = column_kind(decl)?;
-            let rust = kind.rust();
+            let rust = optional(kind.rust(), *null);
             fields.push(quote! { pub #ident: #rust });
             names.push(name.clone());
             kinds.push(kind.token());
@@ -262,10 +263,13 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
         let idents: Vec<Ident> = names.iter().map(|n| format_ident!("{}", n)).collect();
         let column_consts: Vec<proc_macro2::TokenStream> = columns
             .iter()
-            .map(|(name, decl, _)| {
+            .map(|(name, decl, _, null)| {
                 let ident = format_ident!("{}", name);
                 let kind = column_kind(decl).expect("checked above");
-                let rust = kind.rust();
+                // The constant's value type follows the column's: comparing a
+                // nullable column against a bare value would not compile, and
+                // `Column::eq(None)` is how a caller asks for `IS NULL`.
+                let rust = optional(kind.rust(), *null);
                 let token = kind.token();
                 quote! {
                     #[allow(non_upper_case_globals)]
@@ -399,6 +403,17 @@ fn column_kind(decl: &str) -> Result<Kind, String> {
             ))
         }
     })
+}
+
+/// A nullable column is an `Option`, because a `NULL` has to have somewhere to
+/// go. Without this the field is `i64`, the `NULL` fails to decode, and the row
+/// silently does not appear in the answer.
+fn optional(ty: proc_macro2::TokenStream, null: bool) -> proc_macro2::TokenStream {
+    if null {
+        quote!(::core::option::Option<#ty>)
+    } else {
+        ty
+    }
 }
 
 /// `song` -> `Song`. A table names a row type the way a type is spelled.
