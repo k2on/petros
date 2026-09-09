@@ -81,30 +81,39 @@ pub type Id = ::std::vec::Vec<u8>;
 ///
 /// The list is the same one the schema allows, because a mutation's arguments
 /// are exactly what a foreign caller can write.
+///
+/// Behind `cbor`, like everything that names a payload: a crate that only reads
+/// schemas never builds one.
+#[cfg(feature = "cbor")]
 pub trait IntoCbor {
     fn into_cbor(self) -> cbor::Value;
 }
 
+#[cfg(feature = "cbor")]
 impl IntoCbor for String {
     fn into_cbor(self) -> cbor::Value {
         cbor::Value::Text(self)
     }
 }
+#[cfg(feature = "cbor")]
 impl IntoCbor for &str {
     fn into_cbor(self) -> cbor::Value {
         cbor::Value::Text(self.to_string())
     }
 }
+#[cfg(feature = "cbor")]
 impl IntoCbor for i64 {
     fn into_cbor(self) -> cbor::Value {
         cbor::Value::Integer(self.into())
     }
 }
+#[cfg(feature = "cbor")]
 impl IntoCbor for bool {
     fn into_cbor(self) -> cbor::Value {
         cbor::Value::Bool(self)
     }
 }
+#[cfg(feature = "cbor")]
 impl IntoCbor for Id {
     fn into_cbor(self) -> cbor::Value {
         cbor::Value::Bytes(self)
