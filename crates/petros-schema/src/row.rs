@@ -22,7 +22,12 @@
 /// the far type and how to get there; a field that exists only on the far side
 /// states how to compute it from the whole row.
 ///
-/// ```
+/// The example needs the `foreign` feature, since that is what the record is
+/// behind. `just` runs the doctests with `--all-features`; a plain `cargo test`
+/// skips this one rather than failing on a module it was never going to build.
+///
+#[cfg_attr(feature = "foreign", doc = "```")]
+#[cfg_attr(not(feature = "foreign"), doc = "```ignore")]
 /// uniffi::setup_scaffolding!();
 /// petros_schema::row! {
 ///     /// A song, and where it sits in the playlist.

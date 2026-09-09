@@ -114,7 +114,7 @@ require a C API we cannot reach.
 
 ## Where it has got to
 
-Steps 1 and 2 are done, on this branch.
+Steps 1, 2 and most of 3 are done, on this branch.
 
 **Typed writes**, so a write says what changed: `Add`, `Remove`, or `Edit`
 carrying both versions. `petros_sql::tables!()` generates the row types from
@@ -131,21 +131,57 @@ would mean rewriting every source.
 and writes are the same shape, which was the point of doing both at once rather
 than leaving a seam between them.
 
+**Relationships**, generated from the foreign keys — `PRAGMA foreign_key_list`
+reports what `REFERENCES` said — so a result is a tree and neither `LEFT JOIN`
+nor `INNER JOIN` appears anywhere. Which end you read from is the join.
+
+**The operators**: `Source`, `Filter`, `Take`, and a `View` that holds the
+answer. `petros-ivm`. A view is hydrated once and then handed what each mutation
+changed.
+
+## One thing I got wrong about the shape
+
+Zero wires operators with output pointers: an operator holds the next one and
+calls `push` on it. Copying that into Rust means `Rc<RefCell<…>>` on every node,
+because the graph is then reachable from both ends — for something that is, in
+practice, a chain.
+
+So `push` here **returns** what a change became instead of forwarding it, and
+each operator owns its input. A change enters at the top, is passed down to the
+source, which decides whether it is even about the right table; the answer comes
+back up, reshaped on the way. Same semantics, ordinary ownership, and a pipeline
+is a value that can be moved and dropped.
+
+## The bug that only a random session found
+
+By the time a change reaches an operator, the store is **already at the new
+state**. So a pull can see rows the push has not reported yet.
+
+An edit is split into a remove and an add, because a limit cares about position
+above all. Remove-first looks obviously right and is wrong: the refill after the
+remove seeks past the bound, finds the edited row sitting there in its new
+place, pulls it in — and then the add puts it in a second time. Add-first makes
+the new row part of the window before anything seeks past it.
+
+Six hand-written tests all passed with this bug present. A two-thousand-step
+random session against a re-run of the same query found it at step 26.
+
 ## What I would build, in order
 
 1. ~~Change capture~~ and ~~a source over SQLite~~ — done. Triggers turned out
    to be unnecessary: typed writes report changes directly, which is simpler
    than reading them back out of a table, and the cost is one point lookup per
    write rather than an insert.
-2. **`push`.** A source that fans a change to connected operators, and the
-   `Input`/`Output` pair. Nothing is connected to anything yet.
-3. **The operators that earn their place:** filter, join, take. In that order —
-   filter is trivial, join is where the value is, take is where the design is
-   tested, and take is the one whose seek the `Plan` already supports.
-4. **Relationships.** Zero's results are trees: a row with named children, and
-   `related()` nests a subquery under a parent. That is what a UI wants, and it
-   is also what replaces the joins a flat query builder cannot express — the
-   read model here has two of them.
+2. ~~`push`~~ — done, as a return value rather than an output pointer.
+3. **The operators:** ~~filter~~, ~~take~~, join. Filter was trivial and take
+   was where the design was tested, exactly as expected. Join is what is left,
+   and it is the one that makes a maintained `library()` possible: the pipeline
+   is single-table, so the tree that `select_with` builds is still assembled by
+   a fetch rather than maintained by an operator.
+4. ~~Relationships~~ — done as `select_with`, generated from the foreign keys.
+   Maintaining one incrementally is the join above; a change to a child has to
+   become Zero's fourth kind of change, `Child`, meaning "this row is unchanged
+   but something beneath it moved".
 
 ## What to measure before any of it
 
@@ -160,8 +196,55 @@ So, first:
   `LIMIT 50` against an index is under a millisecond at 100k rows, this whole
   document is premature and the reactivity problem — *knowing when to re-run* —
   is the one worth solving instead.
-- **The extra read on a write.** `put` looks the old row up to report an edit.
-  Measure it at one row and at a thousand; if it is material, an add-only path
-  for rows known to be new is the obvious relief.
+## What it is actually worth — measured
+
+`cargo test -p petros-ivm --release --test cost -- --ignored --nocapture`.
+One write, then the top 20 rows, on an in-memory database:
+
+```
+    ordering column indexed:
+        rows        re-run    maintained    ratio
+         100     0.0113 ms     0.0018 ms     6.3x
+        1000     0.0117 ms     0.0019 ms     6.1x
+       10000     0.0079 ms     0.0013 ms     6.3x
+      100000     0.0079 ms     0.0013 ms     6.3x
+
+    ordering column not indexed:
+         100     0.0140 ms     0.0013 ms    11.2x
+        1000     0.0447 ms     0.0013 ms    34.6x
+       10000     0.3521 ms     0.0013 ms   264.2x
+      100000     3.4419 ms     0.0013 ms  2664.0x
+```
+
+The first table is the one that should temper the enthusiasm. **Given the right
+index, SQLite already answers this in O(limit) and a re-run is flat too** — the
+win is a constant factor of six, and six times almost nothing is almost nothing.
+Anyone arguing for incremental maintenance on asymptotics alone has not checked
+whether the planner was already doing it.
+
+The second table is the case for it. Without an index the re-run is O(n log n) —
+3.4ms at a hundred thousand rows, which is a dropped frame — and the maintained
+answer does not move. That is the real claim, and it is not "faster": it is that
+the cost stops depending on the size of the table *and* on whether the planner
+found a way. A view that is right by construction rather than by luck of
+indexing is a different kind of thing to reason about.
+
+Maintained is 0.0013 ms in every row of both tables. That flatness is the
+property, not the ratio.
+
+**The extra read on a write**, which is what a write pays to be able to report
+what it changed:
+
+```
+  one write into a table of N rows:
+        rows        insert        update
+         100     0.0082 ms     0.0103 ms
+       10000     0.0035 ms     0.0043 ms
+      100000     0.0035 ms     0.0045 ms
+```
+
+About a microsecond, flat, and it does not grow with the table — an indexed
+point lookup on the primary key. Nothing to reclaim here; the add-only path this
+document speculated about would not be worth the second code path.
 
 Both are an afternoon, and they decide whether the rest is worth a month.

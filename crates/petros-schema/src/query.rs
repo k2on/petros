@@ -185,6 +185,11 @@ pub struct Plan {
     pub limit: Option<u32>,
     /// Seek past this row in the order. What an incrementally maintained
     /// `limit` uses to find the row that replaces a deleted one.
+    ///
+    /// A *whole* row, in table order, not just the ordering columns: the
+    /// backend picks out the columns the order names. One convention, so a
+    /// cursor made by an operator and a cursor written by hand are the same
+    /// thing.
     pub start: Option<Vec<Value>>,
 }
 

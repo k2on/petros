@@ -2944,6 +2944,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "petros-ivm"
+version = "0.1.0"
+dependencies = [
+ "diesel",
+ "petros",
+ "petros-schema",
+ "petros-sql",
+]
+
+[[package]]
 name = "petros-macros"
 version = "0.1.0"
 dependencies = [

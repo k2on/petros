@@ -6,6 +6,7 @@ members = [
     "crates/petros-schema",
     "crates/petros-macros",
     "crates/petros-sql",
+    "crates/petros-ivm",
     "crates/petros-testkit",
     "crates/petros-wasm-guest",
     "examples/todo",
@@ -28,6 +29,7 @@ petros-wasm-host = { path = "crates/petros-wasm-host" }
 petros-schema = { path = "crates/petros-schema" }
 petros-macros = { path = "crates/petros-macros" }
 petros-sql = { path = "crates/petros-sql" }
+petros-ivm = { path = "crates/petros-ivm" }
 petros-testkit = { path = "crates/petros-testkit" }
 petros-wasm-guest = { path = "crates/petros-wasm-guest" }
 # `default-features = false` here so the wasm build can actually turn the

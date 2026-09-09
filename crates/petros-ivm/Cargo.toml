@@ -1,0 +1,18 @@
+[package]
+name = "petros-ivm"
+version = "0.1.0"
+description = "Incrementally maintained views over a Petros store: a query that updates from what a mutation changed, rather than by running again."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+petros-schema.workspace = true
+
+# Only for the tests: a real SQLite store to run the operators over, and a
+# schema to generate rows from. `petros` does not depend on this crate, so the
+# cycle is a development one and cargo resolves it.
+[dev-dependencies]
+petros = { path = "../petros" }
+petros-sql = { path = "../petros-sql" }
+diesel = { workspace = true, features = ["sqlite"] }
