@@ -60,3 +60,9 @@ required-features = ["ws"]
 [[example]]
 name = "iced"
 required-features = ["ws"]
+
+# This example has no phone client, so no `foreign` feature — but the attributes
+# still emit a `#[cfg]` for one. Named as a known value rather than declared as a
+# feature, which would only pull uniffi into an example that has no use for it.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("foreign"))'] }

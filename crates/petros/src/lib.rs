@@ -62,6 +62,7 @@ mod store;
 
 /// The typed store an app's `apply` writes through.
 pub mod backend;
+mod foreign;
 
 #[cfg(feature = "ws")]
 pub mod transport;

@@ -14,5 +14,15 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 
+# The attributes emit `#[cfg(feature = "storage")]` and `#[cfg(feature =
+# "foreign")]`, evaluated in the crate that *calls* them. They are not features
+# of this crate and must not become them — turning `foreign` on here would make
+# this crate's own tests want uniffi. Named as known cfg values so cargo does
+# not warn about a value it has never seen.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("storage", "foreign"))',
+] }
+
 [dev-dependencies]
 petros-schema = { workspace = true, features = ["cbor"] }

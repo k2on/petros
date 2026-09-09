@@ -262,6 +262,18 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let line_lit = line.clone();
     let section_ident = format_ident!("__PETROS_SCHEMA_{}", name);
 
+    // How each argument crosses to a foreign caller. An id goes as its
+    // canonical string: sixteen bytes is not a thing JavaScript holds, and
+    // `from_json` parses one back.
+    let ffi_tys: Vec<proc_macro2::TokenStream> = arg_kinds
+        .iter()
+        .map(|k| match k.to_string().as_str() {
+            "Integer" => quote!(i64),
+            "Bool" => quote!(bool),
+            _ => quote!(::std::string::String),
+        })
+        .collect();
+
     Ok(quote! {
         #(#docs)*
         ///
@@ -304,6 +316,27 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
                 &[#((#arg_strs, ::petros_schema::Ty::#arg_kinds)),*];
             /// What `fill_auto` fills, and whether it is an id or a timestamp.
             pub const AUTO: &[(&str, bool)] = &[#((#auto_names, #auto_is_id)),*];
+        }
+
+        // The method a foreign caller sees. Emitted here rather than from a
+        // central list because an attribute cannot see its siblings — and it
+        // does not need to: uniffi accepts several exported impl blocks for one
+        // object, so each function contributes its own.
+        #[cfg(feature = "foreign")]
+        #[uniffi::export]
+        impl Peer {
+            #(#docs)*
+            ///
+            /// Authored here and applied by every replica from the log.
+            pub fn #name(
+                &self,
+                #(#arg_names: #ffi_tys),*
+            ) -> ::core::result::Result<(), crate::PeerError> {
+                self.mutate(
+                    #verb_lit.to_string(),
+                    ::serde_json::json!({ #(#arg_strs: #arg_names),* }).to_string(),
+                )
+            }
         }
 
         /// Wasm only: the module is self-describing so a generator that has the
@@ -393,7 +426,33 @@ fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let arg_names: Vec<_> = parsed.args.iter().map(|a| a.name.clone()).collect();
     let arg_tys: Vec<_> = parsed.args.iter().map(|a| a.ty.clone()).collect();
 
+    // A query's rows cross as the record `row!` generated for them: `Song`
+    // here, `foreign::Song` there. Recognised by shape rather than by a list,
+    // because there is only one shape a query returns.
+    let ffi = ffi_return(&f.sig.output)?;
+    let (ffi_ret, ffi_body) = match ffi {
+        Rows(elem) => (
+            quote!(::std::vec::Vec<crate::foreign::#elem>),
+            quote!(rows.into_iter().map(::core::convert::Into::into).collect()),
+        ),
+        One(elem) => (quote!(crate::foreign::#elem), quote!(rows.into())),
+    };
+
     Ok(quote! {
+        // The method a foreign caller sees.
+        #[cfg(feature = "foreign")]
+        #[uniffi::export]
+        impl Peer {
+            #(#docs)*
+            pub fn #name(
+                &self,
+                #(#arg_names: #arg_tys),*
+            ) -> ::core::result::Result<#ffi_ret, crate::PeerError> {
+                let rows = self.read(|db| #name(db #(, #arg_names)*))?;
+                ::core::result::Result::Ok(#ffi_body)
+            }
+        }
+
         // A query never runs inside the sandbox — the module applies mutations
         // and reads nothing back — so it is built only where there is a real
         // database. Gated here rather than at the call site, because it is a
@@ -498,4 +557,46 @@ pub fn peer(item: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+/// What a query gives back, as far as the boundary cares.
+enum Returned {
+    /// `Result<Vec<Song>>` — many rows.
+    Rows(Ident),
+    /// `Result<Song>` — one.
+    One(Ident),
+}
+use Returned::{One, Rows};
+
+fn ffi_return(out: &ReturnType) -> Result<Returned, syn::Error> {
+    let ReturnType::Type(_, ty) = out else {
+        return Err(syn::Error::new_spanned(
+            out,
+            "a query returns something; that is what makes it a query",
+        ));
+    };
+    let text = quote!(#ty).to_string().replace(' ', "");
+    // Written against the text rather than the syntax tree because the only
+    // shapes that mean anything here are these two, and saying so plainly beats
+    // walking generics to discover it.
+    let inner = text
+        .strip_prefix("Result<")
+        .and_then(|t| t.strip_suffix('>'))
+        .ok_or_else(|| {
+            syn::Error::new_spanned(ty, "a query returns `Result<…>`, so a refusal can cross")
+        })?;
+    let (name, many) = match inner.strip_prefix("Vec<").and_then(|t| t.strip_suffix('>')) {
+        Some(elem) => (elem, true),
+        None => (inner, false),
+    };
+    let name = name.rsplit("::").next().unwrap_or(name);
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') || name.is_empty() {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "a query returns a row type or a `Vec` of one — the record `row!` generated \
+             for it is what crosses to a foreign caller",
+        ));
+    }
+    let ident = format_ident!("{}", name);
+    Ok(if many { Rows(ident) } else { One(ident) })
 }
