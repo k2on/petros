@@ -254,9 +254,21 @@ rec {
 
       # The cargo configuration both layers share: the vendored dependencies,
       # at one path, plus the patch that makes the lockfile resolvable.
+      #
+      # Written here rather than taken from the vendor directory. `cargo vendor`
+      # prints this to stdout and cleans its output directory as it goes, so a
+      # `cargo vendor $out > $out/config.toml` leaves nothing behind — the file
+      # is unlinked while the redirect still holds it open. Depending on a
+      # layout that a tool actively tidies is not worth the two lines saved.
       cargoConfig = engineSrc: ''
         mkdir -p .cargo
-        cat ${vendor}/config.toml > .cargo/config.toml
+        cat > .cargo/config.toml <<'VENDOR'
+        [source.crates-io]
+        replace-with = "vendored-sources"
+
+        [source.vendored-sources]
+        directory = "${vendor}"
+        VENDOR
         cat ${mkCargoPatch engineSrc} >> .cargo/config.toml
       '';
 
