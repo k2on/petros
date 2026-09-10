@@ -822,3 +822,63 @@ The measurements are in `docs/ivm.md` rather than here, including the one that
 argues *against* enthusiasm: given the right index, SQLite already answers a
 top-twenty in O(limit), and maintaining it is a constant factor of six. The case
 is the queries where the planner has no such way.
+
+## The log freezes arguments, not meaning
+
+The note above about determinism says the values `fill_auto` chose are in the log
+forever, "so a replay years later on a different machine produces the same
+state". That is true of the arguments. It is not true of the code.
+
+`apply` is whatever the peer was built with, and a peer syncing from sequence 1
+today runs *today's* version of it over entries written whenever. So changing
+what a verb means changes history — and not uniformly, because a peer that
+already applied those entries keeps what it computed then. Two peers on the same
+log, running builds from either side of the change, disagree permanently.
+
+`tests/history.rs` demonstrates it rather than arguing it. One release changes
+`Add` to step positions by ten instead of one — the mildest kind of change, the
+wire format untouched, every existing entry still decoding perfectly — and the
+two peers end at `[1, 2, 3]` and `[10, 20, 30]`. Nothing errors. Nothing warns.
+Nothing in an `Entry` could have told either of them: it carries an id, an actor,
+a sequence number and the arguments, and no version of the code that reads them.
+
+That test passes while the hazard is present, which is deliberate. It is
+evidence, and it is something for a mitigation to fail against.
+
+**The discipline, until there is a mechanism: a verb's meaning is immutable.**
+Fixing a bug in one, or changing how it computes anything a later replay can
+observe, means adding a verb and leaving the old one alone — the same rule
+Replicache gives for mutators, for the same reason. Renaming is safe (the tag in
+the log is what matters); reinterpreting is not.
+
+The mechanism, when it is wanted, is a version on the entry: `fill_auto` stamps
+the mutator version that authored it, `apply` dispatches on it, and old versions
+stay compiled in. That is a real cost — every version of every verb lives
+forever — which is why the discipline comes first and the mechanism waits for a
+reason.
+
+## What the engine does not do, on purpose or not yet
+
+Written down because "is anything left?" deserves a list rather than a shrug.
+
+**No compaction.** Every confirmed entry is kept, on the server and on every
+client, forever. A new peer replays from sequence 1. That is what makes the log
+the single source of truth and what makes a fresh device correct without a
+special path — and it means storage grows with history rather than with state. A
+snapshot mechanism is the answer when it matters; nothing here needs it yet, and
+it interacts directly with the section above, because a snapshot is a statement
+about what history *meant*.
+
+**No authentication or authorisation.** A client asserts its own actor and the
+engine takes it at face value. Deliberate, and why `petros-axum` is a handler you
+mount behind your own middleware rather than a server that starts itself. But it
+does mean any connected client can write as anyone.
+
+**No partial sync.** Every client gets the whole log. Fine for a self-hosted
+system with a handful of peers; not fine for one where clients should only see
+some of the data, which is a filtering problem the server does not have a shape
+for.
+
+Batching is handled: the server sends `BATCH_LIMIT` entries at a time with
+`has_more`, and a client applies `APPLY_CHUNK` per transaction, so neither holds
+an unbounded log in memory.
