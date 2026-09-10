@@ -280,9 +280,16 @@ is a real case and does not need an orphan to exist.
    its own partition. `select_with` had the same bug from the other side — it
    dropped a child limit entirely — and now applies it per parent, so the run
    query and the maintained one agree.
-9. **Aggregates**, which is where the flat comparison below stops being kind to
-   the re-run: `COUNT` and `MAX` over a table are O(n) every time, and O(1) to
-   maintain.
+9. ~~Aggregates~~ — `Tally`, a maintained `COUNT`, holding a number rather than
+   the rows. A `View` can already count by holding every matching row, and
+   `MAX` is already a maintained `ORDER BY … DESC LIMIT 1`; what was missing was
+   the O(1)-memory version, which is the difference between a count being free
+   and a count costing the answer it counts.
+
+   The push side is arithmetic, because `Filter` has already turned an edit that
+   crosses the predicate into an add or a remove. That is worth noticing: the
+   operator is three lines instead of a case per kind of change, and it is the
+   pipeline that earned that, not the aggregate.
 
 ## What to measure before any of it
 

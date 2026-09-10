@@ -391,3 +391,102 @@ fn splice_session(limit: Option<u32>) {
         );
     }
 }
+
+/// A count that is maintained rather than recomputed, and holds a number rather
+/// than the rows it counted.
+#[test]
+fn a_tally_counts_without_holding_the_rows() {
+    use petros_ivm::Tally;
+
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    let query = || Song::all().filter(Song::done.eq(false));
+    let mut tally = Tally::of(query());
+    tally.hydrate(&mut store);
+    assert_eq!(tally.get(), 0);
+
+    for i in 1..=4u8 {
+        store.put(&song(i, &format!("song {i}"), i as i64)).unwrap();
+    }
+    let changes = store.take_changes();
+    assert!(tally.apply(&mut store, &changes), "the count moved");
+    assert_eq!(tally.get(), 4);
+
+    // An edit across the filter is a remove, and the count knows it — the
+    // filter operator has already decided, which is why this needs no case.
+    let mut two = store.get::<Song>(&Song::key_of(&vec![2u8; 16])).unwrap();
+    two.done = true;
+    store.put(&two).unwrap();
+    let changes = store.take_changes();
+    tally.apply(&mut store, &changes);
+    assert_eq!(tally.get(), 3);
+    assert_eq!(tally.get(), store.select(query()).len());
+
+    // An edit that changes nothing the filter cares about moves nothing.
+    two.title = "renamed while hidden".into();
+    store.put(&two).unwrap();
+    let changes = store.take_changes();
+    assert!(!tally.apply(&mut store, &changes), "nothing to render for");
+    assert_eq!(tally.get(), 3);
+
+    two.done = false;
+    store.put(&two).unwrap();
+    let changes = store.take_changes();
+    tally.apply(&mut store, &changes);
+    assert_eq!(tally.get(), 4);
+
+    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
+    let changes = store.take_changes();
+    tally.apply(&mut store, &changes);
+    assert_eq!(tally.get(), 3);
+    assert_eq!(tally.get(), store.select(query()).len());
+}
+
+/// The property, over a long random session: a maintained count is the count.
+#[test]
+fn a_tally_agrees_with_counting_over_a_random_session() {
+    use petros_ivm::Tally;
+
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    let query = || Song::all().filter(Song::done.eq(false));
+    let mut tally = Tally::of(query());
+    tally.hydrate(&mut store);
+
+    let mut seed = 0xD1B5_4A32_D192_ED03u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+
+    for step in 0..1500u64 {
+        let id = (next() % 25) as u8;
+        let key = Song::key_of(&vec![id; 16]);
+        match next() % 3 {
+            0 => store.delete::<Song>(&key).unwrap(),
+            1 => {
+                if let Some(mut s) = store.get::<Song>(&key) {
+                    s.done = !s.done;
+                    store.put(&s).unwrap();
+                }
+            }
+            _ => store
+                .put(&Song {
+                    id: vec![id; 16],
+                    title: format!("song {id}"),
+                    done: next() % 4 == 0,
+                    pos: (next() % 40) as i64,
+                })
+                .unwrap(),
+        }
+        let changes = store.take_changes();
+        tally.apply(&mut store, &changes);
+        assert_eq!(
+            tally.get(),
+            store.select(query()).len(),
+            "diverged at step {step}"
+        );
+    }
+}

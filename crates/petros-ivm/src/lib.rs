@@ -1008,6 +1008,71 @@ impl<P: Table + 'static> View<P> {
     }
 }
 
+// ------------------------------------------------------------------- a tally
+
+/// How many rows a query matches, maintained.
+///
+/// A [`View`] already knows its own length, so a count *can* be had by holding
+/// every matching row. This holds a number instead: O(1) memory whatever the
+/// table does, which is the difference between a count being free and a count
+/// costing the answer it is counting.
+///
+/// The push side is arithmetic. `Filter` has already turned an edit that
+/// crosses the predicate into an add or a remove, so by the time a change
+/// arrives here there is nothing left to decide — which is worth noticing,
+/// because it is the reason this operator is three lines rather than a special
+/// case for every kind of change.
+///
+/// A limit makes no sense here and is ignored: `COUNT` over the top twenty is
+/// twenty. Hydrating still reads the matching rows once, because a `Plan` has
+/// no `COUNT(*)` in it — the count is maintained after that, not derived again.
+pub struct Tally {
+    top: Box<dyn Operator>,
+    n: usize,
+    hydrated: bool,
+}
+
+impl Tally {
+    /// Count what this query matches.
+    pub fn of<T: Table + 'static>(query: petros_schema::Query<T>) -> Self {
+        let mut plan = query.into_plan();
+        plan.limit = None;
+        Tally {
+            top: Pipeline::of(petros_schema::Query::<T>::from_plan(plan)).finish(None),
+            n: 0,
+            hydrated: false,
+        }
+    }
+
+    pub fn hydrate(&mut self, store: &mut dyn Store) {
+        self.n = self.top.fetch(store, Fetch::default()).len();
+        self.hydrated = true;
+    }
+
+    /// Take account of what a mutation changed. Returns whether the count
+    /// moved, so a caller can skip a render on nothing.
+    pub fn apply(&mut self, store: &mut dyn Store, changes: &[Change]) -> bool {
+        debug_assert!(self.hydrated, "hydrate the tally before pushing to it");
+        let before = self.n;
+        for change in changes {
+            for delta in self.top.push(store, change) {
+                match delta {
+                    Delta::Add(_) => self.n += 1,
+                    Delta::Remove(_) => self.n = self.n.saturating_sub(1),
+                    // A row that stayed, and a child that moved under one. The
+                    // filter has already decided both are still matches.
+                    Delta::Edit { .. } | Delta::Child { .. } => {}
+                }
+            }
+        }
+        self.n != before
+    }
+
+    pub fn get(&self) -> usize {
+        self.n
+    }
+}
+
 // ------------------------------------------------------------------ machinery
 
 fn table_of(change: &Change) -> &str {

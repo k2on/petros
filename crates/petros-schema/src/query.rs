@@ -250,6 +250,15 @@ impl<T: Table> Query<T> {
         &self.plan
     }
 
+    /// Rebuild a query from a plan it produced. For an operator that has to
+    /// adjust a plan — a tally dropping a limit — and then hand it back.
+    pub fn from_plan(plan: Plan) -> Self {
+        Query {
+            plan,
+            marker: PhantomData,
+        }
+    }
+
     pub fn into_plan(self) -> Plan {
         self.plan
     }
