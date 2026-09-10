@@ -25,11 +25,29 @@
 /// `module` is the build this binary shipped with. A peer with no Metro
 /// attached installs it at startup; one with Metro replaces it whenever a
 /// mutation changes, which is the loop the whole design exists for.
+///
+/// `views:` is optional and names a type implementing [`crate::Views`]. The
+/// peer then keeps them beside the client, under the same lock, and brings them
+/// up to date after every mutation and every message from the server. Under the
+/// same lock because a view and the database it describes must not be readable
+/// apart — and after *every* path because a view the app has to remember to
+/// update is one it will eventually forget to.
 #[macro_export]
 macro_rules! foreign_peer {
     ($peer:ident {
         schema: $schema:expr,
         module: $module:expr $(,)?
+    }) => {
+        $crate::foreign_peer!($peer {
+            schema: $schema,
+            module: $module,
+            views: (),
+        });
+    };
+    ($peer:ident {
+        schema: $schema:expr,
+        module: $module:expr,
+        views: $views:ty $(,)?
     }) => {
         /// The module this build was compiled against.
         ///
@@ -184,7 +202,16 @@ macro_rules! foreign_peer {
         /// means there is only ever one coherent view to read.
         #[derive(uniffi::Object)]
         pub struct $peer {
-            inner: ::std::sync::Mutex<$crate::Client<ForeignApp>>,
+            inner: ::std::sync::Mutex<PeerInner>,
+        }
+
+        /// The client and whatever this app maintains beside it, together
+        /// because they describe the same database and must not be readable
+        /// apart.
+        #[doc(hidden)]
+        pub struct PeerInner {
+            client: $crate::Client<ForeignApp>,
+            views: $views,
         }
 
         impl $peer {
@@ -196,7 +223,30 @@ macro_rules! foreign_peer {
                 let mut guard = self.inner.lock().map_err(|_| PeerError::Engine {
                     message: "the client lock was poisoned by an earlier panic".into(),
                 })?;
-                f(&mut guard)
+                f(&mut guard.client)
+            }
+
+            /// Read what this peer maintains, after settling it.
+            #[doc(hidden)]
+            pub fn views<T>(
+                &self,
+                f: impl FnOnce(&mut $views) -> ::core::result::Result<T, PeerError>,
+            ) -> ::core::result::Result<T, PeerError> {
+                let mut guard = self.inner.lock().map_err(|_| PeerError::Engine {
+                    message: "the client lock was poisoned by an earlier panic".into(),
+                })?;
+                let inner = &mut *guard;
+                $crate::settle(&mut inner.client, &mut inner.views);
+                f(&mut inner.views)
+            }
+
+            /// Bring the views up to date. Called after anything that can move
+            /// the database, so an app cannot forget one.
+            fn settle(&self) {
+                if let ::core::result::Result::Ok(mut guard) = self.inner.lock() {
+                    let inner = &mut *guard;
+                    $crate::settle(&mut inner.client, &mut inner.views);
+                }
             }
 
             /// Run a mutation authored by one of this app's functions.
@@ -205,10 +255,16 @@ macro_rules! foreign_peer {
                 &self,
                 m: $crate::petros_schema::cbor::Value,
             ) -> ::core::result::Result<(), PeerError> {
-                self.with(|c| {
+                let outcome = self.with(|c| {
                     c.mutate(ForeignPayload(m))?;
                     ::core::result::Result::Ok(())
-                })
+                });
+                // Even on a refusal: a rejected mutation is rolled back, and
+                // nothing to settle is what `settle` does with an empty list.
+                // Settling only on success would leave the one path that
+                // matters — a refusal after other work — to be noticed later.
+                self.settle();
+                outcome
             }
 
             /// Run a query against this peer's database.
@@ -233,9 +289,15 @@ macro_rules! foreign_peer {
                 actor: ::std::string::String,
             ) -> ::core::result::Result<Self, PeerError> {
                 let conn = $crate::open_path(&db_path)?;
-                let client = $crate::Client::<ForeignApp>::open(conn, actor, $crate::AutoCtx::system())?;
+                let mut client =
+                    $crate::Client::<ForeignApp>::open(conn, actor, $crate::AutoCtx::system())?;
+                // One full read, here and nowhere else. Everything after this
+                // is maintained.
+                let mut views = <$views as $crate::Views>::build();
+                $crate::Views::hydrate(&mut views, &mut client.store());
+                let _ = client.take_changes();
                 ::core::result::Result::Ok($peer {
-                    inner: ::std::sync::Mutex::new(client),
+                    inner: ::std::sync::Mutex::new(PeerInner { client, views }),
                 })
             }
 
@@ -308,7 +370,11 @@ macro_rules! foreign_peer {
                 -> ::core::result::Result<(), PeerError>
             {
                 let msg: $crate::ServerMsg<ForeignPayload> = $crate::decode(&frame)?;
-                self.with(|c| ::core::result::Result::Ok(c.recv(msg)?))
+                let outcome = self.with(|c| ::core::result::Result::Ok(c.recv(msg)?));
+                // The server's messages are the other thing that moves the
+                // database, and the one that produces a rebase.
+                self.settle();
+                outcome
             }
 
             /// Mutations the server refused since the last call.

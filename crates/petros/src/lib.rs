@@ -77,6 +77,45 @@ pub use mutation::{App, Mutation, Transaction};
 /// again. Re-exported so an app declares one dependency rather than two, and
 /// so the version it gets is the one this engine was built against.
 pub use petros_ivm as ivm;
+
+/// What a peer maintains beside its client.
+///
+/// An app implements this once and `foreign_peer!` does the rest: hydrate at
+/// open, and settle after every mutation and every message from the server. The
+/// point is that it is not the app's job to remember — a view updated by the
+/// call sites that happen to think of it is a view that is wrong on the ones
+/// that do not.
+pub trait Views: Send + 'static {
+    fn build() -> Self;
+    /// Read everything, once. Called at open and after a rebase, which is the
+    /// case no sequence of changes can describe.
+    fn hydrate(&mut self, store: &mut backend::SqliteStore<'_>);
+    /// Take account of what a mutation changed.
+    fn apply(&mut self, store: &mut backend::SqliteStore<'_>, changes: &[petros_schema::Change]);
+}
+
+/// An app that maintains nothing. The default, so a peer that only ever reads
+/// the database directly pays nothing for this.
+impl Views for () {
+    fn build() -> Self {}
+    fn hydrate(&mut self, _store: &mut backend::SqliteStore<'_>) {}
+    fn apply(&mut self, _store: &mut backend::SqliteStore<'_>, _changes: &[petros_schema::Change]) {
+    }
+}
+
+/// Bring an app's views up to date with what its client just did.
+///
+/// The `Rebuilt` arm is the rebase: the optimistic view was rolled back and a
+/// rollback reports nothing, so there is no forward sequence to apply and the
+/// only honest answer is to read again.
+#[doc(hidden)]
+pub fn settle<A: App, V: Views>(client: &mut Client<A>, views: &mut V) {
+    match client.take_changes() {
+        Changes::Applied(changes) if changes.is_empty() => {}
+        Changes::Applied(changes) => views.apply(&mut client.store(), &changes),
+        Changes::Rebuilt => views.hydrate(&mut client.store()),
+    }
+}
 pub use proto::{decode, encode, ActorId, ClientMsg, Entry, Seq, ServerMsg};
 pub use server::{ConnId, Server};
 

@@ -165,7 +165,11 @@ pub trait Operator {
 
 /// A boxed operator is an operator, so a pipeline can be assembled at runtime
 /// from a plan that only says at build time which stages it has.
-impl Operator for Box<dyn Operator> {
+///
+/// `Send`, because a view lives inside whatever holds the client — on the phone
+/// that is a UniFFI object reachable from any thread. Nothing in a pipeline is
+/// thread-bound; the bound is only here so the boxes say so.
+impl Operator for Box<dyn Operator + Send> {
     fn fetch(&mut self, store: &mut dyn Store, req: Fetch<'_>) -> Vec<Tree> {
         (**self).fetch(store, req)
     }
@@ -745,7 +749,7 @@ impl<I: Operator> Operator for Take<I> {
 /// the window updates the copy held there, and a later pull is answered from
 /// memory instead of re-reading the children.
 pub struct Pipeline {
-    top: Box<dyn Operator>,
+    top: Box<dyn Operator + Send>,
     order: Vec<(usize, Dir)>,
     limit: Option<u32>,
     /// This level's plan, which the join above needs to find the parent a
@@ -767,7 +771,7 @@ impl Pipeline {
         let mut source = plan.clone();
         source.limit = None;
         source.start = None;
-        let mut top: Box<dyn Operator> = Box::new(Source::new(source));
+        let mut top: Box<dyn Operator + Send> = Box::new(Source::new(source));
         if let Some(node) = plan.filter.clone() {
             top = Box::new(Filter::new(top, node, def.columns));
         }
@@ -811,7 +815,7 @@ impl Pipeline {
     /// supplies: under a relationship a limit means "this many per parent", and
     /// a take that does not know that gives the whole limit to the first parent
     /// and nothing to the rest.
-    fn finish(self, within: Option<(&str, usize)>) -> Box<dyn Operator> {
+    fn finish(self, within: Option<(&str, usize)>) -> Box<dyn Operator + Send> {
         match self.limit {
             Some(limit) => {
                 let take = Take::new(self.top, limit as usize, self.order);
@@ -850,7 +854,7 @@ pub enum Patch {
 ///
 /// Hydrate it once and then hand it what each mutation changed.
 pub struct View<P: Table> {
-    top: Box<dyn Operator>,
+    top: Box<dyn Operator + Send>,
     nodes: Vec<Tree>,
     order: Vec<(usize, Dir)>,
     hydrated: bool,
@@ -1027,7 +1031,7 @@ impl<P: Table + 'static> View<P> {
 /// twenty. Hydrating still reads the matching rows once, because a `Plan` has
 /// no `COUNT(*)` in it — the count is maintained after that, not derived again.
 pub struct Tally {
-    top: Box<dyn Operator>,
+    top: Box<dyn Operator + Send>,
     n: usize,
     hydrated: bool,
 }
