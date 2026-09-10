@@ -170,6 +170,16 @@
           };
         });
 
+      # Building a Petros app's native half for Android: the SDK pinned the way
+      # every Petros app needs it, the `ubrn` command, the `[patch]` that makes
+      # an app's lockfile resolvable, and the two-layer cross-compile that stops
+      # a changed mutation recompiling a hundred crates.
+      #
+      # An app with this repository as a `flake = false` input imports the file
+      # directly — `import "${petros}/nix/android.nix" { inherit pkgs nixpkgs; }`
+      # — and this is here so the entry point is discoverable from the flake.
+      lib.android = import ./nix/android.nix;
+
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
     };
 }
