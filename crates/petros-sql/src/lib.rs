@@ -326,6 +326,18 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
                 }
             }
 
+            // The leaf of a decoded tree: this table, with nothing under it.
+            // Emitted per table rather than blanket over `Table`, because a
+            // blanket impl would overlap the nesting one — nothing tells the
+            // compiler a `With` will never be a `Table`.
+            impl ::petros_schema::FromNode for #ty {
+                const TABLE: &'static str = #table;
+
+                fn from_node(node: &::petros_schema::Tree) -> ::core::option::Option<Self> {
+                    <Self as ::petros_schema::Table>::from_row(&node.row)
+                }
+            }
+
             impl ::petros_schema::Table for #ty {
                 const DEF: ::petros_schema::TableDef = ::petros_schema::TableDef {
                     name: #table,

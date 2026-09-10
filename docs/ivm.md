@@ -263,10 +263,16 @@ is a real case and does not need an orphan to exist.
    that decode turned out to be most of what was left on the client path. The
    node travels with the patch rather than being looked up afterwards, because
    by then the view has applied the rest of them.
-7. **A typed accessor for a nested view.** `with::<C>()` reads one relationship;
-   deeper than that is `nodes()`, which is untyped. A type describing arbitrary
-   nesting is real type-level work in `tables!` and is not worth it until a
-   screen wants one.
+7. ~~A typed accessor for a nested view~~ — and it turned out not to be the
+   type-level work this list expected. `With` already nests structurally:
+   `With<Song, With<Note, Author>>` *is* the shape. What was missing was a way
+   to decode at that depth, which is one recursive trait, and the relationship
+   each level reads is named by the table at that level — so `Song::note` and
+   `With<Note, _>` agree without anyone writing a string.
+
+   The type is a projection: ask for less than the view holds and the rest is
+   not decoded. There is no blanket impl over `Table`, because it would overlap
+   the nesting one; `tables!` emits the leaf impl per table instead.
 8. ~~Per-partition take state~~ — done, and it was not an optimisation. A limit
    on a child relationship was silently *wrong*: the first parent took the whole
    limit and every other parent showed nothing. `Take` keys its window by the

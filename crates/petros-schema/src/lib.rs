@@ -123,7 +123,9 @@ impl IntoCbor for Id {
         cbor::Value::Bytes(self)
     }
 }
-pub use query::{all, Column, Cond, Dir, Node, Op, Order, Plan, Query, Relation, With};
+pub use query::{
+    all, Column, Cond, Dir, FromNode, Node, Op, Order, Plan, Query, Relation, Tree, With,
+};
 pub use store::{Bind, Cell, Change, ColumnTy, Request, Rows, Store, Table, TableDef, Value};
 
 /// Every mutation an app understands.

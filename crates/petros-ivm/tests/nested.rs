@@ -373,3 +373,51 @@ fn a_limit_on_a_relationship_is_per_parent() {
         "song 1 refilled from its own notes"
     );
 }
+
+/// Three levels, typed. The type *is* the projection.
+///
+/// `With` nests structurally already, so a song with its notes with their
+/// authors is `With<Song, With<Note, Author>>` and nothing new had to be
+/// invented for the shape — only a way to decode it. Before this the only way
+/// past one relationship was `nodes()`, untyped.
+#[test]
+fn a_nested_view_decodes_to_a_nested_type() {
+    use petros_schema::With;
+
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&song(2, "Opal", 2)).unwrap();
+    store.put(&note(1, 1, "live")).unwrap();
+    store.put(&author(1, 1, "alice")).unwrap();
+    store.put(&author(2, 1, "bob")).unwrap();
+    store.take_changes();
+
+    let mut view = view();
+    view.hydrate(&mut store);
+
+    let songs: Vec<With<Song, With<Note, Author>>> = view.decode();
+    assert_eq!(songs.len(), 2);
+    assert_eq!(songs[0].row.title, "Glue");
+    assert_eq!(songs[0].related[0].row.text, "live");
+    let names: Vec<&str> = songs[0].related[0]
+        .related
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["alice", "bob"]);
+    assert!(songs[1].related.is_empty(), "Opal has no notes");
+
+    // The type is a projection, so asking for less decodes less rather than
+    // failing — a screen that only lists titles need not pay for the authors.
+    let shallow: Vec<With<Song, Note>> = view.decode();
+    assert_eq!(shallow[0].related[0].text, "live");
+    let flat: Vec<Song> = view.decode();
+    assert_eq!(flat[1].title, "Opal");
+
+    // And it keeps up: a change two levels down reaches the typed answer too.
+    store.put(&author(3, 1, "carol")).unwrap();
+    settle(&mut view, &mut store);
+    let songs: Vec<With<Song, With<Note, Author>>> = view.decode();
+    assert_eq!(songs[0].related[0].related.len(), 3);
+}

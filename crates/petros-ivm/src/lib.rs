@@ -42,68 +42,18 @@
 
 use petros_schema::{Change, Dir, Node, Op, Plan, Relation, Store, Table, TableDef, Value, With};
 
+/// The tree a pipeline carries, and how to decode one.
+///
+/// They live in `petros-schema` because an app names them — `tables!` generates
+/// a [`FromNode`] impl per table — and an app should not have to depend on the
+/// operators in order to decode a row.
+pub use petros_schema::{FromNode, Tree};
+
 /// A row, as it travels through a pipeline: positional, in table order.
 ///
 /// Untyped on purpose. Decoding is the [`View`]'s job and happens once, at the
 /// top, rather than at every operator.
 pub type Row = Vec<Value>;
-
-/// What a pipeline carries: a row, and whatever hangs off it.
-///
-/// Every stage deals in these, even the ones with no relationship in them,
-/// where `related` is simply empty. One item type rather than two means an
-/// operator does not have to know whether there is a join below it.
-///
-/// The children are themselves trees, and they are *named*, because a row can
-/// have more than one relationship — a song with its favourite and its notes —
-/// and something has to say which of them a change is about.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Tree {
-    pub row: Row,
-    pub related: Vec<(&'static str, Vec<Tree>)>,
-}
-
-impl Tree {
-    /// A row with nothing under it.
-    pub fn leaf(row: Row) -> Self {
-        Tree {
-            row,
-            related: Vec::new(),
-        }
-    }
-
-    /// This node as a typed row and one typed relationship — the same shape
-    /// `select_with` returns, for a caller holding a single node rather than a
-    /// whole answer.
-    pub fn decode<P: Table, C: Table>(&self) -> Option<With<P, C>> {
-        Some(With {
-            row: P::from_row(&self.row)?,
-            related: self
-                .children(C::DEF.name)
-                .iter()
-                .filter_map(|kid| C::from_row(&kid.row))
-                .collect(),
-        })
-    }
-
-    /// One named relationship's children.
-    pub fn children(&self, name: &str) -> &[Tree] {
-        self.related
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map_or(&[], |(_, kids)| kids.as_slice())
-    }
-
-    /// The same, to write into. Created empty if this is the first the node has
-    /// heard of the relationship.
-    fn children_mut(&mut self, name: &'static str) -> &mut Vec<Tree> {
-        if let Some(at) = self.related.iter().position(|(n, _)| *n == name) {
-            return &mut self.related[at].1;
-        }
-        self.related.push((name, Vec::new()));
-        &mut self.related.last_mut().expect("just pushed").1
-    }
-}
 
 /// A change, as it travels up a pipeline.
 ///
@@ -1021,28 +971,30 @@ impl<P: Table + 'static> View<P> {
             .collect()
     }
 
-    /// The answer with one relationship, for a view that has one. The same
-    /// shape `select_with` returns, so a screen reads one or the other without
-    /// knowing which is maintained.
-    pub fn with<C: Table>(&self) -> Vec<With<P, C>> {
-        self.nodes
-            .iter()
-            .filter_map(|node| {
-                Some(With {
-                    row: P::from_row(&node.row)?,
-                    related: node
-                        .children(C::DEF.name)
-                        .iter()
-                        .filter_map(|kid| C::from_row(&kid.row))
-                        .collect(),
-                })
-            })
-            .collect()
+    /// The answer, decoded to whatever depth the type asks for.
+    ///
+    /// ```text
+    /// view.decode::<With<Song, Favorite>>()                    // one level
+    /// view.decode::<With<Song, With<Note, Author>>>()          // three
+    /// ```
+    ///
+    /// The type is the projection. Ask for less than the view holds and the
+    /// rest is not decoded; ask for more and the missing levels come back
+    /// empty, because a relationship the pipeline does not carry has no
+    /// children under that name.
+    pub fn decode<T: FromNode>(&self) -> Vec<T> {
+        self.nodes.iter().filter_map(T::from_node).collect()
     }
 
-    /// The whole tree, for a view deeper than one relationship. Untyped,
-    /// because a type that describes arbitrary nesting is a bigger thing than
-    /// this and is not needed until a screen wants one.
+    /// One relationship, which is what most views have. The same shape
+    /// `select_with` returns, so a screen reads the run query or the maintained
+    /// one without knowing which.
+    pub fn with<C: Table + FromNode>(&self) -> Vec<With<P, C>> {
+        self.decode()
+    }
+
+    /// The tree as the pipeline holds it, untyped. For a caller that wants the
+    /// nodes rather than a projection of them — a patch applier, or a test.
     pub fn nodes(&self) -> &[Tree] {
         &self.nodes
     }

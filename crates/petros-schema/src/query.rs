@@ -294,6 +294,63 @@ impl<P, C> Relation<P, C> {
     }
 }
 
+/// What a pipeline carries: a row, and whatever hangs off it.
+///
+/// Every stage deals in these, even the ones with no relationship in them,
+/// where `related` is simply empty. One item type rather than two means an
+/// operator does not have to know whether there is a join below it.
+///
+/// The children are themselves trees, and they are *named*, because a row can
+/// have more than one relationship — a song with its favourite and its notes —
+/// and something has to say which of them a change is about.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Tree {
+    pub row: Vec<Value>,
+    pub related: Vec<(&'static str, Vec<Tree>)>,
+}
+
+impl Tree {
+    /// A row with nothing under it.
+    pub fn leaf(row: Vec<Value>) -> Self {
+        Tree {
+            row,
+            related: Vec::new(),
+        }
+    }
+
+    /// This node as a typed row and one typed relationship — the same shape
+    /// `select_with` returns, for a caller holding a single node rather than a
+    /// whole answer.
+    pub fn decode<P: Table, C: Table>(&self) -> Option<With<P, C>> {
+        Some(With {
+            row: P::from_row(&self.row)?,
+            related: self
+                .children(C::DEF.name)
+                .iter()
+                .filter_map(|kid| C::from_row(&kid.row))
+                .collect(),
+        })
+    }
+
+    /// One named relationship's children.
+    pub fn children(&self, name: &str) -> &[Tree] {
+        self.related
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(&[], |(_, kids)| kids.as_slice())
+    }
+
+    /// The same, to write into. Created empty if this is the first the node has
+    /// heard of the relationship. Public because the operators live next door.
+    pub fn children_mut(&mut self, name: &'static str) -> &mut Vec<Tree> {
+        if let Some(at) = self.related.iter().position(|(n, _)| *n == name) {
+            return &mut self.related[at].1;
+        }
+        self.related.push((name, Vec::new()));
+        &mut self.related.last_mut().expect("just pushed").1
+    }
+}
+
 /// A row and what hangs off it.
 ///
 /// Zero's results are trees rather than flat joins, and this is the shape a
@@ -311,5 +368,43 @@ impl<P, C> With<P, C> {
     /// most of them, and the only kind SQLite's `UNIQUE` can promise.
     pub fn one(&self) -> Option<&C> {
         self.related.first()
+    }
+}
+
+/// Something a node of a tree decodes into.
+///
+/// `With` nests structurally already — `With<Song, With<Note, Author>>` is
+/// exactly the shape of a song with its notes with their authors — so what was
+/// missing was a way to decode at that depth. This is it, and it is recursive
+/// for the same reason `Delta::Child` is: depth belongs to the query.
+///
+/// The relationship a level reads is named by the table at that level, which is
+/// the name `tables!` gives the constant it generates. So nothing here says a
+/// string, and `Song::note` and `With<Note, _>` agree without being told to.
+///
+/// There is no blanket `impl<T: Table> FromNode for T`: it would overlap the
+/// `With` impl below, because nothing stops a `With` from implementing `Table`
+/// as far as the compiler is concerned. `tables!` emits the leaf impl per table
+/// instead, beside the `Table` impl it already emits.
+pub trait FromNode: Sized {
+    /// The table this level reads, which is also the relationship's name one
+    /// level up.
+    const TABLE: &'static str;
+
+    fn from_node(node: &Tree) -> Option<Self>;
+}
+
+impl<P: Table, C: FromNode> FromNode for With<P, C> {
+    const TABLE: &'static str = P::DEF.name;
+
+    fn from_node(node: &Tree) -> Option<Self> {
+        Some(With {
+            row: P::from_row(&node.row)?,
+            related: node
+                .children(C::TABLE)
+                .iter()
+                .filter_map(C::from_node)
+                .collect(),
+        })
     }
 }
