@@ -177,11 +177,46 @@ fn reject_rolls_back_pending_and_reports() {
     assert_eq!(c.pending_len(), 1);
 }
 
+/// A peer with nothing carrying its frames still works, and costs nothing to
+/// leave that way.
+///
+/// The outbox is the only thing that would grow without a reader, and while
+/// unlinked it is never written to: every frame it would have held is
+/// derivable again from the cursor and the pending intents, which are durable.
+/// So "no server" is a state a peer can sit in for a week, not a failure it is
+/// recovering from.
+#[test]
+fn unlinked_queues_nothing_and_loses_nothing() {
+    let mut c = client("alice");
+    c.disconnected();
+    assert!(!c.linked());
+
+    for text in ["one", "two", "three"] {
+        c.mutate(TodoMutation::add(text)).unwrap();
+    }
+
+    assert!(
+        c.take_outgoing().is_empty(),
+        "nothing is carrying frames, so none were queued"
+    );
+    assert_eq!(c.pending_len(), 3, "but the mutations are durable");
+    assert_eq!(
+        texts(c.conn()),
+        vec!["one", "two", "three"],
+        "and they are applied: working alone is working"
+    );
+
+    // And they are all still there to offer when something turns up.
+    c.connected().unwrap();
+    assert!(c.linked());
+    assert_eq!(pushed(&mut c).len(), 3);
+}
+
 #[test]
 fn connect_replays_hello_and_pending() {
     let mut c = client("alice");
     c.mutate(TodoMutation::add("offline edit")).unwrap();
-    let _ = c.take_outgoing(); // dropped on the floor: we were partitioned
+    c.disconnected(); // the engine drops the outbox: we were partitioned
 
     c.connected().unwrap();
     let out = c.take_outgoing();

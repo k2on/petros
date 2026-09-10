@@ -351,6 +351,25 @@ macro_rules! foreign_peer {
                 self.with(|c| ::core::result::Result::Ok(c.connected()?))
             }
 
+            /// Nothing is carrying this peer's frames any more.
+            ///
+            /// A dropped socket, or a peer working deliberately alone. The
+            /// outbox is dropped and stays empty until `connected`, which
+            /// re-offers every pending mutation — so being unlinked costs
+            /// nothing and loses nothing.
+            pub fn disconnected(&self) -> ::core::result::Result<(), PeerError> {
+                self.with(|c| {
+                    c.disconnected();
+                    ::core::result::Result::Ok(())
+                })
+            }
+
+            /// Whether a transport says it is carrying frames.
+            pub fn linked(&self) -> bool {
+                self.with(|c| ::core::result::Result::Ok(c.linked()))
+                    .unwrap_or(false)
+            }
+
             /// Drain the outbox as encoded frames, ready for a socket.
             pub fn take_outgoing(&self)
                 -> ::core::result::Result<::std::vec::Vec<::std::vec::Vec<u8>>, PeerError>

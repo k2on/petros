@@ -75,6 +75,18 @@ pub struct Client<A: App> {
     /// Whether a rollback made those changes meaningless. See [`Changes`].
     rebuilt: bool,
     out: Vec<ClientMsg<A::Mutation>>,
+    /// Whether anything is carrying this client's frames.
+    ///
+    /// A sans-io engine cannot see a socket, so this is what a transport tells
+    /// it. True until told otherwise: a caller that never mentions a connection
+    /// is the ordinary case and has always had its outbox filled.
+    ///
+    /// It is not a status light. While it is false the outbox is not written
+    /// to at all, because nothing would collect it and everything in it is
+    /// derivable again — a `Hello` from the cursor, and the pending intents,
+    /// which are durable. That is what [`connected`](Self::connected) does on
+    /// the way back, and it is why being unlinked for a week costs no memory.
+    linked: bool,
     rejections: Vec<Rejection>,
     /// `fn() -> A` rather than `A`: the marker should not drag the app's
     /// auto traits into ours.
@@ -121,6 +133,7 @@ impl<A: App> Client<A> {
             changes: Vec::new(),
             rebuilt: false,
             out: Vec::new(),
+            linked: true,
             rejections: Vec::new(),
             _app: PhantomData,
         };
@@ -202,22 +215,56 @@ impl<A: App> Client<A> {
         self.apply_and_record(&entry)?;
 
         let id = entry.id;
-        self.out.push(ClientMsg::Push {
+        self.emit(ClientMsg::Push {
             entries: vec![entry],
         });
         Ok(id)
+    }
+
+    /// Queue a frame, unless nothing is carrying them.
+    fn emit(&mut self, msg: ClientMsg<A::Mutation>) {
+        if self.linked {
+            self.out.push(msg);
+        }
     }
 
     /// Announce a fresh connection: ask for everything since our cursor and
     /// re-offer everything still pending. Both are safe to repeat — the server
     /// dedupes pushes on entry id.
     pub fn connected(&mut self) -> Result<()> {
-        self.out.push(ClientMsg::Hello { since: self.cursor });
+        self.linked = true;
+        self.emit(ClientMsg::Hello { since: self.cursor });
         let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.intents)?;
         if !pending.is_empty() {
-            self.out.push(ClientMsg::Push { entries: pending });
+            self.emit(ClientMsg::Push { entries: pending });
         }
         Ok(())
+    }
+
+    /// There is no longer anything carrying this client's frames.
+    ///
+    /// A dropped socket, or a peer working deliberately alone — the engine
+    /// cannot tell those apart and does not need to. Both mean the same thing:
+    /// stop writing to the outbox, and drop what is in it.
+    ///
+    /// Nothing is lost. A mutation is durable as an intent before it is ever a
+    /// frame, and [`connected`](Self::connected) re-offers every pending one.
+    /// This used to be a sentence in the documentation of
+    /// [`take_outgoing`](Self::take_outgoing) asking each transport to drain
+    /// and discard — which is a rule every transport had to remember, in its
+    /// own language, and which none of them could make true for the *queueing*
+    /// side.
+    pub fn disconnected(&mut self) {
+        self.linked = false;
+        self.out.clear();
+    }
+
+    /// Whether a transport says it is carrying this client's frames.
+    ///
+    /// Being unlinked is a first-class state, not a failed connection: a peer
+    /// that has never been given a server is in it, and works.
+    pub fn linked(&self) -> bool {
+        self.linked
     }
 
     /// Handle one message from the server.
@@ -236,7 +283,7 @@ impl<A: App> Client<A> {
                 }
                 if has_more {
                     let since = store::contiguous_after(&mut self.conn, self.cursor, APPLY_CHUNK)?;
-                    self.out.push(ClientMsg::Hello { since });
+                    self.emit(ClientMsg::Hello { since });
                 }
             }
             ServerMsg::Ack { ids, seqs } => {
@@ -270,10 +317,12 @@ impl<A: App> Client<A> {
         self.open_optimistic()
     }
 
-    /// Drain messages the client wants to send. A caller with no connection
-    /// should drain and discard rather than let the queue grow: reconnecting
-    /// with [`connected`](Self::connected) re-offers everything still pending,
-    /// and the server dedupes what it has already seen.
+    /// Drain messages the client wants to send.
+    ///
+    /// Empty while unlinked, because nothing is queued then — say
+    /// [`disconnected`](Self::disconnected) when the transport goes away and
+    /// the engine keeps the outbox empty itself, rather than every transport
+    /// remembering to throw frames on the floor.
     pub fn take_outgoing(&mut self) -> Vec<ClientMsg<A::Mutation>> {
         std::mem::take(&mut self.out)
     }
