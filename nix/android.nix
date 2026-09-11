@@ -302,18 +302,26 @@ rec {
           pkgs.which
         ];
 
-        # No `__noChroot`. Both layers build in a real sandbox: the crates are
-        # vendored, the generator is a derivation rather than a
-        # `cargo install --git`, and `ubrn` is pinned by the app's lockfile.
+        # Sandboxed, except where the NDK has to be emulated.
         #
-        # That is not only a purity argument. A sandboxed build runs at `/build`
-        # on every machine, and a `__noChroot` one runs at
-        # `/nix/var/nix/builds/nix-build-…-<pid>-<random>`. Anything that
-        # records an absolute path — gradle's task history, ninja's `.cxx` —
-        # cannot be carried from one build to the next without it.
+        # Nothing here needs the network: the crates are vendored, the generator
+        # is a derivation rather than a `cargo install --git`, and `ubrn` is
+        # pinned by the app's lockfile. So on a machine that runs the NDK's
+        # x86_64 clang natively, this is a sandboxed build.
         #
-        # An app that still needs the network can put it back with
-        # `overrideAttrs`, and should expect to say why.
+        # On an ARM machine it is not, and that is not about the network either.
+        # The NDK's clang is an x86_64 binary run under qemu, and in a sandbox
+        # it dies resolving its own libc:
+        #
+        #   clang: symbol lookup error: undefined symbol: ceilf,
+        #   version GLIBC_2.2.5
+        #
+        # which is the same failure `CLAUDE.md` records for `nix develop`, where
+        # it was assumed a builder did not have it. No builder had ever been
+        # sandboxed to find out. The cost is real — an impure build has no
+        # stable path, so native build state cannot be carried between
+        # derivations on ARM — and it is paid only where emulation is involved.
+        __noChroot = pkgs.stdenv.buildPlatform.system != "x86_64-linux";
 
         ANDROID_HOME = "${sdk}/libexec/android-sdk";
         ANDROID_SDK_ROOT = "${sdk}/libexec/android-sdk";
