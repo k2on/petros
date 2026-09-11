@@ -32,6 +32,12 @@ let
   # afternoon, so it is named once.
   defaultNdk = "27.1.12297006";
 
+  # cc-rs looks for a compiler under the target triple with its dashes turned
+  # into underscores, and prefers that over the bare `CC`. This is the machine
+  # doing the building, so the same expression is right on an ARM laptop and an
+  # x86_64 runner.
+  hostTriple = builtins.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.buildPlatform.config;
+
   # The engine's crates, as they are named in a dependency table. An app should
   # not have to know this list to patch the engine — it changes when the engine
   # changes, which is here.
@@ -129,18 +135,55 @@ rec {
   mkUbrn =
     { toolchain
     , nodeModules
+      # A lockfile for the generator. It does not ship one — the npm package is
+      # the built CLI plus its Rust sources, and `cargo` is expected to resolve
+      # on the machine that runs it. So the app commits one and passes it here,
+      # which is what makes this build pinned rather than merely offline.
+    , lockFile
+      # That lockfile's dependencies, vendored. Both move together, and with
+      # the app's `bun.lock`, because that decides which generator is in
+      # `node_modules`; nix prints the right hash when it changes.
+    , depsHash
     }:
+    let
+      ubrnSrc = "${nodeModules}/uniffi-bindgen-react-native";
+      vendor = pkgs.stdenv.mkDerivation {
+        name = "ubrn-cargo-vendor";
+        src = ubrnSrc;
+        nativeBuildInputs = [ toolchain pkgs.cacert pkgs.git ];
+        buildPhase = ''
+          export CARGO_HOME=$PWD/.cargo-home
+          cp ${lockFile} Cargo.lock
+          mkdir -p $out
+          cargo vendor --locked --versioned-dirs $out > $out/config.toml
+        '';
+        dontInstall = true;
+        dontFixup = true;
+        outputHashMode = "recursive";
+        outputHashAlgo = "sha256";
+        outputHash = depsHash;
+      };
+    in
     pkgs.stdenv.mkDerivation {
       name = "ubrn";
-      src = "${nodeModules}/uniffi-bindgen-react-native";
+      src = ubrnSrc;
       nativeBuildInputs = [ toolchain pkgs.pkg-config ];
-      # cargo fetches this crate's own dependencies.
-      __noChroot = true;
       buildPhase = ''
         runHook preBuild
         export HOME=$TMPDIR
         export CARGO_HOME=$TMPDIR/cargo
-        cargo build --release --manifest-path crates/ubrn_cli/Cargo.toml
+        cp ${lockFile} Cargo.lock
+        chmod u+w Cargo.lock
+        mkdir -p .cargo
+        cat > .cargo/config.toml <<'VENDOR'
+        [source.crates-io]
+        replace-with = "vendored-sources"
+
+        [source.vendored-sources]
+        directory = "${vendor}"
+        VENDOR
+        cargo build --release --offline \
+          --manifest-path crates/ubrn_cli/Cargo.toml
         runHook postBuild
       '';
       installPhase = ''
@@ -248,8 +291,14 @@ rec {
         # `cargo-ndk` sets `CC` for its child, and cc-rs consults it for *host*
         # artifacts too — which have no NDK sysroot to be built against. A
         # target-qualified variable wins over the bare one.
-        CC_aarch64_unknown_linux_gnu = "gcc";
-        AR_aarch64_unknown_linux_gnu = "ar";
+        #
+        # The triple is the *build* machine's. It read `aarch64` here, which is
+        # one development box, and set nothing at all on an x86_64 runner —
+        # where the only reason it built is that `__noChroot` let the NDK's
+        # clang reach the host's `/usr/include`. Under a real sandbox that
+        # fails on `stdio.h`, which is how this was found.
+        "CC_${hostTriple}" = "gcc";
+        "AR_${hostTriple}" = "ar";
       };
 
       # The cargo configuration both layers share: the vendored dependencies,
