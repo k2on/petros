@@ -106,7 +106,15 @@ rec {
         # for *Android* targets — `armeabi-v7a` and `x86` — nested several
         # directories below where `autoPatchelf --no-recurse` looks. Verified by
         # composing both versions with this overlay: they build.
-        overlays = [ (final: prev: { pkgsi686Linux = prev; }) ];
+        #
+        # `final` rather than `prev`, which is not a style question. `prev` is a
+        # separate fixpoint, so pointing at it gives a second x86_64 package set
+        # whose derivations hash differently from the ordinary ones — and
+        # nothing in it substitutes. It removed the i686 build and replaced it
+        # with glibc, zlib and ncurses compiled from source on every machine.
+        # With `final`, `pkgsi686Linux.glibc` is the same derivation as
+        # `glibc`, which the cache already has.
+        overlays = [ (final: prev: { pkgsi686Linux = final; }) ];
       };
     in
     (x86.androidenv.composeAndroidPackages {
