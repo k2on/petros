@@ -93,6 +93,20 @@ rec {
           allowUnfree = true;
           android_sdk.accept_license = true;
         };
+
+        # No 32-bit set. `build-tools.nix` adds i686 glibc, zlib and ncurses5
+        # whenever the host platform is x86_64 — and this instance always is,
+        # because everything Google ships for Android is. On an aarch64 machine
+        # that asks nix to build ncurses for a third architecture:
+        #
+        #   Required system: 'i686-linux'   Current system: 'aarch64-linux'
+        #
+        # which binfmt is not set up for and which nothing here would run. The
+        # only 32-bit files in build-tools 35 and 36 are RenderScript libraries
+        # for *Android* targets — `armeabi-v7a` and `x86` — nested several
+        # directories below where `autoPatchelf --no-recurse` looks. Verified by
+        # composing both versions with this overlay: they build.
+        overlays = [ (final: prev: { pkgsi686Linux = prev; }) ];
       };
     in
     (x86.androidenv.composeAndroidPackages {
