@@ -280,9 +280,18 @@ rec {
           pkgs.which
         ];
 
-        # `mutators.sh` and friends reach the network; the dependencies do not,
-        # because they are vendored.
-        __noChroot = true;
+        # No `__noChroot`. Both layers build in a real sandbox: the crates are
+        # vendored, the generator is a derivation rather than a
+        # `cargo install --git`, and `ubrn` is pinned by the app's lockfile.
+        #
+        # That is not only a purity argument. A sandboxed build runs at `/build`
+        # on every machine, and a `__noChroot` one runs at
+        # `/nix/var/nix/builds/nix-build-…-<pid>-<random>`. Anything that
+        # records an absolute path — gradle's task history, ninja's `.cxx` —
+        # cannot be carried from one build to the next without it.
+        #
+        # An app that still needs the network can put it back with
+        # `overrideAttrs`, and should expect to say why.
 
         ANDROID_HOME = "${sdk}/libexec/android-sdk";
         ANDROID_SDK_ROOT = "${sdk}/libexec/android-sdk";
