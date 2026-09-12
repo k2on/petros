@@ -64,6 +64,9 @@ crates/petros-wasm-host/     wasmi, for a peer that replaces `apply` at runtime.
 crates/petros-codegen/       reads a module's schema section, writes TypeScript
 crates/petros-axum/          one handler; the app keeps its routes and its auth
 crates/petros-testkit/       the seeded in-process network, generic over an app
+nix/lib/                     what an app builds with: the crate list, the
+                             `[patch]`, the code generator, the wasm module
+modules/                     the flake, one flake-parts module per file
 examples/todo/               the worked example
   schema.sql, src/schema.rs  the model
   src/functions.rs           every mutation and query, each written once
@@ -118,6 +121,24 @@ Depend on these by path while they are unpublished:
 ```toml
 petros = { path = "../petros/crates/petros" }
 ```
+
+## The flake is an app's, too
+
+`flake.nix` names no outputs of its own: it is flake-parts over `import-tree
+./modules`, one file per module, and what an app wants is
+`flakeModules.default`. Importing it puts `petros` in scope of every
+`perSystem` — `engineCrates`, `mkCargoPatch`, `mkCodegen`, `mkMutators` —
+built over the *app's* `pkgs`, so there is one nixpkgs in the app's closure,
+not one per repository. `lib.mkPetros pkgs` is the same for a flake that is
+not flake-parts, and `nix/default.nix` for no flake at all; all three go
+through `nix/lib/default.nix`.
+
+Building an app for a phone is not here. `petros-js` knows about `uniffi`,
+`ubrn` and Expo, and builds on `expo.nix` and `android.nix`; this repository
+knows about none of them. What it does know is its own lockfile: `mkCodegen`
+carries the hash of this repository's vendored dependencies, so
+`nix build .#codegen` here is what says the hash is still right — and the
+first thing to run after touching `Cargo.lock`.
 
 ## Traps that have each already cost a debugging round
 
