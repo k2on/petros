@@ -66,6 +66,50 @@ rec {
   '')
     engineCrates);
 
+  # A shell fragment that refuses to build where emulation cannot be trusted.
+  #
+  # qemu presents a 4 KiB-page address space to an x86_64 guest. Where the host
+  # cannot map at that granularity — a 16 KiB-page kernel, which is what Apple
+  # Silicon runs — mappings that should be independent share a host page, and a
+  # workload with enough mmap churn corrupts itself instead of failing. An `-O3`
+  # compile of the SQLite amalgamation is enough:
+  #
+  #   libc++abi: Pure virtual function called!
+  #   qemu: uncaught target signal 6 (Aborted) - core dumped
+  #
+  # Fourteen minutes in, with nothing naming the cause. Stopping at the start
+  # with a sentence is strictly better, and this is the one check that cannot be
+  # expressed as a dependency: it is a property of the running kernel.
+  #
+  # Verified rather than guessed. `.#androidDeps` builds on an `ubuntu-24.04-arm`
+  # runner — aarch64, same wrappers, same pinned qemu, 4 KiB pages — and aborts
+  # on a 16 KiB laptop.
+  emulationGuard = ''
+    if [ "$(getconf PAGESIZE)" != 4096 ]; then
+      echo "" >&2
+      echo "This kernel uses $(getconf PAGESIZE)-byte pages, and emulating an" >&2
+      echo "x86_64 toolchain needs 4096." >&2
+      echo "" >&2
+      echo "qemu has to present a 4 KiB-page address space to the guest. It" >&2
+      echo "cannot do that faithfully here, and the way it fails is silent:" >&2
+      echo "a large compile corrupts itself rather than stopping, somewhere" >&2
+      echo "in the middle, blaming nothing." >&2
+      echo "" >&2
+      echo "There is no 4 KiB kernel to boot on Apple Silicon — Fedora Asahi" >&2
+      echo "ships a unified 16 KiB one and nixos-apple-silicon is 16 KiB only." >&2
+      echo "What works:" >&2
+      echo "" >&2
+      echo "  - build on an x86_64 machine, where none of this is emulated:" >&2
+      echo "      nix build .#packages.x86_64-linux.<output>" >&2
+      echo "    with '--builders \"ssh://box x86_64-linux\"' to offload it," >&2
+      echo "    or let CI do it" >&2
+      echo "  - or run the build inside a 4 KiB microVM (muvm), which is how" >&2
+      echo "    Fedora Asahi runs x86 binaries at all" >&2
+      echo "" >&2
+      exit 1
+    fi
+  '';
+
   # Everything Google publishes for Android is a `linux-x86_64` binary, so on
   # any other machine the toolchain has to be emulated. Registering
   # `binfmt_misc` for x86_64 is one way to arrange that, and is what this used
@@ -465,6 +509,11 @@ rec {
         # fails on `stdio.h`, which is how this was found.
         "CC_${hostTriple}" = "gcc";
         "AR_${hostTriple}" = "ar";
+
+        # Only where the toolchain is emulated; on x86_64 it simply runs and
+        # the page size is nobody's business.
+        preBuild = lib.optionalString
+          (pkgs.stdenv.buildPlatform.system != "x86_64-linux") emulationGuard;
       };
 
       # The cargo configuration both layers share: the vendored dependencies,
