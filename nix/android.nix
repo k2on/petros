@@ -159,8 +159,18 @@ rec {
           # It also keeps the name: `clang++` is a symlink to `clang`, and the
           # driver reads the last component to decide which language it is
           # compiling.
+          #
+          # `NDK_EMULATION_DEBUG` exists because when this goes wrong it goes
+          # wrong in the guest's dynamic loader, and the failure depends on the
+          # environment it was called in rather than on the binary: the same
+          # clang that `.#ndk-check` drives happily fails under cargo, which
+          # sets `LD_LIBRARY_PATH` for a build script and hands it to every
+          # child. Running it by hand afterwards proves nothing, because by
+          # hand is the case that works. So the question has to be asked from
+          # inside — see `.#androidDeps-debug`.
           cat > "$out/$f" <<WRAPPER
       #!${pkgs.runtimeShell}
+      [ -n "\''${NDK_EMULATION_DEBUG-}" ] && export LD_DEBUG=libs,versions
       exec ${pkgs.qemu-user}/bin/qemu-x86_64 -0 "$out/$f" "$src" "\$@"
       WRAPPER
           chmod +x "$out/$f"
