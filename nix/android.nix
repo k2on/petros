@@ -168,8 +168,31 @@ rec {
           # child. Running it by hand afterwards proves nothing, because by
           # hand is the case that works. So the question has to be asked from
           # inside — see `.#androidDeps-debug`.
+          #
+          # `LD_BIND_NOW` is what makes an emulated toolchain work at all.
+          #
+          # Lazy binding resolves a PLT entry the first time it is called, in
+          # `_dl_runtime_resolve` — and which of those trampolines glibc picks
+          # depends on the CPU features it reads from `cpuid`, one of them
+          # saving vector state with `xsavec`. Emulated, that goes wrong, and
+          # it goes wrong as a *lookup failure* rather than a crash:
+          #
+          #   clang: symbol lookup error: undefined symbol: ceilf,
+          #   version GLIBC_2.2.5
+          #
+          # which reads like a missing library and is nothing of the kind. The
+          # same `ceilf` resolves without complaint when every entry is bound
+          # at startup, which is what this asks for. Demonstrated on the
+          # machine that fails: `clang --version` passes either way, because
+          # nothing in it calls `ceilf`, and an `-O3` compile fails lazily and
+          # succeeds eagerly.
+          #
+          # Only when unset, so a caller can ask for the lazy path back — which
+          # `.#ndk-check` does, to keep the property under test rather than
+          # merely commented.
           cat > "$out/$f" <<WRAPPER
       #!${pkgs.runtimeShell}
+      [ -z "\''${LD_BIND_NOW+set}" ] && export LD_BIND_NOW=1
       [ -n "\''${NDK_EMULATION_DEBUG-}" ] && export LD_DEBUG=libs,versions
       exec ${pkgs.qemu-user}/bin/qemu-x86_64 -0 "$out/$f" "$src" "\$@"
       WRAPPER
