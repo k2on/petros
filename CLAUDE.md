@@ -66,6 +66,7 @@ crates/petros-axum/          one handler; the app keeps its routes and its auth
 crates/petros-testkit/       the seeded in-process network, generic over an app
 nix/lib/                     what an app builds with: the crate list, the
                              `[patch]`, the code generator, the wasm module
+nix/app/                     an app's flake, minus the app: `lib.mkApp`
 modules/                     the flake, one flake-parts module per file
 examples/todo/               the worked example
   schema.sql, src/schema.rs  the model
@@ -124,14 +125,30 @@ petros = { path = "../petros/crates/petros" }
 
 ## The flake is an app's, too
 
-`flake.nix` names no outputs of its own: it is flake-parts over `import-tree
-./modules`, one file per module, and what an app wants is
-`flakeModules.default`. Importing it puts `petros` in scope of every
-`perSystem` — `engineCrates`, `mkCargoPatch`, `mkCodegen`, `mkMutators` —
-built over the *app's* `pkgs`, so there is one nixpkgs in the app's closure,
-not one per repository. `lib.mkPetros pkgs` is the same for a flake that is
-not flake-parts, and `nix/default.nix` for no flake at all; all three go
-through `nix/lib/default.nix`.
+An app's `flake.nix` is four lines: nixpkgs, this repository, and
+`outputs = inputs: inputs.petros.lib.mkApp inputs ./.;`. `mkApp` is
+flake-parts over every `*.nix` under the app's root — the dendritic pattern,
+`import-tree` over the tree — plus `nix/app` here, which is what every app
+shares: the toolchain, the workspace, the three checks and their `nix run`
+twins, the devshell, and the wasm module a domain compiles to when the app
+sets `petros.mutators`. Which directories exist is what wires the rest, each
+through its own `nix/`: a `server/nix` adds a server, a `mobile/nix` adds a
+phone (from `petros-js`), and a program with neither is a crate and that
+`flake.nix`.
+
+The app's `Cargo.toml` is the one place the engine is pinned.
+`nix/app/workspace.nix` reads the revision back and fetches this repository
+at it — the crates for the `[patch]`, `petros-codegen` for the module, and
+`rust-toolchain.toml` for the toolchain — so the app's `petros` input is only
+the code that reads `Cargo.toml`, and bumping the engine is editing that file.
+What a directory contributes to the workspace — libraries the checks need,
+tools and a hook for the shell, paths a cross-compile reads — goes through
+the `petros.*` options in `workspace.nix`.
+
+`flakeModules.default` puts the library alone — `engineCrates`,
+`mkCargoPatch`, `mkCodegen`, `mkMutators` — in scope of a flake-parts flake;
+`lib.mkPetros pkgs` is the same for one that is not, and `nix/default.nix` for
+no flake at all.
 
 Building an app for a phone is not here. `petros-js` knows about `uniffi`,
 `ubrn` and Expo, and builds on `expo.nix` and `android.nix`; this repository
