@@ -42,10 +42,12 @@
       crateName = dir: (builtins.fromTOML (builtins.readFile (appRoot + "/${dir}/Cargo.toml"))).package.name;
 
       # The engine, at the revision `Cargo.toml` pins.
+      # `allRefs`, because a revision that is not a branch tip cannot be
+      # fetched shallowly from GitHub.
       petrosSrc = builtins.fetchGit {
         url = deps.petros.git;
         rev = deps.petros.rev;
-        shallow = true;
+        allRefs = true;
       };
       petros = import "${petrosSrc}/nix" { inherit pkgs; };
 
