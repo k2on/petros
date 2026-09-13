@@ -30,7 +30,7 @@
 
 /// Bumped when the host/guest contract changes, so a mismatched pair says so
 /// rather than corrupting a database.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// The module the host satisfies the imports from.
 pub const IMPORT_MODULE: &str = "petros";
@@ -156,8 +156,9 @@ macro_rules! export {
             unsafe { $crate::free(ptr, len) }
         }
 
-        /// Apply one mutation, as the CBOR payload the log stores, verbatim.
-        /// Zero for success; otherwise a packed refusal reason.
+        /// Apply one mutation, as the CBOR payload the log stores, verbatim,
+        /// with the entry's context as `Ctx::to_cbor` encodes it. Zero for
+        /// success; otherwise a packed refusal reason.
         ///
         /// # Safety
         /// The host must pass pointer/length pairs describing live buffers in
@@ -167,17 +168,17 @@ macro_rules! export {
         pub unsafe extern "C" fn petros_apply(
             mutation: *const u8,
             mutation_len: u32,
-            actor: *const u8,
-            actor_len: u32,
+            ctx: *const u8,
+            ctx_len: u32,
         ) -> u64 {
             let payload = unsafe { ::core::slice::from_raw_parts(mutation, mutation_len as usize) };
-            let who = unsafe { ::core::slice::from_raw_parts(actor, actor_len as usize) };
-            let who = ::core::str::from_utf8(who).unwrap_or("");
+            let ctx = unsafe { ::core::slice::from_raw_parts(ctx, ctx_len as usize) };
+            let ctx = $crate::petros_schema::Ctx::from_cbor(ctx).unwrap_or_default();
 
             let outcome = match $crate::decode(payload) {
                 Ok(value) => {
                     use $domain as domain;
-                    domain::apply(&mut PetrosStore, &value, who)
+                    domain::apply(&mut PetrosStore, &value, &ctx)
                 }
                 Err(e) => Err(e),
             };

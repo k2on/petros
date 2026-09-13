@@ -13,6 +13,7 @@ diesel::table! {
         id -> Binary,
         actor -> Text,
         payload -> Binary,
+        session -> Nullable<Text>,
     }
 }
 
@@ -23,6 +24,7 @@ diesel::table! {
         id -> Binary,
         actor -> Text,
         payload -> Binary,
+        session -> Nullable<Text>,
     }
 }
 

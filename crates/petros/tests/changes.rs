@@ -96,5 +96,6 @@ fn confirmed(seq: u64, actor: &str) -> petros::Entry<todo::Payload> {
         seq: Some(seq),
         actor: actor.into(),
         mutation,
+        session: None,
     }
 }

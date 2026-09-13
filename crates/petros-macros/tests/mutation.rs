@@ -15,6 +15,7 @@ type NewId = petros_schema::Id;
 type Now = i64;
 #[allow(dead_code)]
 type Actor<'a> = &'a str;
+use petros_schema::Ctx;
 
 /// A store that remembers what it was asked, so a test can see what `apply`
 /// did without a database.
@@ -112,7 +113,7 @@ fn applying_runs_the_body_against_the_store() {
     petros_schema::cbor::set(&mut m, "added_ms", Value::Integer(1234.into()));
 
     let mut db = Recorder::default();
-    __petros_apply_add_song(&mut db, &m, "alice").expect("applies");
+    __petros_apply_add_song(&mut db, &m, &Ctx::from_user("alice")).expect("applies");
 
     assert_eq!(db.writes.len(), 1);
     let (table, params) = &db.writes[0];
@@ -132,9 +133,41 @@ fn a_refusal_comes_back_from_the_body() {
     petros_schema::cbor::set(&mut m, "added_ms", Value::Integer(1.into()));
 
     let mut db = Recorder::default();
-    let refused = __petros_apply_add_song(&mut db, &m, "alice");
+    let refused = __petros_apply_add_song(&mut db, &m, &Ctx::from_user("alice"));
     assert_eq!(refused, Err("a song needs a title".to_string()));
     assert!(db.writes.is_empty(), "nothing was written");
+}
+
+/// Note who is listening, and on which login: the whole context, not only
+/// the actor.
+#[petros_macros::mutation]
+pub fn listen(db: &mut Db, ctx: &Ctx, song: petros_schema::Id) -> Result<(), String> {
+    db.put_row(
+        "listen",
+        &[
+            petros_schema::Value::Blob(song),
+            petros_schema::Value::Text(ctx.user.id.clone()),
+            petros_schema::Value::Text(ctx.session.id.clone()),
+        ],
+    )
+    .unwrap();
+    Ok(())
+}
+
+/// `ctx: &Ctx` binds the user and the session the entry carries, and `Actor`
+/// is the user alone. Neither is an argument a caller passes.
+#[test]
+fn the_context_is_bound_and_is_not_an_argument() {
+    assert_eq!(listen::ARGS, &[("song", petros_schema::Ty::Id)]);
+    assert_eq!(listen::AUTO, &[]);
+    let m = listen(vec![2; 16]);
+    assert_eq!(field(&m, "ctx"), None);
+
+    let mut db = Recorder::default();
+    __petros_apply_listen(&mut db, &m, &Ctx::new("alice", "phone-1")).expect("applies");
+    let (_, params) = &db.writes[0];
+    assert_eq!(params[1], petros_schema::Value::Text("alice".into()));
+    assert_eq!(params[2], petros_schema::Value::Text("phone-1".into()));
 }
 
 /// Take a song back out of the playlist.
@@ -145,7 +178,7 @@ pub fn unfavorite(db: &mut Db, id: petros_schema::Id) -> Result<(), String> {
     Ok(())
 }
 
-petros_macros::peer!(add_song, unfavorite);
+petros_macros::peer!(add_song, listen, unfavorite);
 
 /// Dispatch turns a verb read out of the log into a call, and says what it
 /// knows when it cannot.
@@ -154,12 +187,12 @@ fn dispatch_routes_by_verb() {
     let mut m = add_song("Glue".into(), "Bicep".into());
     fill_auto(&mut m, vec![3; 16], 99);
     let mut db = Recorder::default();
-    apply(&mut db, &m, "alice").expect("routed to add_song");
+    apply(&mut db, &m, &Ctx::from_user("alice")).expect("routed to add_song");
     assert_eq!(db.writes.len(), 1);
 
     let mut m = unfavorite(vec![4; 16]);
     fill_auto(&mut m, vec![0; 16], 0);
-    apply(&mut db, &m, "alice").expect("routed to unfavorite");
+    apply(&mut db, &m, &Ctx::from_user("alice")).expect("routed to unfavorite");
     // `unfavorite` deletes, and a delete is not a write this recorder keeps.
     assert_eq!(db.writes.len(), 1);
 
@@ -167,7 +200,7 @@ fn dispatch_routes_by_verb() {
         Value::Text("t".into()),
         Value::Text("Frobnicate".into()),
     )]);
-    let e = apply(&mut db, &unknown, "alice").unwrap_err();
+    let e = apply(&mut db, &unknown, &Ctx::from_user("alice")).unwrap_err();
     assert!(e.contains("Frobnicate"), "{e}");
     assert!(e.contains("AddSong"), "it says what it does know: {e}");
 }
@@ -195,6 +228,6 @@ fn fill_auto_follows_the_signature() {
 #[test]
 fn the_schema_is_every_verb_and_its_arguments() {
     let s = schema();
-    assert_eq!(s.names(), ["AddSong", "Unfavorite"]);
+    assert_eq!(s.names(), ["AddSong", "Listen", "Unfavorite"]);
     assert_eq!(s.verb("AddSong").unwrap().args.len(), 2);
 }

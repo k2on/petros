@@ -28,7 +28,11 @@
 //!   and frozen in the log. `apply` may not invent one, because all it can reach
 //!   is the store.
 //! - `Now` — the clock, frozen the same way.
-//! - `Actor` — who authored the entry.
+//! - `&Ctx` — who authored the entry and under which login, as
+//!   `ctx.user.id` and `ctx.session.id`. Frozen with the entry, and verified
+//!   by a server that authenticates.
+//! - `Actor` — `ctx.user.id` alone, as a `&str`, for a function that wants
+//!   nothing else about the author.
 //!
 //! Everything after those is an argument, and is what appears in the authoring
 //! function, in the schema a module carries, and in the generated TypeScript.
@@ -44,16 +48,22 @@ enum Ctx {
     NewId,
     Now,
     Actor,
+    Whole,
 }
 
 impl Ctx {
     fn of(ty: &Type) -> Option<Ctx> {
         let text = quote!(#ty).to_string().replace(' ', "");
-        match text.trim_start_matches('&').trim_start_matches("mut") {
+        let bare = text.trim_start_matches('&').trim_start_matches("mut");
+        // Matched on the last path segment, so `Ctx`, `petros::Ctx` and
+        // `petros_schema::Ctx` are all the same thing to a reader and to this.
+        let last = bare.rsplit("::").next().unwrap_or(bare);
+        match last {
             "Db" => Some(Ctx::Db),
             "NewId" => Some(Ctx::NewId),
             "Now" => Some(Ctx::Now),
             "Actor" => Some(Ctx::Actor),
+            "Ctx" => Some(Ctx::Whole),
             _ => None,
         }
     }
@@ -171,7 +181,7 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
         .expect("checked in parse");
 
     // The engine's parameters, bound from what `fill_auto` froze into the entry
-    // and from the actor the log records.
+    // and from the context the log records with it.
     let ctx_binds = parsed
         .ctx
         .iter()
@@ -191,7 +201,8 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
                         .ok_or_else(|| ::std::format!(
                             "{} has no {}; fill_auto did not run", #verb_lit, #field))?;
                 },
-                Ctx::Actor => quote! { let #n: &str = actor; },
+                Ctx::Actor => quote! { let #n: &str = ctx.actor(); },
+                Ctx::Whole => quote! { let #n: &::petros_schema::Ctx = ctx; },
                 Ctx::Db => unreachable!(),
             }
         });
@@ -298,7 +309,7 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
         pub fn #apply_fn<S: ::petros_schema::Store>(
             #db: &mut S,
             mutation: &::petros_schema::cbor::Value,
-            actor: &str,
+            ctx: &::petros_schema::Ctx,
         ) -> ::core::result::Result<(), ::std::string::String> {
             #(#ctx_binds)*
             #(#arg_binds)*
@@ -403,8 +414,8 @@ fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
         return Err(syn::Error::new_spanned(
             &f.sig,
             "a query takes only `db: &mut Db` from the engine. `NewId` and `Now` are \
-             frozen into a log entry, and a query does not write one; `Actor` is who \
-             authored an entry, and a query reads every peer's.",
+             frozen into a log entry, and a query does not write one; `Ctx` and `Actor` \
+             say who authored an entry, and a query reads every peer's.",
         ));
     }
     let name = f.sig.ident.clone();
@@ -500,13 +511,13 @@ pub fn peer(item: TokenStream) -> TokenStream {
         pub fn apply<S: ::petros_schema::Store>(
             db: &mut S,
             mutation: &::petros_schema::cbor::Value,
-            actor: &str,
+            ctx: &::petros_schema::Ctx,
         ) -> ::core::result::Result<(), ::std::string::String> {
             let tag = ::petros_schema::cbor::field(mutation, "t")
                 .and_then(::petros_schema::cbor::as_text)
                 .unwrap_or_default();
             match tag.as_str() {
-                #( #names::VERB => #applies(db, mutation, actor), )*
+                #( #names::VERB => #applies(db, mutation, ctx), )*
                 // A verb this build has never heard of. The log is permanent and
                 // verbs are only ever added, so this is a peer newer than us.
                 // Saying what this one *does* know turns "why did nothing

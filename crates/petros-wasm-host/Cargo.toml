@@ -12,7 +12,7 @@ ciborium.workspace = true
 # paths and need to find the crate at that name.
 diesel.workspace = true
 petros.workspace = true
-petros-schema = { workspace = true, features = ["serde"] }
+petros-schema = { workspace = true, features = ["serde", "cbor"] }
 # A pure-Rust wasm interpreter. No JIT, which is what makes it legal on iOS and
 # what lets one module run on a server, in a TUI and on a phone.
 wasmi = "2"

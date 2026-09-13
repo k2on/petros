@@ -80,7 +80,7 @@ fn a_wasm_module_applies_mutations_to_a_real_database() {
     for text in ["buy milk", "buy oats"] {
         let payload = authored(&mutators, &mut auto, text);
         mutators
-            .apply(&mut conn, &payload, "alice")
+            .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
             .expect("the host ran")
             .expect("the module accepted it");
     }
@@ -101,7 +101,7 @@ fn a_refusal_crosses_the_boundary_as_a_refusal() {
 
     let payload = authored(&mutators, &mut auto, "   ");
     let refusal = mutators
-        .apply(&mut conn, &payload, "alice")
+        .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
         .expect("the host ran")
         .expect_err("blank text is refused");
     assert_eq!(refusal, "a to-do needs some text");
@@ -142,7 +142,10 @@ fn redelivery_of_the_same_entry_is_a_no_op() {
 
     let payload = authored(&mutators, &mut auto, "once only");
     for _ in 0..3 {
-        mutators.apply(&mut conn, &payload, "bob").unwrap().unwrap();
+        mutators
+            .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("bob"))
+            .unwrap()
+            .unwrap();
     }
     assert_eq!(rows(&mut conn).len(), 1);
 }
@@ -168,7 +171,10 @@ fn swapping_the_module_keeps_the_peer_running() {
     let mut auto = AutoCtx::seeded(9);
 
     let first = authored(&mutators, &mut auto, "before the swap");
-    mutators.apply(&mut conn, &first, "alice").unwrap().unwrap();
+    mutators
+        .apply(&mut conn, &first, &petros_schema::Ctx::from_user("alice"))
+        .unwrap()
+        .unwrap();
 
     assert_eq!(mutators.generation, 1);
     mutators.swap(MODULE).expect("hot swap");
@@ -177,7 +183,7 @@ fn swapping_the_module_keeps_the_peer_running() {
     // The database is untouched by the swap, and the new module carries on.
     let second = authored(&mutators, &mut auto, "after the swap");
     mutators
-        .apply(&mut conn, &second, "alice")
+        .apply(&mut conn, &second, &petros_schema::Ctx::from_user("alice"))
         .unwrap()
         .unwrap();
 
@@ -201,7 +207,7 @@ fn report_the_on_device_costs() {
     let mut auto = AutoCtx::seeded(5);
     let payload = authored(&mutators, &mut auto, "warm");
     mutators
-        .apply(&mut conn, &payload, "alice")
+        .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
         .unwrap()
         .unwrap();
 
@@ -209,7 +215,10 @@ fn report_the_on_device_costs() {
     let t = Instant::now();
     for i in 0..n {
         let p = authored(&mutators, &mut auto, &format!("item {i}"));
-        mutators.apply(&mut conn, &p, "alice").unwrap().unwrap();
+        mutators
+            .apply(&mut conn, &p, &petros_schema::Ctx::from_user("alice"))
+            .unwrap()
+            .unwrap();
     }
     let each = t.elapsed() / n;
 
@@ -280,7 +289,7 @@ fn every_declared_verb_is_one_the_module_handles() {
         ciborium::into_writer(&ciborium::value::Value::Map(fields), &mut payload).unwrap();
 
         let outcome = mutators
-            .apply(&mut conn, &payload, "alice")
+            .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
             .expect("the host ran");
         if let Err(reason) = outcome {
             assert!(
@@ -359,7 +368,7 @@ fn outcome(mutators: &Mutators, payload: &[u8]) -> String {
     )
     .expect("seed");
     let verdict = mutators
-        .apply(&mut conn, payload, "alice")
+        .apply(&mut conn, payload, &petros_schema::Ctx::from_user("alice"))
         .expect("the host ran");
     let rows: Vec<String> = rows_of(&mut conn)
         .iter()
@@ -397,7 +406,7 @@ fn an_unknown_verb_says_what_the_module_does_know() {
     .unwrap();
 
     let reason = mutators
-        .apply(&mut conn, &payload, "alice")
+        .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
         .expect("the host ran")
         .expect_err("Frobnicate is not a verb");
     assert!(reason.contains("Frobnicate"), "{reason}");
@@ -432,7 +441,10 @@ fn a_reused_instance_does_not_grow() {
         let mut bytes = Vec::new();
         ciborium::into_writer(&raw, &mut bytes).unwrap();
         let filled = mutators.fill_auto(&bytes, &mut auto).unwrap();
-        mutators.apply(&mut db, &filled, "alice").unwrap().unwrap();
+        mutators
+            .apply(&mut db, &filled, &petros_schema::Ctx::from_user("alice"))
+            .unwrap()
+            .unwrap();
         if i % 20 == 19 {
             pages.push(mutators.memory_pages());
         }
@@ -461,7 +473,10 @@ fn a_module_reports_what_it_changed() {
     let mut auto = petros::AutoCtx::seeded(1);
 
     let payload = filled(&m, &mut auto, todo::add("first".into()));
-    let changes = m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    let changes = m
+        .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
+        .unwrap()
+        .unwrap();
     assert_eq!(changes.len(), 1, "one row added: {changes:?}");
     assert!(
         matches!(&changes[0], petros_schema::Change::Add { table, .. } if table == "todo"),
@@ -471,9 +486,14 @@ fn a_module_reports_what_it_changed() {
     // A verb that writes several rows reports several: the collection is per
     // apply, not per request.
     let payload = filled(&m, &mut auto, todo::add("second".into()));
-    m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    m.apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
+        .unwrap()
+        .unwrap();
     let payload = filled(&m, &mut auto, todo::mark_all_done());
-    let changes = m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    let changes = m
+        .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
+        .unwrap()
+        .unwrap();
     assert_eq!(changes.len(), 2, "both to-dos were edited: {changes:?}");
     assert!(
         changes
@@ -484,7 +504,10 @@ fn a_module_reports_what_it_changed() {
 
     // And a fresh apply does not repeat what an earlier one reported.
     let payload = filled(&m, &mut auto, todo::add("third".into()));
-    let changes = m.apply(&mut conn, &payload, "alice").unwrap().unwrap();
+    let changes = m
+        .apply(&mut conn, &payload, &petros_schema::Ctx::from_user("alice"))
+        .unwrap()
+        .unwrap();
     assert_eq!(changes.len(), 1);
 }
 

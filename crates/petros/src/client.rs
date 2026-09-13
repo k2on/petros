@@ -60,6 +60,13 @@ pub enum Changes {
 pub struct Client<A: App> {
     conn: Connection,
     actor: ActorId,
+    /// The login this client authors under, stamped on every entry. See
+    /// [`Entry::session`].
+    session: Option<String>,
+    /// What proves the login to a server, sent with every `Hello`.
+    token: Option<String>,
+    /// The server's last word on that token, until someone asks.
+    denied: Option<String>,
     auto: AutoCtx,
     /// Highest confirmed sequence number applied. Contiguous from 1 by
     /// construction: a gap stops us until the missing entry arrives.
@@ -127,6 +134,9 @@ impl<A: App> Client<A> {
             conn,
             intents,
             actor: actor.into(),
+            session: None,
+            token: None,
+            denied: None,
             auto,
             cursor,
             savepoint_open: false,
@@ -181,6 +191,32 @@ impl<A: App> Client<A> {
         &self.actor
     }
 
+    /// Author under this login from now on. Every entry made after this
+    /// carries it, and a server that authenticates checks it belongs to
+    /// [`actor`](Self::actor).
+    pub fn set_session(&mut self, session: Option<String>) {
+        self.session = session;
+    }
+
+    /// The login this client authors under, if it has one.
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    /// What to prove the login with. Sent in every `Hello` from now on —
+    /// including the one [`connected`](Self::connected) sends, so set it
+    /// first.
+    pub fn set_token(&mut self, token: Option<String>) {
+        self.token = token;
+    }
+
+    /// The reason the server turned this client away, if it did since the
+    /// last ask. The connection is over by then; the fix is a new token and
+    /// a new [`connected`](Self::connected).
+    pub fn take_denial(&mut self) -> Option<String> {
+        self.denied.take()
+    }
+
     /// Highest confirmed sequence number this client has applied.
     pub fn cursor(&self) -> Seq {
         self.cursor
@@ -201,7 +237,8 @@ impl<A: App> Client<A> {
         // Exactly once, here at the origin. From now on these arguments are
         // frozen: no replay of this entry will ever regenerate them.
         mutation.fill_auto(&mut self.auto);
-        let entry = Entry::new(self.auto.uuid(), self.actor.clone(), mutation);
+        let mut entry = Entry::new(self.auto.uuid(), self.actor.clone(), mutation);
+        entry.session = self.session.clone();
 
         // Try it against the view the caller is actually looking at, and record
         // the intent — both inside one transaction, so a tap costs one commit.
@@ -233,7 +270,10 @@ impl<A: App> Client<A> {
     /// dedupes pushes on entry id.
     pub fn connected(&mut self) -> Result<()> {
         self.linked = true;
-        self.emit(ClientMsg::Hello { since: self.cursor });
+        self.emit(ClientMsg::Hello {
+            since: self.cursor,
+            token: self.token.clone(),
+        });
         let pending: Vec<Entry<A::Mutation>> = store::pending(&mut self.intents)?;
         if !pending.is_empty() {
             self.emit(ClientMsg::Push { entries: pending });
@@ -283,7 +323,10 @@ impl<A: App> Client<A> {
                 }
                 if has_more {
                     let since = store::contiguous_after(&mut self.conn, self.cursor, APPLY_CHUNK)?;
-                    self.emit(ClientMsg::Hello { since });
+                    self.emit(ClientMsg::Hello {
+                        since,
+                        token: self.token.clone(),
+                    });
                 }
             }
             ServerMsg::Ack { ids, seqs } => {
@@ -298,6 +341,7 @@ impl<A: App> Client<A> {
                     if let Some(entry) = pending.iter().find(|e| &e.id == id) {
                         let confirmed = Entry {
                             seq: Some(seq),
+                            session: entry.session.clone(),
                             ..Entry::new(entry.id, entry.actor.clone(), &entry.mutation)
                         };
                         store::put_confirmed(&mut self.conn, &confirmed)?;
@@ -308,6 +352,11 @@ impl<A: App> Client<A> {
             ServerMsg::Reject { id, reason } => {
                 store::drop_pending(&mut self.intents, &id)?;
                 self.rejections.push(Rejection { id, reason });
+            }
+            // Not about any entry: nothing is dropped, and everything pending
+            // is re-offered by the next `connected` that the server accepts.
+            ServerMsg::Denied { reason } => {
+                self.denied = Some(reason);
             }
         }
         self.advance()?;
@@ -403,7 +452,7 @@ impl<A: App> Client<A> {
         self.conn.batch_execute("SAVEPOINT one")?;
         let (outcome, changes) = {
             let mut tx = Transaction::new(&mut self.conn);
-            let outcome = entry.mutation.apply(&mut tx, &entry.actor);
+            let outcome = entry.mutation.apply(&mut tx, &entry.ctx());
             (outcome, tx.take_recorded())
         };
         match outcome {
@@ -501,7 +550,7 @@ fn apply_confirmed<M: Mutation>(
         // server disagree about what the same arguments mean — a determinism
         // bug. Fail loudly rather than diverge quietly.
         let mut tx = Transaction::new(conn);
-        let outcome = entry.mutation.apply(&mut tx, &entry.actor);
+        let outcome = entry.mutation.apply(&mut tx, &entry.ctx());
         changes.extend(tx.take_recorded());
         outcome?;
     }
@@ -515,7 +564,7 @@ fn replay<M: Mutation>(conn: &mut Connection, pending: &[Entry<M>]) -> Result<Ve
     for entry in pending {
         match entry
             .mutation
-            .apply(&mut Transaction::new(conn), &entry.actor)
+            .apply(&mut Transaction::new(conn), &entry.ctx())
         {
             Ok(()) => {}
             Err(MutationError::Rejected(reason)) => rejected.push(Rejection {

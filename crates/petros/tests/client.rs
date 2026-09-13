@@ -220,7 +220,7 @@ fn connect_replays_hello_and_pending() {
 
     c.connected().unwrap();
     let out = c.take_outgoing();
-    assert!(matches!(out[0], ClientMsg::Hello { since: 0 }));
+    assert!(matches!(out[0], ClientMsg::Hello { since: 0, .. }));
     match &out[1] {
         ClientMsg::Push { entries } => assert_eq!(entries.len(), 1),
         other => panic!("expected a Push, got {other:?}"),

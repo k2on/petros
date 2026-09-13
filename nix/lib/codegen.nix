@@ -23,7 +23,7 @@ in
   mkCodegen =
     { toolchain
     , src ? ../..
-    , depsHash ? "sha256-WcgEW07qNxOpjun5jJnxcsYOp8wwzrF0I2lRXGNUcB8="
+    , depsHash ? "sha256-+H7te9oYpWtxnc6IjC+FDJHrJFmg2jcSXaVHVzmVOGI="
     }:
     let
       vendor = pkgs.stdenv.mkDerivation {

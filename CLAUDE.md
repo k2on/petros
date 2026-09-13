@@ -36,6 +36,9 @@ story: no CRDTs, no vector clocks, no merge functions.
   `Connection::transaction` on a client's connection: the optimistic savepoint
   outlives any single call, so boundaries are raw SQL through `batch_execute`.
 - Petros owns tables prefixed `petros_`. The app owns everything else.
+- The server decides who a connection is, once, at `Hello`, through
+  `Authenticate`; every entry it pushes is held to that. `Trusting` is the
+  one authenticator that asks nothing, for a simulation or a test.
 - `petros::client` and `petros::server` are sans-io: no sockets, no async, no
   runtime. That is what makes the deterministic simulation tests possible. The
   transport module is the only place networking lives.
@@ -62,7 +65,9 @@ crates/petros-wasm-guest/    `export!` — an app's wasm crate is one line
 crates/petros-wasm-host/     wasmi, for a peer that replaces `apply` at runtime.
                              Knows nothing about any domain
 crates/petros-codegen/       reads a module's schema section, writes TypeScript
-crates/petros-axum/          one handler; the app keeps its routes and its auth
+crates/petros-axum/          one handler; the app keeps its routes
+crates/petros-auth/          who a peer is: OpenID Connect on the server, the
+                             sessions it issues, and how each client gets one
 crates/petros-testkit/       the seeded in-process network, generic over an app
 nix/lib/                     what an app builds with: the crate list, the
                              `[patch]`, the code generator, the wasm module
@@ -99,7 +104,14 @@ visible.
 over its `schema.sql`, and `functions.rs` is every mutation and query written
 once as an ordinary Rust function. `petros::app!` wires dispatch,
 `petros_wasm_guest::export!` gives the wasm build, `petros-axum` serves it, and
-`petros-testkit` runs it against a simulated fleet.
+`petros-testkit` runs it against a simulated fleet, and `petros-auth` signs
+people in — OpenID Connect on the server, one URL and one code on every
+client — and is what the hub is opened with.
+
+A mutation takes `ctx: &Ctx` to know who authored the entry (`ctx.user.id`)
+and under which login (`ctx.session.id`); both are frozen with the entry and
+checked by the server against the login that pushed it. `Actor` is the short
+form, `ctx.user.id` as a `&str`.
 
 **There is no SQL in an app.** Reads and writes are the same shape over the
 generated row types, a write reports what it changed, and a relationship comes

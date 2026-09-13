@@ -14,7 +14,7 @@
 mod common;
 
 use common::todo::{items, TodoMutation};
-use petros::{ActorId, App, AutoCtx, Client, Mutation, MutationError, Transaction};
+use petros::{App, AutoCtx, Client, Ctx, Mutation, MutationError, Transaction};
 
 /// The same app, a release later, with one mutation's meaning changed.
 ///
@@ -39,7 +39,7 @@ impl Mutation for Mutation2 {
         self.0.fill_auto(ctx)
     }
 
-    fn apply(&self, tx: &mut Transaction, actor: &ActorId) -> Result<(), MutationError> {
+    fn apply(&self, tx: &mut Transaction, ctx: &Ctx) -> Result<(), MutationError> {
         match &self.0 {
             // The change: positions now step by ten, so a later insert can be
             // slid between two without renumbering. An entirely reasonable
@@ -65,14 +65,14 @@ impl Mutation for Mutation2 {
                         done: false,
                         pos: last.unwrap_or(0) + 10,
                         created_ms: *created_ms,
-                        actor: actor.as_str().to_string(),
+                        actor: ctx.actor().to_string(),
                         claimed_by: None,
                     })
                     .on_conflict_do_nothing()
                     .execute(conn)?;
                 Ok(())
             }
-            other => other.apply(tx, actor),
+            other => other.apply(tx, ctx),
         }
     }
 }
@@ -92,6 +92,7 @@ fn authored(client: &mut Client<common::todo::Todo>) -> Vec<petros::Entry<TodoMu
             seq: Some(i as u64 + 1),
             actor: e.actor,
             mutation: e.mutation,
+            session: e.session,
         })
         .collect()
 }
@@ -142,6 +143,7 @@ fn a_peer_built_later_replays_history_differently() {
                     seq: e.seq,
                     actor: e.actor,
                     mutation: Mutation2(e.mutation),
+                    session: e.session,
                 })
                 .collect(),
             has_more: false,

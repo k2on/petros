@@ -6,21 +6,22 @@
 //! its own `Router`, its own path, and its own authentication.
 //!
 //! ```ignore
-//! let hub = petros_axum::Hub::<TodoApp>::open(petros::open_path("server.db")?)?;
+//! let hub = petros_axum::Hub::<TodoApp>::open(petros::open_path("server.db")?, sessions)?;
 //! let app = Router::new()
 //!     .route("/sync", get(petros_axum::sync::<TodoApp>))
 //!     .route("/healthz", get(healthz))
-//!     .layer(your_auth_layer)
 //!     .with_state(hub);
 //! ```
 //!
-//! # What this does not do
+//! # Who a client is
 //!
-//! It does not authenticate. A client asserts its own actor inside each entry,
-//! and the engine takes that at face value — so anything that matters has to be
-//! enforced by a layer above, which is why this is a handler you mount rather
-//! than a server you start. Give it a route behind your own middleware and the
-//! middleware runs first.
+//! Is decided by the [`Authenticate`] the hub is opened with, at every
+//! `Hello`: the engine asks it what the client's token proves and refuses
+//! entries from anyone else. `petros-auth` is one — sessions it issued after
+//! an OpenID Connect login — and [`petros::Trusting`] is none, for a server
+//! behind something that has already decided. Nothing here reads a header:
+//! the token travels in the frame, so a browser, a phone and a desktop all
+//! prove themselves the same way.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +31,9 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
-use petros::{decode, encode, App, ClientMsg, ConnId, Connection, Result, Server};
+use petros::{
+    decode, encode, App, Authenticate, ClientMsg, ConnId, Connection, Result, Server, ServerMsg,
+};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 /// The server, plus who is currently connected to it.
@@ -45,10 +48,11 @@ pub struct Hub<A: App> {
 }
 
 impl<A: App> Hub<A> {
-    /// Open the server's database, running Petros' migrations and the app's.
-    pub fn open(conn: Connection) -> Result<Arc<Self>> {
+    /// Open the server's database, running Petros' migrations and the app's,
+    /// with `auth` deciding who each connection is.
+    pub fn open(conn: Connection, auth: impl Authenticate) -> Result<Arc<Self>> {
         Ok(Arc::new(Hub {
-            server: Mutex::new(Server::open(conn)?),
+            server: Mutex::new(Server::open_with(conn, auth)?),
             peers: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
         }))
@@ -69,25 +73,34 @@ impl<A: App> Hub<A> {
         self.peers.lock().map(|p| p.len()).unwrap_or(0)
     }
 
-    /// Feed one message in and deliver everything that falls out.
+    /// Feed one message in and deliver everything that falls out. Says
+    /// whether the connection is still welcome: a denial is the last frame
+    /// it gets, and the socket is closed behind it.
     ///
     /// The lock is dropped before anything is sent, and nothing is awaited
     /// while it is held — the server's work is a few SQLite statements, tens of
     /// microseconds, so it runs inline rather than on a blocking pool.
-    fn route(&self, from: ConnId, msg: ClientMsg<A::Mutation>) {
+    fn route(&self, from: ConnId, msg: ClientMsg<A::Mutation>) -> bool {
         let outgoing = {
             let mut server = self.server();
             if server.recv(from, msg).is_err() {
-                return;
+                return false;
             }
             server.take_outgoing()
         };
-        let Ok(peers) = self.peers.lock() else { return };
+        let Ok(peers) = self.peers.lock() else {
+            return false;
+        };
+        let mut keep = true;
         for (conn, msg) in outgoing {
+            if conn == from && matches!(msg, ServerMsg::Denied { .. }) {
+                keep = false;
+            }
             if let (Some(peer), Ok(frame)) = (peers.get(&conn), encode(&msg)) {
                 let _ = peer.send(frame);
             }
         }
+        keep
     }
 }
 
@@ -117,13 +130,15 @@ where
 
     // One task writes, this one reads. The server may address a peer at any
     // time — that is the whole point of fan-out — so the write side cannot be
-    // driven by this connection's own reads.
+    // driven by this connection's own reads. Closing the channel ends the
+    // task once everything queued — a denial, say — has been written.
     let writer = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
             if sink.send(Message::Binary(frame.into())).await.is_err() {
                 break;
             }
         }
+        let _ = sink.close().await;
     });
 
     while let Some(Ok(message)) = stream.next().await {
@@ -132,7 +147,11 @@ where
             continue;
         };
         match decode::<ClientMsg<A::Mutation>>(&bytes) {
-            Ok(msg) => hub.route(conn, msg),
+            Ok(msg) => {
+                if !hub.route(conn, msg) {
+                    break;
+                }
+            }
             // A frame we cannot read is this peer's problem, not the server's.
             Err(_) => break,
         }
@@ -142,5 +161,5 @@ where
         peers.remove(&conn);
     }
     hub.server().disconnect(conn);
-    writer.abort();
+    let _ = writer.await;
 }

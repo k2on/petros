@@ -24,7 +24,8 @@ const DDL: &str = "
         seq     BIGINT PRIMARY KEY NOT NULL,
         id      BLOB NOT NULL UNIQUE,
         actor   TEXT NOT NULL,
-        payload BLOB NOT NULL
+        payload BLOB NOT NULL,
+        session TEXT
     );
     CREATE TABLE IF NOT EXISTS petros_meta (
         k TEXT PRIMARY KEY NOT NULL,
@@ -48,7 +49,8 @@ const INTENTS_DDL: &str = "
         ord     INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
         id      BLOB NOT NULL UNIQUE,
         actor   TEXT NOT NULL,
-        payload BLOB NOT NULL
+        payload BLOB NOT NULL,
+        session TEXT
     );
 ";
 
@@ -62,6 +64,7 @@ struct LogRow {
     id: Id,
     actor: String,
     payload: Vec<u8>,
+    session: Option<String>,
 }
 
 /// One row of the pending queue. `ord` is assigned by SQLite and only ever
@@ -76,6 +79,7 @@ struct PendingRow {
     id: Id,
     actor: String,
     payload: Vec<u8>,
+    session: Option<String>,
 }
 
 #[derive(Debug, Insertable)]
@@ -84,15 +88,34 @@ struct NewPending {
     id: Id,
     actor: String,
     payload: Vec<u8>,
+    session: Option<String>,
 }
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.batch_execute(DDL)?;
-    Ok(())
+    add_session_column(conn, "petros_log")
 }
 
 pub(crate) fn migrate_intents(conn: &mut Connection) -> Result<()> {
     conn.batch_execute(INTENTS_DDL)?;
+    add_session_column(conn, "petros_pending")
+}
+
+/// The one migration these tables have had: `session`, added after the first
+/// databases were written. `CREATE TABLE IF NOT EXISTS` does nothing to a
+/// table that exists, so the column is added to one that predates it here.
+/// Nullable, because every row already there has none.
+fn add_session_column(conn: &mut Connection, table: &str) -> Result<()> {
+    #[derive(QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+    let columns: Vec<Row> =
+        diesel::sql_query(format!("SELECT name FROM pragma_table_info('{table}')")).load(conn)?;
+    if !columns.iter().any(|c| c.name == "session") {
+        conn.batch_execute(&format!("ALTER TABLE {table} ADD COLUMN session TEXT"))?;
+    }
     Ok(())
 }
 
@@ -164,6 +187,7 @@ pub(crate) fn put_confirmed<M: Serialize>(conn: &mut Connection, entry: &Entry<M
         id: entry.id,
         actor: entry.actor.as_str().to_string(),
         payload: proto::encode(&entry.mutation)?,
+        session: entry.session.clone(),
     };
     diesel::insert_into(petros_log::table)
         .values(&row)
@@ -191,6 +215,7 @@ pub(crate) fn entries_after<M: DeserializeOwned>(
                 actor: ActorId::new(r.actor),
                 seq: Some(r.seq as Seq),
                 mutation: proto::decode(&r.payload)?,
+                session: r.session,
             })
         })
         .collect()
@@ -209,6 +234,7 @@ pub(crate) fn pending<M: DeserializeOwned>(conn: &mut Connection) -> Result<Vec<
                 actor: ActorId::new(r.actor),
                 seq: None,
                 mutation: proto::decode(&r.payload)?,
+                session: r.session,
             })
         })
         .collect()
@@ -224,6 +250,7 @@ pub(crate) fn put_pending<M: Serialize>(conn: &mut Connection, entry: &Entry<M>)
         id: entry.id,
         actor: entry.actor.as_str().to_string(),
         payload: proto::encode(&entry.mutation)?,
+        session: entry.session.clone(),
     };
     diesel::insert_into(petros_pending::table)
         .values(&row)

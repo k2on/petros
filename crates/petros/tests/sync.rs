@@ -45,7 +45,15 @@ fn hello_since_returns_exactly_the_missing_entries() {
     let _ = server.take_outgoing();
 
     // A different client, resuming from the middle.
-    server.recv(2, Up::Hello { since: 2 }).unwrap();
+    server
+        .recv(
+            2,
+            Up::Hello {
+                since: 2,
+                token: None,
+            },
+        )
+        .unwrap();
 
     let sent: Vec<Entry<TodoMutation>> = server
         .take_outgoing()
@@ -77,7 +85,7 @@ fn a_full_batch_asks_the_client_to_come_back_for_more() {
 
     let out = client.take_outgoing();
     assert!(
-        out.iter().any(|m| matches!(m, Up::Hello { since: 3 })),
+        out.iter().any(|m| matches!(m, Up::Hello { since: 3, .. })),
         "a partial batch is resumed from where it stopped, got {out:?}"
     );
 }

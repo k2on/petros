@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/petros",
     "crates/petros-axum",
+    "crates/petros-auth",
     "crates/petros-schema",
     "crates/petros-macros",
     "crates/petros-sql",
@@ -26,6 +27,8 @@ rust-version = "1.88"
 ciborium = "0.2"
 petros = { path = "crates/petros" }
 petros-wasm-host = { path = "crates/petros-wasm-host" }
+petros-auth = { path = "crates/petros-auth" }
+petros-axum = { path = "crates/petros-axum" }
 petros-schema = { path = "crates/petros-schema" }
 petros-macros = { path = "crates/petros-macros" }
 petros-sql = { path = "crates/petros-sql" }

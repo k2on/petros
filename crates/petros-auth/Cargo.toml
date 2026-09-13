@@ -1,0 +1,67 @@
+[package]
+name = "petros-auth"
+version = "0.1.0"
+description = "Who a Petros peer is: an OpenID Connect login on the server, the sessions it issues, and the client half that gets one."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# The relying party and the session store, as an axum `Router` to mount
+# beside `petros_axum::sync`, and the `Authenticate` the hub is opened with.
+server = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:diesel",
+    "dep:rand",
+    "dep:sha2",
+]
+# Getting a login: a loopback listener and the system browser natively, the
+# page's own location in a browser.
+client = ["dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
+
+[dependencies]
+petros.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt", "sync"], optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+diesel = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
+
+# HTTP, blocking and small. The server talks to the identity provider with
+# it twice per login, off the runtime; the desktop client talks to the
+# server with it. Pure Rust TLS, and the `ring` provider rather than the
+# default: aws-lc wants cmake and a C toolchain in every sandbox that builds
+# a client, for no gain here.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+# In a browser the page fetches; the wasm build of a client is the only
+# thing that turns these on.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Headers",
+    "History",
+    "Location",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Storage",
+    "Window",
+] }
+
+[dev-dependencies]
+axum = "0.8"
+petros = { workspace = true, features = ["ws"] }
+petros-axum.workspace = true
+todo = { workspace = true, features = ["storage"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+ureq = { version = "2", default-features = false }

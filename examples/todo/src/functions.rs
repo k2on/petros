@@ -7,7 +7,8 @@
 //!
 //! `&mut Db` is the store. `NewId` and `Now` are the only non-determinism a
 //! mutation gets, chosen once at the originating client and frozen in the log.
-//! `Actor` is who authored the entry. Which is which is decided by type, so
+//! `ctx: &Ctx` is who authored the entry, and under which login. Which is which
+//! is decided by type, so
 //! there is no list to keep in step.
 
 use petros_schema::prelude::*;
@@ -21,7 +22,7 @@ use crate::schema::Item;
 
 /// Add a to-do at the end of the list.
 #[mutation]
-pub fn add(db: &mut Db, id: NewId, created_ms: Now, actor: Actor, text: String) -> Result {
+pub fn add(db: &mut Db, ctx: &Ctx, id: NewId, created_ms: Now, text: String) -> Result {
     if text.trim().is_empty() {
         return Err("a to-do needs some text".into());
     }
@@ -44,7 +45,7 @@ pub fn add(db: &mut Db, id: NewId, created_ms: Now, actor: Actor, text: String) 
         done: false,
         pos: last + 1,
         created_ms,
-        actor: actor.to_string(),
+        actor: ctx.user.id.clone(),
     })?;
     Ok(())
 }

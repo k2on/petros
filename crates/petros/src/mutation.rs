@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::Connection;
 
-use crate::{ActorId, AutoCtx, MutationError, Result};
+use crate::{AutoCtx, Ctx, MutationError, Result};
 
 /// A database handle that is guaranteed to be inside a transaction Petros opened.
 ///
@@ -86,7 +86,7 @@ impl DerefMut for Transaction<'_> {
 ///
 /// ```
 /// # use diesel::prelude::*;
-/// # use petros::{ActorId, AutoCtx, Mutation, MutationError, Transaction};
+/// # use petros::{Ctx, AutoCtx, Mutation, MutationError, Transaction};
 /// # use serde::{Deserialize, Serialize};
 /// # diesel::table! { counter (n) { n -> BigInt } }
 /// #[derive(Serialize, Deserialize)]
@@ -96,7 +96,7 @@ impl DerefMut for Transaction<'_> {
 /// }
 ///
 /// impl Mutation for Counter {
-///     fn apply(&self, tx: &mut Transaction, _actor: &ActorId) -> Result<(), MutationError> {
+///     fn apply(&self, tx: &mut Transaction, _ctx: &Ctx) -> Result<(), MutationError> {
 ///         let Counter::Bump { by } = self;
 ///         diesel::update(counter::table)
 ///             .set(counter::n.eq(counter::n + by))
@@ -117,11 +117,10 @@ pub trait Mutation: Serialize + DeserializeOwned + 'static {
     }
 
     /// Apply the intent. Deterministic. May read. May reject.
-    fn apply(
-        &self,
-        tx: &mut Transaction,
-        actor: &ActorId,
-    ) -> std::result::Result<(), MutationError>;
+    ///
+    /// `ctx` is who authored the entry and under which login, as the log
+    /// recorded them — frozen like the arguments, and for the same reason.
+    fn apply(&self, tx: &mut Transaction, ctx: &Ctx) -> std::result::Result<(), MutationError>;
 }
 
 /// The single extension point. An app supplies one mutation enum and its

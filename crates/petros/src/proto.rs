@@ -1,4 +1,4 @@
-//! Wire types. Five messages; resume and initial sync are the same path.
+//! Wire types. Six messages; resume and initial sync are the same path.
 //!
 //! Payloads are CBOR. See `docs/decisions.md` for the compatibility rules that
 //! keep a log written today readable by a client built in five years.
@@ -61,6 +61,12 @@ pub struct Entry<M> {
     pub seq: Option<Seq>,
     #[serde(rename = "m")]
     pub mutation: M,
+    /// The login this was authored under, which `apply` sees as
+    /// `ctx.session.id`. Absent for a peer that never signed in, and for an
+    /// entry written before there were sessions — and absent from the bytes
+    /// too, so the encoding of every entry that has none is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 impl<M> Entry<M> {
@@ -71,7 +77,13 @@ impl<M> Entry<M> {
             actor,
             seq: None,
             mutation,
+            session: None,
         }
+    }
+
+    /// What `apply` sees of this entry beyond its arguments.
+    pub fn ctx(&self) -> petros_schema::Ctx {
+        petros_schema::Ctx::new(self.actor.as_str(), self.session.as_deref().unwrap_or(""))
     }
 
     /// The assigned sequence number, or an error if the entry is unsequenced.
@@ -86,7 +98,15 @@ impl<M> Entry<M> {
 pub enum ClientMsg<M> {
     /// "I have everything up to `since`; catch me up." Sent on every connect,
     /// whether this is the first sync or the thousandth resume.
-    Hello { since: Seq },
+    ///
+    /// `token` is what the client was given when it signed in. A server that
+    /// authenticates answers a missing or stale one with [`ServerMsg::Denied`]
+    /// and nothing else; one that does not never reads it.
+    Hello {
+        since: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+    },
     /// Entries authored here, `seq` unset, `id` set.
     Push { entries: Vec<Entry<M>> },
 }
@@ -105,6 +125,11 @@ pub enum ServerMsg<M> {
     Ack { ids: Vec<Id>, seqs: Vec<Seq> },
     /// This pushed entry will never be in the log.
     Reject { id: Id, reason: String },
+    /// This connection is not signed in, or not as who it claims. Nothing
+    /// else will be sent on it; the client has to sign in again and
+    /// reconnect. A verdict about the connection, not about any entry — the
+    /// pending mutations are kept and re-offered next time.
+    Denied { reason: String },
 }
 
 /// Encode a value as CBOR.

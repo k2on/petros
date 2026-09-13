@@ -38,7 +38,7 @@ pub use seed::Seed;
 /// the function reads as ordinary Rust, and so rustfmt, rust-analyzer and
 /// `cargo doc` all understand it before expansion.
 pub mod prelude {
-    pub use crate::{Actor, Db, Id, NewId, Now, Rows, Store, With};
+    pub use crate::{Actor, Ctx, Db, Id, NewId, Now, Rows, Session, Store, User, With};
     /// Imported rather than written as a path, so a function carries a bare
     /// `#[mutation]` and reads like ordinary Rust.
     pub use petros_macros::{mutation, peer, query};
@@ -72,8 +72,107 @@ pub type NewId = Id;
 /// The clock, frozen the same way and for the same reason.
 pub type Now = i64;
 
-/// Who authored the entry.
+/// Who authored the entry, as a bare string: `ctx.user.id` for a function
+/// that wants nothing else about the author.
 pub type Actor<'a> = &'a str;
+
+/// What the engine knows about the entry being applied, beyond its arguments.
+///
+/// Frozen in the log with the entry, like `NewId` and `Now`, because `apply`
+/// runs on every replica and each has to see the same thing. Take it as
+/// `ctx: &Ctx`:
+///
+/// ```ignore
+/// #[mutation]
+/// pub fn add_song(db: &mut Db, ctx: &Ctx, id: NewId, title: String) -> Result {
+///     db.put(&Song { id, title, added_by: ctx.user.id.clone(), .. })
+/// }
+/// ```
+///
+/// Nothing in it is asserted by the client that wrote the entry. A server
+/// that authenticates checks the user against the login the connection
+/// proved and the session against the ones that login has had, and refuses
+/// the entry otherwise — so a mutation can decide on `ctx.user.id` and mean
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Ctx {
+    /// Who authored the entry.
+    pub user: User,
+    /// The login it was authored under.
+    pub session: Session,
+}
+
+/// The author of an entry.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct User {
+    /// The user's id: the `sub` an identity provider gave them, or whatever
+    /// the app's authenticator hands out. Stable across logins and devices.
+    pub id: String,
+}
+
+/// The login an entry was authored under.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Session {
+    /// The session's id, one per login on one device — so two phones signed
+    /// in as one user are told apart here and nowhere else. Empty for an
+    /// entry authored by a peer that never signed in, and for one older than
+    /// sessions.
+    pub id: String,
+}
+
+impl Ctx {
+    /// A context for `user`, with no session.
+    pub fn from_user(user: impl Into<String>) -> Self {
+        Ctx {
+            user: User { id: user.into() },
+            session: Session::default(),
+        }
+    }
+
+    /// A context for `user`, signed in as `session`.
+    pub fn new(user: impl Into<String>, session: impl Into<String>) -> Self {
+        Ctx {
+            user: User { id: user.into() },
+            session: Session { id: session.into() },
+        }
+    }
+
+    /// Who authored the entry. The same string `Actor` binds.
+    pub fn actor(&self) -> &str {
+        &self.user.id
+    }
+
+    /// As the bytes that cross into a module: a CBOR map `{u, s}`.
+    #[cfg(feature = "cbor")]
+    pub fn to_cbor(&self) -> Vec<u8> {
+        let value = cbor::Value::Map(vec![
+            (
+                cbor::Value::Text("u".into()),
+                cbor::Value::Text(self.user.id.clone()),
+            ),
+            (
+                cbor::Value::Text("s".into()),
+                cbor::Value::Text(self.session.id.clone()),
+            ),
+        ]);
+        let mut out = Vec::new();
+        // A map of two text pairs cannot fail to encode.
+        let _ = ciborium::into_writer(&value, &mut out);
+        out
+    }
+
+    /// Back from [`to_cbor`](Self::to_cbor). A missing field is empty rather
+    /// than an error, for the same reason a bare actor string is: the module
+    /// applies what it is given.
+    #[cfg(feature = "cbor")]
+    pub fn from_cbor(bytes: &[u8]) -> Option<Self> {
+        let value: cbor::Value = ciborium::from_reader(bytes).ok()?;
+        Some(Ctx::new(
+            cbor::opt_text(&value, "u"),
+            cbor::opt_text(&value, "s"),
+        ))
+    }
+}
 
 /// Sixteen bytes: an id as the log stores it.
 ///

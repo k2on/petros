@@ -857,6 +857,75 @@ stay compiled in. That is a real cost — every version of every verb lives
 forever — which is why the discipline comes first and the mechanism waits for a
 reason.
 
+## The engine asks one question about identity, and a crate answers it
+
+The server took every entry's `actor` at face value, and the docs said so:
+any connected client could write as anyone. That was fine for the sync
+engine's own tests and wrong for anything on a network.
+
+The engine is sans-io and does not want to know what a token is, so what it
+got was one trait, `Authenticate`, asked at every `Hello`: what does this
+token prove? An answer is an `Identity` — a user and a session — and from
+then on the connection is that person. A pushed entry whose `actor` is
+someone else is refused with a `Reject`, which drops it from the client's
+pending queue as a verdict should; a `Hello` that proves nothing is answered
+with `Denied` and the socket is closed behind it. `Trusting` answers nothing
+and means it, so a simulation, a test, and a server behind something that
+has already decided keep the behaviour the engine always had — and say so
+by naming it.
+
+The token rides *in the frame* rather than in a header, and that was the
+decision worth having. A browser's `WebSocket` cannot set a header; a phone's
+can; a desktop's can. Putting it in `Hello` makes the three clients the same
+size, keeps `petros-axum` a handler with no opinion about cookies, and lets
+the `Server` check identity where it checks everything else. It is one
+optional field, defaulted, and absent from the bytes when unset, so the wire
+fixture did not move.
+
+`petros-auth` is the answer for a real server. The server is the only
+OpenID Connect client — it has the secret, it talks to the provider, and it
+hands each signed-in peer a session token of its own — so none of the clients
+speaks OpenID Connect, none holds a secret, and all three sign in by opening
+one URL and receiving one single-use code to exchange. The desktop listens on
+a loopback port for it, the page comes back to its own address with it, the
+phone gets it through its URL scheme; and a server told it is in dev mode
+hands one out for a name with no provider at all, which is what keeps `nix
+run .#iced alice` one command. The ID token's signature is deliberately not
+checked — it arrives over TLS in the direct answer to a request made with the
+server's own secret, which the spec allows — and everything a signature would
+not cover is: issuer, audience, expiry, nonce.
+
+What a session buys, beyond a yes: the entry records it. `Entry.session` is
+the login an entry was authored under, and `ctx.session.id` is how `apply`
+sees it — so two phones signed in as one person are told apart in the log,
+and the server checks the session was ever that person's rather than only
+that the user matches, because a client that signed in again still has
+entries from before. `session` is the one column ever added to a `petros_`
+table, and the migration that adds it is the first the engine has had.
+
+## `apply` gets a context, not a string
+
+`Actor` was a `&str`, and a mutation that wanted to know who was writing got
+a name and nothing else. Now it may take `ctx: &Ctx` and read `ctx.user.id`
+and `ctx.session.id`. `Actor` still works and is `ctx.user.id` alone.
+
+The shape was chosen against the alternative of `ctx.new_id()` and
+`ctx.now()` replacing `NewId` and `Now`. Those are frozen into the entry by
+`fill_auto` *before* it is applied, and the count of them is known from the
+signature; a draw made during `apply` would have to be recorded on the way
+and replayed from a list, with a draw past the end of the list a determinism
+bug found at replay rather than at authoring. That is a real design and it is
+not this one. The context carries only what the log already carried beside
+the arguments, and the macro binds it by type as it binds everything else —
+`Ctx`, `petros::Ctx` and `petros_schema::Ctx` alike, by the last path
+segment, which `Actor` never was.
+
+The wasm boundary is where the change is visible: `petros_apply` takes the
+context as two CBOR text fields instead of an actor's bytes, the ABI version
+is 3, and the host now *reads* `petros_abi_version` and refuses a module
+built against another — which it had exported since version 1 and nobody had
+ever asked for.
+
 ## What the engine does not do, on purpose or not yet
 
 Written down because "is anything left?" deserves a list rather than a shrug.
@@ -869,10 +938,11 @@ snapshot mechanism is the answer when it matters; nothing here needs it yet, and
 it interacts directly with the section above, because a snapshot is a statement
 about what history *meant*.
 
-**No authentication or authorisation.** A client asserts its own actor and the
-engine takes it at face value. Deliberate, and why `petros-axum` is a handler you
-mount behind your own middleware rather than a server that starts itself. But it
-does mean any connected client can write as anyone.
+**No authorisation.** The server knows who a connection is — see "The
+engine asks one question about identity" — and holds every entry to that, but
+nothing constrains what a signed-in person may write. A mutation that should
+refuse a stranger's edit has `ctx.user.id` and decides for itself; there is no
+policy layer, and no plan for one until an app needs it.
 
 **No partial sync.** Every client gets the whole log. Fine for a self-hosted
 system with a handful of peers; not fine for one where clients should only see

@@ -2,7 +2,7 @@
 
 use diesel::prelude::*;
 use diesel::sqlite::Sqlite;
-use petros::{ActorId, App, AutoCtx, Connection, Id, Mutation, MutationError, Transaction};
+use petros::{App, AutoCtx, Connection, Ctx, Id, Mutation, MutationError, Transaction};
 use serde::{Deserialize, Serialize};
 
 diesel::table! {
@@ -99,7 +99,7 @@ impl Mutation for TodoMutation {
         }
     }
 
-    fn apply(&self, tx: &mut Transaction, actor: &ActorId) -> Result<(), MutationError> {
+    fn apply(&self, tx: &mut Transaction, ctx: &Ctx) -> Result<(), MutationError> {
         let conn = tx.conn();
         match self {
             TodoMutation::Add {
@@ -126,7 +126,7 @@ impl Mutation for TodoMutation {
                         done: false,
                         pos: last.unwrap_or(0) + 1,
                         created_ms: *created_ms,
-                        actor: actor.as_str().to_string(),
+                        actor: ctx.actor().to_string(),
                         claimed_by: None,
                     })
                     .on_conflict_do_nothing()
@@ -156,12 +156,12 @@ impl Mutation for TodoMutation {
                 match held {
                     // The row is gone; nothing to claim.
                     None => {}
-                    Some(Some(who)) if who != actor.as_str() => {
+                    Some(Some(who)) if who != ctx.actor() => {
                         return Err(MutationError::rejected(format!("already claimed by {who}")))
                     }
                     Some(_) => {
                         diesel::update(todo::table.find(id))
-                            .set(todo::claimed_by.eq(actor.as_str()))
+                            .set(todo::claimed_by.eq(ctx.actor()))
                             .execute(conn)?;
                     }
                 }

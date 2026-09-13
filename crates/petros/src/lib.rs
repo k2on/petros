@@ -23,14 +23,14 @@
 //!
 //! ```
 //! # use diesel::prelude::*;
-//! # use petros::{App, AutoCtx, Client, Connection, Mutation, MutationError, Transaction, ActorId, open_memory};
+//! # use petros::{App, AutoCtx, Client, Connection, Mutation, MutationError, Transaction, Ctx, open_memory};
 //! # use serde::{Deserialize, Serialize};
 //! # diesel::table! { note (text) { text -> Text } }
 //! # #[derive(Serialize, Deserialize)]
 //! # #[serde(tag = "t")]
 //! # enum M { Note { text: String } }
 //! # impl Mutation for M {
-//! #     fn apply(&self, tx: &mut Transaction, _a: &ActorId) -> std::result::Result<(), MutationError> {
+//! #     fn apply(&self, tx: &mut Transaction, _c: &Ctx) -> std::result::Result<(), MutationError> {
 //! #         let M::Note { text } = self;
 //! #         diesel::insert_into(note::table).values(note::text.eq(text)).execute(tx.conn())?;
 //! #         Ok(())
@@ -116,8 +116,11 @@ pub fn settle<A: App, V: Views>(client: &mut Client<A>, views: &mut V) {
         Changes::Rebuilt => views.hydrate(&mut client.store()),
     }
 }
+/// What `apply` sees of the entry beyond its arguments: the user and the
+/// session, as the log recorded them.
+pub use petros_schema::{Ctx, Session, User};
 pub use proto::{decode, encode, ActorId, ClientMsg, Entry, Seq, ServerMsg};
-pub use server::{ConnId, Server};
+pub use server::{Authenticate, ConnId, Identity, Server, Trusting};
 
 // One definition per function. See `petros_macros`.
 pub use petros_macros::{mutation, peer, query};
@@ -235,7 +238,7 @@ macro_rules! app {
             fn apply(
                 &self,
                 tx: &mut $crate::Transaction,
-                actor: &$crate::ActorId,
+                ctx: &$crate::Ctx,
             ) -> ::core::result::Result<(), $crate::MutationError> {
                 // The store is scoped so that its borrow of the connection
                 // ends before the changes are handed to the transaction. They
@@ -244,7 +247,7 @@ macro_rules! app {
                 // recorded on the way is not a change that happened.
                 let (outcome, changes) = {
                     let mut store = $crate::backend::SqliteStore::new(tx.conn());
-                    let outcome = $apply(&mut store, &self.0, actor.as_str());
+                    let outcome = $apply(&mut store, &self.0, ctx);
                     let changes = $crate::petros_schema::Store::take_changes(&mut store);
                     (outcome, changes)
                 };

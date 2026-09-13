@@ -20,6 +20,10 @@ use petros::{AutoCtx, Connection};
 use petros_schema::{Request, Store as _};
 use wasmi::{Caller, Engine, Linker, Memory, Module, Store, TypedFunc};
 
+/// The contract this host speaks. `petros_wasm_guest::ABI_VERSION` is the
+/// other copy, and a module reporting a different number is refused at load.
+pub const ABI_VERSION: u32 = 3;
+
 /// How much stack one mutation gets.
 ///
 /// This is not a guess. A host import runs *inside* wasmi's execution loop, and
@@ -253,6 +257,7 @@ impl Mutators {
             "petros_free",
             "petros_apply",
             "petros_fill_auto",
+            "petros_abi_version",
             "memory",
         ] {
             if !names.contains(&required) {
@@ -261,11 +266,33 @@ impl Mutators {
         }
         let module = Arc::new(module);
         let worker = Worker::start(engine.clone(), module.clone())?;
-        Ok(Mutators {
+        let mutators = Mutators {
             engine,
             module,
             worker: std::sync::Mutex::new(worker),
             generation: 1,
+        };
+        // A module built against another contract would not corrupt anything
+        // — the buffers are bytes either way — but it would read the context
+        // as an actor, or the actor as a context, and apply every mutation
+        // as nobody. Said here rather than discovered on a phone.
+        let abi = mutators.abi_version()?;
+        if abi != ABI_VERSION {
+            return Err(format!(
+                "the module speaks ABI {abi} and this host ABI {ABI_VERSION}; rebuild it"
+            ));
+        }
+        Ok(mutators)
+    }
+
+    /// The contract the module was built against.
+    fn abi_version(&self) -> Result<u32, String> {
+        self.run(None, |store, instance| {
+            let f = instance
+                .get_typed_func::<(), u32>(&*store, "petros_abi_version")
+                .map_err(|e| format!("petros_abi_version has the wrong shape: {e}"))?;
+            f.call(&mut *store, ())
+                .map_err(|e| format!("petros_abi_version trapped: {e}"))
         })
     }
 
@@ -353,17 +380,18 @@ impl Mutators {
         .unwrap_or(0)
     }
 
-    /// Apply one mutation, as the payload the log stores.
+    /// Apply one mutation, as the payload the log stores, as `ctx`.
     pub fn apply(
         &self,
         conn: &mut Connection,
         payload: &[u8],
-        actor: &str,
+        ctx: &petros_schema::Ctx,
     ) -> Result<Result<Vec<petros_schema::Change>, String>, String> {
+        let ctx = ctx.to_cbor();
         self.run(Some(conn), |store, instance| {
             store.data_mut().changes.clear();
             let p = write_bytes(store, payload)?;
-            let a = write_bytes(store, actor.as_bytes())?;
+            let a = write_bytes(store, &ctx)?;
             let f = instance
                 .get_typed_func::<(u32, u32, u32, u32), u64>(&*store, "petros_apply")
                 .map_err(|e| format!("petros_apply has the wrong shape: {e}"))?;

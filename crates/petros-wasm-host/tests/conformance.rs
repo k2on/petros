@@ -54,7 +54,7 @@ fn native_apply(conn: &mut Connection, payload: &todo::Payload, actor: &str) -> 
     todo::apply(
         &mut petros::backend::SqliteStore::new(conn),
         &payload.0,
-        actor,
+        &petros_schema::Ctx::from_user(actor),
     )
 }
 
@@ -92,7 +92,11 @@ fn both_ways(script: &[(&str, serde_json::Value)]) -> (Vec<Row>, Vec<Row>) {
     let mut wasm_db = database();
     for p in &payloads {
         let _ = module
-            .apply(&mut wasm_db, &encode(p), "alice")
+            .apply(
+                &mut wasm_db,
+                &encode(p),
+                &petros_schema::Ctx::from_user("alice"),
+            )
             .expect("the host ran");
     }
 
@@ -149,7 +153,7 @@ fn refusals_match_too() {
         let native = native_apply(&mut a, &p, "alice");
         let mut b = database();
         let wasm = module
-            .apply(&mut b, &encode(&p), "alice")
+            .apply(&mut b, &encode(&p), &petros_schema::Ctx::from_user("alice"))
             .expect("host ran");
 
         // The wasm side reports what it changed on success; a refusal carries

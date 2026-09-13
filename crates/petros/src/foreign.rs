@@ -104,7 +104,7 @@ macro_rules! foreign_peer {
             fn apply(
                 &self,
                 tx: &mut $crate::Transaction,
-                actor: &$crate::ActorId,
+                ctx: &$crate::Ctx,
             ) -> ::core::result::Result<(), $crate::MutationError> {
                 let mut bytes = ::std::vec::Vec::new();
                 ::ciborium::into_writer(&self.0, &mut bytes)
@@ -119,7 +119,7 @@ macro_rules! foreign_peer {
                         "no mutator module is loaded; the app must install one before mutating",
                     )
                 })?;
-                match module.apply(tx.conn(), &bytes, actor.as_str()) {
+                match module.apply(tx.conn(), &bytes, ctx) {
                     // The module's writes went through the host's store, which
                     // is created per request and dropped — so the changes come
                     // back from the apply and are reported here, exactly as a
@@ -283,14 +283,21 @@ macro_rules! foreign_peer {
         impl $peer {
             /// Open the peer's database, running Petros's migrations and the
             /// app's.
+            ///
+            /// `user` is who every entry is authored as, and `session` the
+            /// login it is authored under — both what the server handed back
+            /// at sign-in, or a name and nothing for a peer of a server that
+            /// does not ask.
             #[uniffi::constructor]
             pub fn open(
                 db_path: ::std::string::String,
-                actor: ::std::string::String,
+                user: ::std::string::String,
+                session: ::core::option::Option<::std::string::String>,
             ) -> ::core::result::Result<Self, PeerError> {
                 let conn = $crate::open_path(&db_path)?;
                 let mut client =
-                    $crate::Client::<ForeignApp>::open(conn, actor, $crate::AutoCtx::system())?;
+                    $crate::Client::<ForeignApp>::open(conn, user, $crate::AutoCtx::system())?;
+                client.set_session(session);
                 // One full read, here and nowhere else. Everything after this
                 // is maintained.
                 let mut views = <$views as $crate::Views>::build();
@@ -349,6 +356,26 @@ macro_rules! foreign_peer {
             /// pending.
             pub fn connected(&self) -> ::core::result::Result<(), PeerError> {
                 self.with(|c| ::core::result::Result::Ok(c.connected()?))
+            }
+
+            /// What proves the login to the server, sent with every `Hello`
+            /// from now on. Set it before `connected`.
+            pub fn set_token(
+                &self,
+                token: ::core::option::Option<::std::string::String>,
+            ) -> ::core::result::Result<(), PeerError> {
+                self.with(|c| {
+                    c.set_token(token);
+                    ::core::result::Result::Ok(())
+                })
+            }
+
+            /// Why the server turned this peer away, if it did since the last
+            /// ask. The socket is gone by then; sign in again, set the new
+            /// token, reconnect.
+            pub fn take_denial(&self) -> ::core::option::Option<::std::string::String> {
+                self.with(|c| ::core::result::Result::Ok(c.take_denial()))
+                    .unwrap_or(::core::option::Option::None)
             }
 
             /// Nothing is carrying this peer's frames any more.

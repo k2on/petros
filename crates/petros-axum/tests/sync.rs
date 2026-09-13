@@ -35,7 +35,8 @@ fn two_peers_on_an_axum_server_see_each_other() {
         .build()
         .unwrap();
 
-    let hub = petros_axum::Hub::<TodoApp>::open(petros::open_memory().unwrap()).unwrap();
+    let hub = petros_axum::Hub::<TodoApp>::open(petros::open_memory().unwrap(), petros::Trusting)
+        .unwrap();
     let health = hub.clone();
 
     let addr = runtime.block_on(async move {
@@ -126,7 +127,8 @@ fn a_disconnected_peer_is_forgotten() {
         .enable_all()
         .build()
         .unwrap();
-    let hub = petros_axum::Hub::<TodoApp>::open(petros::open_memory().unwrap()).unwrap();
+    let hub = petros_axum::Hub::<TodoApp>::open(petros::open_memory().unwrap(), petros::Trusting)
+        .unwrap();
     let watch = hub.clone();
 
     let addr = runtime.block_on(async move {

@@ -15,6 +15,7 @@ rec {
     "petros-testkit"
     "petros-wasm-guest"
     "petros-axum"
+    "petros-auth"
   ];
 
   # The `[patch]` that points a lockfile's engine at a tree on disk.
