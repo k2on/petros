@@ -42,7 +42,7 @@
         (a: b: a.value.order < b.value.order
           || (a.value.order == b.value.order && a.name < b.name))
         (lib.attrsToList cfg.sections);
-      body = lib.concatMapStringsSep "\n" (s: lib.removeSuffix "\n" s.value.text) sorted;
+      body = lib.concatMapStringsSep "\n\n" (s: lib.removeSuffix "\n" s.value.text) sorted;
     in
     {
       files.file."README.md" = lib.mkIf (cfg.intro != "" || cfg.sections != { }) {
