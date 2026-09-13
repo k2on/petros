@@ -142,8 +142,9 @@ An app's `flake.nix` is four lines: nixpkgs, this repository, and
 flake-parts over every `*.nix` under the app's root — the dendritic pattern,
 `import-tree` over the tree — plus `nix/app` here, which is what every app
 shares: the toolchain, the workspace, the three checks and their `nix run`
-twins, the devshell, and the wasm module a domain compiles to when the app
-sets `petros.mutators`. Which directories exist is what wires the rest, each
+twins, the devshell, the wasm module a domain compiles to when the app
+sets `petros.mutators`, and a `README.md` assembled from the `readme.nix`
+beside each directory's nix (`readme.intro`, `readme.sections.<name>`). Which directories exist is what wires the rest, each
 through its own `nix/`: a `server/nix` adds a server, a `mobile/nix` adds a
 phone (from `petros-js`), and a program with neither is a crate and that
 `flake.nix`.

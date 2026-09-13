@@ -8,5 +8,6 @@
     ./checks.nix
     ./mutators.nix
     ./shell.nix
+    ./readme.nix
   ];
 }
