@@ -12,7 +12,10 @@ test: mutators
     cargo test --workspace --all-features --doc
 
 # Clippy over everything, warnings are errors.
-lint:
+#
+# `mutators` first for the same reason `test` has it: `--all-targets` compiles
+# the tests that `include_bytes!` the module, and CI runs this before `test`.
+lint: mutators
     cargo clippy --workspace --all-features --all-targets -- -D warnings
     cargo fmt --all --check
 
