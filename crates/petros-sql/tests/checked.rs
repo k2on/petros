@@ -16,7 +16,7 @@ fn db() -> petros::Connection {
 
 fn song(id: u8, title: &str, pos: i64) -> Song {
     Song {
-        id: vec![id; 16],
+        id: ::petros_schema::Id::from_bytes([id; 16]),
         title: title.into(),
         artist: "Bicep".into(),
         pos,
@@ -41,9 +41,12 @@ fn a_row_survives_the_round_trip() {
 
     let one = song(1, "Glue", 1);
     store.put(&one).unwrap();
-    assert_eq!(store.get::<Song>(&Song::key_of(&vec![1u8; 16])), Some(one));
-    assert!(store.exists::<Song>(&Song::key_of(&vec![1u8; 16])));
-    assert!(!store.exists::<Song>(&Song::key_of(&vec![9u8; 16])));
+    assert_eq!(
+        store.get::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([1u8; 16]))),
+        Some(one)
+    );
+    assert!(store.exists::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([1u8; 16]))));
+    assert!(!store.exists::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([9u8; 16]))));
 }
 
 /// The reason typed writes are back: a write says which row moved and what it
@@ -75,7 +78,9 @@ fn a_write_says_what_changed() {
         other => panic!("expected one edit, got {other:?}"),
     }
 
-    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
+    store
+        .delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
     match store.take_changes().as_slice() {
         [Change::Remove { row, .. }] => {
             assert_eq!(row[1], Value::Text("Glue (remastered)".into()))
@@ -85,7 +90,9 @@ fn a_write_says_what_changed() {
 
     // Deleting what is not there is a no-op, and a no-op is not a change: an
     // entry earlier in the log may have removed it already.
-    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
+    store
+        .delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
     assert!(store.take_changes().is_empty());
 }
 
@@ -162,7 +169,7 @@ fn a_query_can_start_after_a_row() {
 
 fn favorite(song: u8, pos: i64) -> Favorite {
     Favorite {
-        song_id: vec![song; 16],
+        song_id: ::petros_schema::Id::from_bytes([song; 16]),
         pos,
         favorited_ms: 0,
         actor: "alice".into(),
@@ -273,7 +280,7 @@ fn a_nullable_column_holds_a_null() {
     store.put(&song(1, "Glue", 1)).unwrap();
     store
         .put(&Sleeve {
-            song_id: vec![1; 16],
+            song_id: ::petros_schema::Id::from_bytes([1; 16]),
             notes: None,
             year: Some(2017),
         })
@@ -304,7 +311,7 @@ fn a_filter_can_ask_for_null() {
         store.put(&song(i, &format!("song {i}"), i as i64)).unwrap();
         store
             .put(&Sleeve {
-                song_id: vec![i; 16],
+                song_id: ::petros_schema::Id::from_bytes([i; 16]),
                 notes: if i == 2 {
                     Some("only this one".into())
                 } else {
@@ -338,15 +345,49 @@ fn a_limit_on_the_related_side_is_per_parent() {
     for i in 0..3u8 {
         store
             .put(&Note {
-                id: vec![i * 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                song_id: vec![1; 16],
+                id: ::petros_schema::Id::from_bytes([
+                    i * 2,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]),
+                song_id: ::petros_schema::Id::from_bytes([1; 16]),
                 text: "on Glue".into(),
             })
             .unwrap();
         store
             .put(&Note {
-                id: vec![i * 2 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                song_id: vec![2; 16],
+                id: ::petros_schema::Id::from_bytes([
+                    i * 2 + 1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]),
+                song_id: ::petros_schema::Id::from_bytes([2; 16]),
                 text: "on Opal".into(),
             })
             .unwrap();

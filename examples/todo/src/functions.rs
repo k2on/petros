@@ -13,7 +13,7 @@
 
 use petros_schema::prelude::*;
 
-use crate::schema::Todo as TodoRow;
+use crate::schema::Todo;
 
 #[cfg(feature = "storage")]
 use crate::schema::Item;
@@ -22,24 +22,24 @@ use crate::schema::Item;
 
 /// Add a to-do at the end of the list.
 #[mutation]
-pub fn add(db: &mut Db, ctx: &Ctx, id: NewId, created_ms: Now, text: String) -> Result {
+pub fn add(db: &mut Db, ctx: &Ctx, id: NewId<Todo>, created_ms: Now, text: String) -> Result {
     if text.trim().is_empty() {
         return Err("a to-do needs some text".into());
     }
     // The same entry arriving twice is a no-op, which is what makes redelivery
     // safe.
-    if db.exists::<TodoRow>(&TodoRow::key_of(&id)) {
+    if db.exists::<Todo>(&Todo::key_of(&id)) {
         return Ok(());
     }
     // `pos` is read out of current state: an intent — "put it at the end" —
     // not a fact. It is what makes the rebase visible when an entry lands
     // underneath yours.
     let last = db
-        .select(TodoRow::all().order_by(TodoRow::pos.desc()).limit(1))
+        .select(Todo::all().order_by(Todo::pos.desc()).limit(1))
         .first()
         .map(|t| t.pos)
         .unwrap_or(0);
-    db.put(&TodoRow {
+    db.put(&Todo {
         id,
         text: text.trim().to_string(),
         done: false,
@@ -61,7 +61,7 @@ pub fn add(db: &mut Db, ctx: &Ctx, id: NewId, created_ms: Now, text: String) -> 
 /// which rows moved. Reading the set is still one statement.
 #[mutation]
 pub fn mark_all_done(db: &mut Db) -> Result {
-    let open = db.select(TodoRow::all().filter(TodoRow::done.eq(false)));
+    let open = db.select(Todo::all().filter(Todo::done.eq(false)));
     for mut todo in open {
         todo.done = true;
         db.put(&todo)?;
@@ -72,8 +72,8 @@ pub fn mark_all_done(db: &mut Db) -> Result {
 /// Updating a row that is gone is a no-op, not an error: an entry earlier in
 /// the log may have removed it.
 #[mutation]
-pub fn set_done(db: &mut Db, id: Id, done: bool) -> Result {
-    if let Some(mut todo) = db.get::<TodoRow>(&TodoRow::key_of(&id)) {
+pub fn set_done(db: &mut Db, id: Id<Todo>, done: bool) -> Result {
+    if let Some(mut todo) = db.get::<Todo>(&Todo::key_of(&id)) {
         todo.done = done;
         db.put(&todo)?;
     }
@@ -81,8 +81,8 @@ pub fn set_done(db: &mut Db, id: Id, done: bool) -> Result {
 }
 
 #[mutation]
-pub fn remove(db: &mut Db, id: Id) -> Result {
-    db.delete::<TodoRow>(&TodoRow::key_of(&id))?;
+pub fn remove(db: &mut Db, id: Id<Todo>) -> Result {
+    db.delete::<Todo>(&Todo::key_of(&id))?;
     Ok(())
 }
 
@@ -95,13 +95,13 @@ pub fn remove(db: &mut Db, id: Id) -> Result {
 pub fn list(db: &mut Db) -> Result<Vec<Item>> {
     Ok(db
         .select(
-            TodoRow::all()
-                .order_by(TodoRow::pos.asc())
-                .order_by(TodoRow::id.asc()),
+            Todo::all()
+                .order_by(Todo::pos.asc())
+                .order_by(Todo::id.asc()),
         )
         .into_iter()
         .map(|r| Item {
-            id: crate::schema::id_of(&r.id),
+            id: r.id,
             text: r.text,
             done: r.done,
             pos: r.pos,

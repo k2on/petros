@@ -18,7 +18,12 @@ use std::time::Duration;
 
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Subscription, Task};
-use petros::{AutoCtx, Client, Id};
+use petros::{AutoCtx, Client};
+use todo::schema::Todo;
+
+/// A to-do's id, and the type says so: the message cannot be built from any
+/// other table's.
+type Id = petros_schema::Id<Todo>;
 use todo::{self as mutators, list, Item, TodoApp};
 
 #[cfg(target_arch = "wasm32")]
@@ -247,17 +252,10 @@ impl App {
                 let text = std::mem::take(&mut self.input);
                 self.client.mutate(mutators::add(text)).map(|_| ())
             }
-            Message::Toggle(id, done) => self
-                .client
-                .mutate(mutators::set_done(
-                    id.as_uuid().as_bytes().to_vec().to_vec(),
-                    done,
-                ))
-                .map(|_| ()),
-            Message::Remove(id) => self
-                .client
-                .mutate(mutators::remove(id.as_uuid().as_bytes().to_vec().to_vec()))
-                .map(|_| ()),
+            Message::Toggle(id, done) => {
+                self.client.mutate(mutators::set_done(id, done)).map(|_| ())
+            }
+            Message::Remove(id) => self.client.mutate(mutators::remove(id)).map(|_| ()),
             Message::ToggleLink => {
                 match self.link {
                     Some(_) => {

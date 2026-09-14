@@ -55,7 +55,10 @@ fn ids_are_sixteen_bytes_and_distinct() {
 fn a_nil_seed_still_expands() {
     let mut s = Seed::from(&[0u8; 16]);
     let ids: Vec<Vec<u8>> = (0..4).map(|_| s.id()).collect();
-    assert!(ids.iter().all(|i| i != &vec![0u8; 16]), "not all zeroes");
+    assert!(
+        ids.iter().all(|i| i != &[0u8; 16].to_vec()),
+        "not all zeroes"
+    );
     assert_ne!(ids[0], ids[1]);
 }
 

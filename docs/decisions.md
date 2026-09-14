@@ -1013,6 +1013,56 @@ takes — which the client surfaces as "update required". That handshake is not
 built yet; it is the one piece of this a real multi-client deployment still
 needs, and it belongs with whatever first ships an incompatible change.
 
+## An id knows what it identifies
+
+`Id` was sixteen bytes and nothing else, so every id in an app was the same
+type. `add_to_playlist(playlist, media)` took two of them, and calling it with
+the arguments the wrong way round compiled, ran, wrote a row, and produced a
+playlist entry pointing at nothing. No peer reported anything, because nothing
+was wrong as far as any of them could see: sixteen bytes arrived where sixteen
+bytes were expected.
+
+`Id<T>` carries a marker saying which table it names. The marker is a
+zero-sized `PhantomData`, so the bytes on the wire, in the log and in SQLite
+are unchanged and a log written before this still decodes — what changes is
+that `Id<Playlist>` and `Id<Media>` are different types and the swap is a
+compile error.
+
+Where the tag comes from is the part worth stating: **`REFERENCES playlist(id)`
+in the DDL.** `tables!` already reads the foreign keys to generate
+relationships; it now also types a key column as an id of whatever it
+references, and a primary key as an id of its own table. So the fact is written
+once, in `schema.sql`, and a column that identifies a playlist cannot be
+declared to identify anything else.
+
+A mutation argument is tagged by its signature — `playlist_id: Id<Playlist>` —
+and the table reaches the recorded declaration as `Id(playlist)`. That is a
+format change to the schema text, and a deliberate one: an app's recorded
+surface now says which rows an argument names rather than only that it is
+sixteen bytes, and `petros-codegen` turns each table into a branded TypeScript
+type, so the same swap is a type error on the phone.
+
+One wrinkle, and the fix for it is the interesting part. A proc macro is
+syntactic: it reads `Id<TodoRow>` and cannot tell whether `TodoRow` is a row
+type or an alias for one, so it guesses the table from the spelling. An alias
+would make it guess wrong and record a table that does not exist. So the guess
+is *checked* — the expansion asserts it against the row type's own
+`TableDef::name`, in const — and a wrong guess is a compile error naming both
+rather than a declaration that quietly lies. The first thing the check caught
+was the to-do example, which had aliased `Todo as TodoRow` and would have
+recorded `todo_row`.
+
+The same reasoning fixed the other half. Authoring from JSON used to decide
+whether a string became sixteen bytes by looking at the argument's *name* —
+`id`, or anything ending `_id` — while the declaration it could have asked sat
+right there. That rule fails silently in the direction that matters: an id
+argument called something else arrives as text, `apply` decodes the payload
+with the field missing, takes its default, and runs a mutation that does
+nothing at all. Authoring now converts by declared type, and refuses an
+argument the verb does not declare, because a misspelling is the same failure
+and this is the last place that can still tell — after it, the payload is a
+map and a default is indistinguishable from an intent.
+
 ## What the engine does not do, on purpose or not yet
 
 Written down because "is anything left?" deserves a list rather than a shrug.

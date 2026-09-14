@@ -104,15 +104,12 @@ fn run_peer(user: &str, addr: &str) -> petros::Result<()> {
             }
             Action::ToggleDone => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(mutators::set_done(
-                        item.id.as_uuid().as_bytes().to_vec(),
-                        !item.done,
-                    ))?;
+                    client.mutate(mutators::set_done(item.id, !item.done))?;
                 }
             }
             Action::Delete => {
                 if let Some(item) = items.get(ui.selected) {
-                    client.mutate(mutators::remove(item.id.as_uuid().as_bytes().to_vec()))?;
+                    client.mutate(mutators::remove(item.id))?;
                 }
             }
             Action::ToggleLink => {

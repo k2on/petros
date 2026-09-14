@@ -78,11 +78,45 @@ fn main() -> std::io::Result<()> {
 /// at runtime and known at compile time, from the same declaration the module
 /// dispatches on.
 fn typescript(schema: &AppSchema) -> String {
+    // Every table any id in this app names, so each gets a type of its own.
+    let mut tables: Vec<&str> = schema
+        .verbs
+        .iter()
+        .flat_map(|v| v.args.iter())
+        .filter_map(|a| a.of.as_deref())
+        .collect();
+    tables.sort_unstable();
+    tables.dedup();
+
     let mut lines: Vec<String> = vec![
         String::new(),
-        "/** A log entry's identity: the canonical 8-4-4-4-12 form. Sixteen bytes on".into(),
-        " *  the wire — `from_json` converts any field named `id` or `*_id`. */".into(),
-        "export type Id = string;".into(),
+        "/** An id: the canonical 8-4-4-4-12 form, sixteen bytes on the wire.".into(),
+        " *".into(),
+        " *  Branded per table, so a playlist's id is not assignable to a".into(),
+        " *  parameter wanting a media id. The brand is a type-level marker and".into(),
+        " *  not a property: nothing is added to the value, and at runtime one".into(),
+        " *  of these is a string like any other. */".into(),
+        "export type Id<T extends string> = string & { readonly __table: T };".into(),
+        String::new(),
+    ];
+    for table in &tables {
+        let name = format!("{}Id", camel(table));
+        lines.push(format!(
+            "/** The identity of a row in `{table}`. */\nexport type {name} = Id<\"{table}\">;"
+        ));
+    }
+    if !tables.is_empty() {
+        lines.push(String::new());
+        lines.push("/** Take a string from outside — a route parameter, a stored".into());
+        lines.push(" *  value — and say what it identifies. The only way to make one,".into());
+        lines.push(" *  so every id that is not from the module has a visible place".into());
+        lines.push(" *  where somebody asserted what it was. */".into());
+        lines.push(
+            "export function asId<T extends string>(table: T, id: string): Id<T> {\n               return id as Id<T>;\n}"
+                .into(),
+        );
+    }
+    lines.extend([
         String::new(),
         "/** Every verb the module understands, and what authoring one takes.".into(),
         " *".into(),
@@ -90,7 +124,7 @@ fn typescript(schema: &AppSchema) -> String {
         " *  timestamps — are absent on purpose: the caller does not choose them,".into(),
         " *  the module does. */".into(),
         "export type MutationArgs = {".into(),
-    ];
+    ]);
     for verb in &schema.verbs {
         if verb.args.is_empty() {
             // `Record<string, never>` rather than `{}`, which in TypeScript
@@ -101,7 +135,10 @@ fn typescript(schema: &AppSchema) -> String {
         let fields: Vec<String> = verb
             .args
             .iter()
-            .map(|a| format!("{}: {}", a.name, a.ty.typescript()))
+            .map(|a| match &a.of {
+                Some(table) => format!("{}: {}Id", a.name, camel(table)),
+                None => format!("{}: {}", a.name, a.ty.typescript()),
+            })
             .collect();
         lines.push(format!("  {}: {{ {} }};", verb.name, fields.join("; ")));
     }
@@ -147,4 +184,19 @@ fn base64(bytes: &[u8]) -> String {
         });
     }
     out
+}
+
+/// `playlist_item` to `PlaylistItem`: a table name as a TypeScript type is
+/// spelled.
+fn camel(table: &str) -> String {
+    table
+        .split('_')
+        .map(|part| {
+            let mut c = part.chars();
+            match c.next() {
+                Some(first) => first.to_uppercase().chain(c).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }

@@ -230,6 +230,25 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
         }
     }
 
+    // Which table each blob column identifies: its own, if it is the primary
+    // key, or the one it references. That is the whole source of the tagging —
+    // `REFERENCES playlist(id)` in the DDL is what makes a column an
+    // `Id<Playlist>`, so the fact is written once, in the schema.
+    let mut identifies: std::collections::BTreeMap<(String, String), String> =
+        std::collections::BTreeMap::new();
+    for (table, columns, keys) in &tables {
+        for (name, decl, pk, _) in columns {
+            if *pk > 0 && matches!(column_kind(decl), Ok(Kind::Blob)) {
+                identifies.insert((table.clone(), name.clone()), table.clone());
+            }
+        }
+        // A foreign key wins over being a primary key: in a join table the
+        // column is both, and what it names is the parent.
+        for (parent, from, _) in keys {
+            identifies.insert((table.clone(), from.clone()), parent.clone());
+        }
+    }
+
     let mut items = Vec::new();
     for (table, columns, _) in &tables {
         let (table, columns) = (table.clone(), columns.clone());
@@ -245,7 +264,8 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
         for (name, decl, pk, null) in &columns {
             let ident = format_ident!("{}", name);
             let kind = column_kind(decl)?;
-            let rust = optional(kind.rust(), *null);
+            let of = identifies.get(&(table.clone(), name.clone()));
+            let rust = optional(kind.rust_as(of.map(String::as_str)), *null);
             fields.push(quote! { pub #ident: #rust });
             names.push(name.clone());
             kinds.push(kind.token());
@@ -266,10 +286,11 @@ fn expand_tables() -> Result<proc_macro2::TokenStream, String> {
             .map(|(name, decl, _, null)| {
                 let ident = format_ident!("{}", name);
                 let kind = column_kind(decl).expect("checked above");
+                let of = identifies.get(&(table.clone(), name.clone()));
                 // The constant's value type follows the column's: comparing a
                 // nullable column against a bare value would not compile, and
                 // `Column::eq(None)` is how a caller asks for `IS NULL`.
-                let rust = optional(kind.rust(), *null);
+                let rust = optional(kind.rust_as(of.map(String::as_str)), *null);
                 let token = kind.token();
                 quote! {
                     #[allow(non_upper_case_globals)]
@@ -381,6 +402,20 @@ enum Kind {
 }
 
 impl Kind {
+    /// The Rust type, given the table this column identifies if it does.
+    ///
+    /// A blob that is a key is an `Id<Playlist>` rather than a `Vec<u8>`: the
+    /// bytes are the same and the type is not, which is the point.
+    fn rust_as(self, of: Option<&str>) -> proc_macro2::TokenStream {
+        match (self, of) {
+            (Kind::Blob, Some(table)) => {
+                let ty = format_ident!("{}", camel(table));
+                quote!(::petros_schema::Id<#ty>)
+            }
+            _ => self.rust(),
+        }
+    }
+
     fn rust(self) -> proc_macro2::TokenStream {
         match self {
             Kind::Blob => quote!(::std::vec::Vec<u8>),

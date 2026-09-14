@@ -20,7 +20,7 @@ fn db() -> petros::Connection {
 
 fn song(id: u8, title: &str, pos: i64) -> Song {
     Song {
-        id: vec![id; 16],
+        id: ::petros_schema::Id::from_bytes([id; 16]),
         title: title.into(),
         done: false,
         pos,
@@ -69,7 +69,9 @@ fn a_view_tracks_inserts_and_deletes() {
     assert_eq!(titles(&view.rows()), vec!["Apricots", "Glue", "Opal"]);
     assert_eq!(view.rows(), rerun(&mut store, query()));
 
-    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
+    store
+        .delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(titles(&view.rows()), vec!["Apricots", "Opal"]);
     assert_eq!(view.rows(), rerun(&mut store, query()));
@@ -88,7 +90,7 @@ fn a_change_to_another_table_is_not_this_view() {
 
     store
         .put(&Other {
-            id: vec![9; 16],
+            id: ::petros_schema::Id::from_bytes([9; 16]),
             pos: 1,
         })
         .unwrap();
@@ -117,7 +119,9 @@ fn an_edit_across_the_filter_becomes_an_add_or_a_remove() {
     assert_eq!(view.len(), 3);
 
     // Out: it was in the view and no longer qualifies.
-    let mut two = store.get::<Song>(&Song::key_of(&vec![2u8; 16])).unwrap();
+    let mut two = store
+        .get::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([2u8; 16])))
+        .unwrap();
     two.done = true;
     store.put(&two).unwrap();
     settle(&mut view, &mut store);
@@ -132,7 +136,9 @@ fn an_edit_across_the_filter_becomes_an_add_or_a_remove() {
     assert_eq!(view.rows(), rerun(&mut store, query()));
 
     // An edit that stays outside the filter is nothing at all.
-    let mut three = store.get::<Song>(&Song::key_of(&vec![3u8; 16])).unwrap();
+    let mut three = store
+        .get::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([3u8; 16])))
+        .unwrap();
     three.done = true;
     store.put(&three).unwrap();
     settle(&mut view, &mut store);
@@ -159,14 +165,18 @@ fn a_delete_inside_a_limit_pulls_in_a_replacement() {
     view.hydrate(&mut store);
     assert_eq!(titles(&view.rows()), vec!["song 1", "song 2", "song 3"]);
 
-    store.delete::<Song>(&Song::key_of(&vec![2u8; 16])).unwrap();
+    store
+        .delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([2u8; 16])))
+        .unwrap();
     settle(&mut view, &mut store);
     // song 4 was outside the window and is now in it.
     assert_eq!(titles(&view.rows()), vec!["song 1", "song 3", "song 4"]);
     assert_eq!(view.rows(), rerun(&mut store, query()));
 
     // And again, to prove the bound moved rather than being seeded once.
-    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
+    store
+        .delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(titles(&view.rows()), vec!["song 3", "song 4", "song 5"]);
     assert_eq!(view.rows(), rerun(&mut store, query()));
@@ -197,7 +207,9 @@ fn an_insert_inside_a_full_limit_pushes_the_last_row_out() {
     assert_eq!(view.rows(), rerun(&mut store, query()));
 
     // Then delete the jumper: song 3 comes back from outside the window.
-    store.delete::<Song>(&Song::key_of(&vec![9u8; 16])).unwrap();
+    store
+        .delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([9u8; 16])))
+        .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(titles(&view.rows()), vec!["song 1", "song 2", "song 3"]);
     assert_eq!(view.rows(), rerun(&mut store, query()));
@@ -261,7 +273,7 @@ fn a_maintained_view_agrees_with_a_re_run_over_a_random_session() {
 
     for step in 0..2000u64 {
         let id = (next() % 30) as u8;
-        let key = Song::key_of(&vec![id; 16]);
+        let key = Song::key_of(&::petros_schema::Id::from_bytes([id; 16]));
         match next() % 4 {
             0 => store.delete::<Song>(&key).unwrap(),
             1 => {
@@ -278,7 +290,7 @@ fn a_maintained_view_agrees_with_a_re_run_over_a_random_session() {
             }
             _ => store
                 .put(&Song {
-                    id: vec![id; 16],
+                    id: ::petros_schema::Id::from_bytes([id; 16]),
                     title: format!("song {id}"),
                     done: next() % 5 == 0,
                     pos: (next() % 50) as i64,
@@ -340,7 +352,7 @@ fn splice_session(limit: Option<u32>) {
 
     for step in 0..1500u64 {
         let id = (next() % 20) as u8;
-        let key = Song::key_of(&vec![id; 16]);
+        let key = Song::key_of(&::petros_schema::Id::from_bytes([id; 16]));
         match next() % 4 {
             0 => store.delete::<Song>(&key).unwrap(),
             1 => {
@@ -357,7 +369,7 @@ fn splice_session(limit: Option<u32>) {
             }
             _ => store
                 .put(&Song {
-                    id: vec![id; 16],
+                    id: ::petros_schema::Id::from_bytes([id; 16]),
                     title: format!("song {id}"),
                     done: next() % 6 == 0,
                     pos: (next() % 40) as i64,
@@ -414,7 +426,9 @@ fn a_tally_counts_without_holding_the_rows() {
 
     // An edit across the filter is a remove, and the count knows it — the
     // filter operator has already decided, which is why this needs no case.
-    let mut two = store.get::<Song>(&Song::key_of(&vec![2u8; 16])).unwrap();
+    let mut two = store
+        .get::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([2u8; 16])))
+        .unwrap();
     two.done = true;
     store.put(&two).unwrap();
     let changes = store.take_changes();
@@ -435,7 +449,9 @@ fn a_tally_counts_without_holding_the_rows() {
     tally.apply(&mut store, &changes);
     assert_eq!(tally.get(), 4);
 
-    store.delete::<Song>(&Song::key_of(&vec![1u8; 16])).unwrap();
+    store
+        .delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
     let changes = store.take_changes();
     tally.apply(&mut store, &changes);
     assert_eq!(tally.get(), 3);
@@ -463,7 +479,7 @@ fn a_tally_agrees_with_counting_over_a_random_session() {
 
     for step in 0..1500u64 {
         let id = (next() % 25) as u8;
-        let key = Song::key_of(&vec![id; 16]);
+        let key = Song::key_of(&::petros_schema::Id::from_bytes([id; 16]));
         match next() % 3 {
             0 => store.delete::<Song>(&key).unwrap(),
             1 => {
@@ -474,7 +490,7 @@ fn a_tally_agrees_with_counting_over_a_random_session() {
             }
             _ => store
                 .put(&Song {
-                    id: vec![id; 16],
+                    id: ::petros_schema::Id::from_bytes([id; 16]),
                     title: format!("song {id}"),
                     done: next() % 4 == 0,
                     pos: (next() % 40) as i64,

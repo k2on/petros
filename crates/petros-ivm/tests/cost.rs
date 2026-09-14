@@ -20,10 +20,10 @@ fn median(mut v: Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
-fn id(n: usize) -> Vec<u8> {
-    let mut out = vec![0u8; 16];
+fn id<T>(n: usize) -> ::petros_schema::Id<T> {
+    let mut out = [0u8; 16];
     out[..8].copy_from_slice(&(n as u64).to_be_bytes());
-    out
+    ::petros_schema::Id::from_bytes(out)
 }
 
 /// One write, then the answer — the loop a client is actually in.

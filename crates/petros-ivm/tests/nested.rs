@@ -23,7 +23,7 @@ fn db() -> petros::Connection {
 
 fn song(id: u8, title: &str, pos: i64) -> Song {
     Song {
-        id: vec![id; 16],
+        id: ::petros_schema::Id::from_bytes([id; 16]),
         title: title.into(),
         done: false,
         pos,
@@ -32,8 +32,8 @@ fn song(id: u8, title: &str, pos: i64) -> Song {
 
 fn note(id: u8, song: u8, text: &str) -> Note {
     Note {
-        id: vec![id; 16],
-        song_id: vec![song; 16],
+        id: ::petros_schema::Id::from_bytes([id; 16]),
+        song_id: ::petros_schema::Id::from_bytes([song; 16]),
         text: text.into(),
         tag: None,
     }
@@ -41,8 +41,8 @@ fn note(id: u8, song: u8, text: &str) -> Note {
 
 fn author(id: u8, note: u8, name: &str) -> Author {
     Author {
-        id: vec![id; 16],
-        note_id: vec![note; 16],
+        id: ::petros_schema::Id::from_bytes([id; 16]),
+        note_id: ::petros_schema::Id::from_bytes([note; 16]),
         name: name.into(),
     }
 }
@@ -131,7 +131,7 @@ fn a_change_two_levels_down_reaches_the_top() {
 
     // And away again.
     store
-        .delete::<Author>(&Author::key_of(&vec![1u8; 16]))
+        .delete::<Author>(&Author::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
         .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(authors(&view), vec![vec![Vec::<String>::new()]]);
@@ -204,8 +204,10 @@ fn a_moved_middle_node_takes_its_children_along() {
         vec![vec![vec!["alice".to_string()]], vec![]]
     );
 
-    let mut moved = store.get::<Note>(&Note::key_of(&vec![1u8; 16])).unwrap();
-    moved.song_id = vec![2u8; 16];
+    let mut moved = store
+        .get::<Note>(&Note::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
+    moved.song_id = ::petros_schema::Id::from_bytes([2u8; 16]);
     store.put(&moved).unwrap();
     settle(&mut view, &mut store);
 
@@ -365,7 +367,9 @@ fn a_limit_on_a_relationship_is_per_parent() {
 
     // A gap in song 1's window. The replacement is song 1's own next note (7),
     // and emphatically not note 5, which is what comes next in the table.
-    store.delete::<Note>(&Note::key_of(&vec![1u8; 16])).unwrap();
+    store
+        .delete::<Note>(&Note::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(
         notes(&view),
@@ -477,7 +481,9 @@ fn a_child_edited_across_the_relationship_order_moves() {
     // changing its key — instead move the *middle* note onto a new id by
     // deleting and re-adding, which is what a key change is in SQL anyway.
     // What this checks is the ordered insert on the way back in.
-    store.delete::<Note>(&Note::key_of(&vec![5u8; 16])).unwrap();
+    store
+        .delete::<Note>(&Note::key_of(&::petros_schema::Id::from_bytes([5u8; 16])))
+        .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(note_ids(&view), vec![2, 9]);
 

@@ -22,7 +22,7 @@ pub const SCHEMA: &str = include_str!("../schema.sql");
 #[cfg(feature = "storage")]
 #[derive(Debug, Clone)]
 pub struct Item {
-    pub id: petros::Id,
+    pub id: petros_schema::Id<Todo>,
     pub text: String,
     pub done: bool,
     pub pos: i64,
@@ -30,9 +30,6 @@ pub struct Item {
     pub actor: String,
 }
 
-/// Sixteen bytes out of a BLOB column. A row whose id is not sixteen bytes did
-/// not come from a mutation, and there is nothing useful to do with it.
-#[cfg(feature = "storage")]
-pub(crate) fn id_of(bytes: &[u8]) -> petros::Id {
-    petros::Id(petros::uuid::Uuid::from_slice(bytes).unwrap_or(petros::uuid::Uuid::nil()))
-}
+// An id no longer needs recovering from a column: `tables!` types a key column
+// as the `Id<Todo>` it is, so `Item.id` is the row's id rather than a
+// conversion of it.

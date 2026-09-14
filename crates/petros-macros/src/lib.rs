@@ -55,6 +55,9 @@ impl Ctx {
     fn of(ty: &Type) -> Option<Ctx> {
         let text = quote!(#ty).to_string().replace(' ', "");
         let bare = text.trim_start_matches('&').trim_start_matches("mut");
+        // The generic argument goes first: `NewId<Playlist>` is a `NewId`, and
+        // what it identifies is the schema's business rather than this one's.
+        let bare = bare.split('<').next().unwrap_or(bare);
         // Matched on the last path segment, so `Ctx`, `petros::Ctx` and
         // `petros_schema::Ctx` are all the same thing to a reader and to this.
         let last = bare.rsplit("::").next().unwrap_or(bare);
@@ -75,31 +78,77 @@ struct Arg {
     ty: Type,
 }
 
-/// The schema's name for a type. The list is deliberately short: these are the
-/// types that survive a log, a CBOR round trip and a foreign boundary without
-/// anyone having to decide anything.
-fn schema_ty(ty: &Type) -> Result<&'static str, String> {
+/// The schema's name for a type, and for an id the table it names.
+///
+/// The list is deliberately short: these are the types that survive a log, a
+/// CBOR round trip and a foreign boundary without anyone having to decide
+/// anything. An id carries its table — `Id<Playlist>` — so that two ids of
+/// different tables are different types and the compiler refuses the swap.
+fn schema_ty(ty: &Type) -> Result<(&'static str, Option<String>), String> {
     let text = quote!(#ty).to_string().replace(' ', "");
+    // Split the generic argument off first, so `Id<Playlist>` and
+    // `petros_schema::Id<crate::tables::Playlist>` read the same.
+    let (base, of) = match text.split_once('<') {
+        Some((base, rest)) => {
+            let inner = rest.strip_suffix('>').unwrap_or(rest);
+            (base.to_string(), Some(last_segment(inner).to_string()))
+        }
+        None => (text.clone(), None),
+    };
     // Matched on the last path segment, so `Id`, `petros::Id` and
     // `petros_schema::Id` are all the same type to a reader and to this.
-    let last = text.rsplit("::").next().unwrap_or(&text);
+    let last = last_segment(&base);
     Ok(match last {
-        "String" | "&str" | "&'staticstr" => "Text",
-        "i64" | "u64" | "i32" | "u32" => "Integer",
-        "bool" => "Bool",
-        "Id" | "NewId" | "Vec<u8>" => "Id",
+        "String" | "&str" | "&'staticstr" => ("Text", None),
+        "i64" | "u64" | "i32" | "u32" => ("Integer", None),
+        "bool" => ("Bool", None),
+        "Id" | "NewId" => match of {
+            Some(table) => ("Id", Some(snake_case(&table))),
+            None => {
+                return Err(format!(
+                    "`{last}` has to say what it identifies, as `{last}<Playlist>`. \
+                     An untagged id is how a playlist's id ends up in a media \
+                     argument: it compiles, it writes a row, and nothing anywhere \
+                     reports it."
+                ))
+            }
+        },
         other => {
             return Err(format!(
                 "`{other}` is not a type a mutation argument can be. \
                  The log is permanent and a foreign caller has to be able to write one, \
-                 so arguments are String, i64, bool or Id."
+                 so arguments are String, i64, bool or Id<Table>."
             ))
         }
     })
 }
 
+fn last_segment(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
+}
+
+/// `PlaylistItem` to `playlist_item`: the row type back to the table it was
+/// generated from, which is the name the declaration and the log carry.
+fn snake_case(ty: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in ty.char_indices() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 struct Parsed {
-    ctx: Vec<(Ident, Ctx)>,
+    /// The type is kept so a generated binding can be annotated with what the
+    /// function actually wrote: `NewId<Playlist>` pins which table the id
+    /// names, and nothing in the body need mention it.
+    ctx: Vec<(Ident, Ctx, Type)>,
     args: Vec<Arg>,
 }
 
@@ -127,7 +176,7 @@ fn parse(f: &ItemFn) -> Result<Parsed, syn::Error> {
                         "the engine's parameters come before a caller's",
                     ));
                 }
-                ctx.push((name.ident.clone(), kind));
+                ctx.push((name.ident.clone(), kind, (**ty).clone()));
             }
             None => args.push(Arg {
                 name: name.ident.clone(),
@@ -135,7 +184,7 @@ fn parse(f: &ItemFn) -> Result<Parsed, syn::Error> {
             }),
         }
     }
-    if !ctx.iter().any(|(_, k)| *k == Ctx::Db) {
+    if !ctx.iter().any(|(_, k, _)| *k == Ctx::Db) {
         return Err(syn::Error::new_spanned(
             &f.sig,
             "a function needs `db: &mut Db` — it is how it reaches the database",
@@ -176,8 +225,8 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let db = parsed
         .ctx
         .iter()
-        .find(|(_, k)| *k == Ctx::Db)
-        .map(|(n, _)| n.clone())
+        .find(|(_, k, _)| *k == Ctx::Db)
+        .map(|(n, _, _)| n.clone())
         .expect("checked in parse");
 
     // The engine's parameters, bound from what `fill_auto` froze into the entry
@@ -185,13 +234,17 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let ctx_binds = parsed
         .ctx
         .iter()
-        .filter(|(_, k)| *k != Ctx::Db)
-        .map(|(n, k)| {
+        .filter(|(_, k, _)| *k != Ctx::Db)
+        .map(|(n, k, ty)| {
             let field = n.to_string();
             match k {
+                // No type annotation: which table the id names is inferred
+                // from the function this is bound for, so the tag cannot
+                // disagree with the signature.
                 Ctx::NewId => quote! {
-                    let #n: ::petros_schema::Id = ::petros_schema::cbor::field(mutation, #field)
+                    let #n: #ty = ::petros_schema::cbor::field(mutation, #field)
                         .and_then(::petros_schema::cbor::as_bytes)
+                        .and_then(|b| ::petros_schema::Id::from_slice(&b))
                         .ok_or_else(|| ::std::format!(
                             "{} has no {}; fill_auto did not run", #verb_lit, #field))?;
                 },
@@ -213,7 +266,7 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
         let ty = &a.ty;
         // A bad type is reported below, with a span and a message. Falling
         // back here only keeps this expansion well-formed until it is.
-        let kind = schema_ty(ty).unwrap_or("Text");
+        let kind = schema_ty(ty).map(|(k, _)| k).unwrap_or("Text");
         let getter = match kind {
             "Text" => quote! { ::petros_schema::cbor::opt_text(mutation, #field) },
             "Integer" => quote! {
@@ -229,6 +282,7 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
             _ => quote! {
                 ::petros_schema::cbor::field(mutation, #field)
                     .and_then(::petros_schema::cbor::as_bytes)
+                    .and_then(|b| ::petros_schema::Id::from_slice(&b))
                     .unwrap_or_default()
             },
         };
@@ -247,15 +301,15 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let arg_kinds: Vec<Ident> = parsed
         .args
         .iter()
-        .map(|a| format_ident!("{}", schema_ty(&a.ty).unwrap()))
+        .map(|a| format_ident!("{}", schema_ty(&a.ty).unwrap().0))
         .collect();
 
     // What `fill_auto` has to put in, and what a caller must not.
     let autos: Vec<(String, Ctx)> = parsed
         .ctx
         .iter()
-        .filter(|(_, k)| matches!(k, Ctx::NewId | Ctx::Now))
-        .map(|(n, k)| (n.to_string(), *k))
+        .filter(|(_, k, _)| matches!(k, Ctx::NewId | Ctx::Now))
+        .map(|(n, k, _)| (n.to_string(), *k))
         .collect();
     let auto_names: Vec<String> = autos.iter().map(|(n, _)| n.clone()).collect();
     let auto_is_id: Vec<bool> = autos.iter().map(|(_, k)| *k == Ctx::NewId).collect();
@@ -264,9 +318,27 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     // rather than assembled centrally: the linker concatenates a section, so
     // nothing has to hold the list, and `concat!` cannot see another item's
     // const anyway.
+    // An id's table goes into the declaration, so what the log records says
+    // which rows an argument names rather than only that it is sixteen bytes.
+    let arg_of: Vec<Option<String>> = parsed
+        .args
+        .iter()
+        .map(|a| schema_ty(&a.ty).unwrap().1)
+        .collect();
+    let arg_of_lits: Vec<proc_macro2::TokenStream> = arg_of
+        .iter()
+        .map(|of| match of {
+            Some(table) => quote!(::core::option::Option::Some(#table)),
+            None => quote!(::core::option::Option::None),
+        })
+        .collect();
+
     let mut line = verb.clone();
-    for (name, kind) in arg_strs.iter().zip(arg_kinds.iter()) {
-        line.push_str(&format!(" {name}:{kind}"));
+    for ((name, kind), of) in arg_strs.iter().zip(arg_kinds.iter()).zip(arg_of.iter()) {
+        match of {
+            Some(table) => line.push_str(&format!(" {name}:Id({table})")),
+            None => line.push_str(&format!(" {name}:{kind}")),
+        }
     }
     line.push('\n');
     let line_len = line.len();
@@ -285,7 +357,55 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
         })
         .collect();
 
+    // The table names above are guessed from how the type was spelled, because
+    // a proc macro cannot resolve an alias. Each guess is checked against the
+    // row type's own `TableDef`, so `Id<TodoRow>` aliased to a table called
+    // `todo` is a compile error rather than a declaration naming a table that
+    // does not exist.
+    // A caller's arguments and the `NewId` the engine fills: both name a table,
+    // and both are worth checking.
+    let tagged: Vec<&Type> = parsed
+        .args
+        .iter()
+        .map(|a| &a.ty)
+        .chain(
+            parsed
+                .ctx
+                .iter()
+                .filter(|(_, k, _)| *k == Ctx::NewId)
+                .map(|(_, _, ty)| ty),
+        )
+        .collect();
+    let id_checks: Vec<proc_macro2::TokenStream> = tagged
+        .into_iter()
+        .filter_map(|ty| {
+            let (_, of) = schema_ty(ty).ok()?;
+            let table = of?;
+            let msg = format!(
+                "the table in this declaration was read from how the type is spelled, \
+                 and the row type says otherwise. Spell it as `tables!` generated it \
+                 rather than as an alias, or the log would record `{table}`."
+            );
+            Some(quote! {
+                const _: () = {
+                    // `Tagged` resolves the id's `T` through however the type
+                    // was spelled, so an alias is no longer invisible here.
+                    type Row = <#ty as ::petros_schema::Tagged>::Table;
+                    assert!(
+                        ::petros_schema::same_table(
+                            <Row as ::petros_schema::Table>::DEF.name,
+                            #table,
+                        ),
+                        #msg
+                    );
+                };
+            })
+        })
+        .collect();
+
     Ok(quote! {
+        #(#id_checks)*
+
         #(#docs)*
         ///
         /// Authoring. Hand the result to `Client::mutate`; the body above runs
@@ -322,9 +442,10 @@ fn expand_mutation(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
             pub const VERB: &str = #verb_lit;
             /// This verb's line of the declaration a module carries.
             pub const LINE: &str = #line_lit;
-            /// A caller's arguments, in declaration order.
-            pub const ARGS: &[(&str, ::petros_schema::Ty)] =
-                &[#((#arg_strs, ::petros_schema::Ty::#arg_kinds)),*];
+            /// A caller's arguments, in declaration order: the name, the type,
+            /// and for an id the table it names.
+            pub const ARGS: &[(&str, ::petros_schema::Ty, ::core::option::Option<&str>)] =
+                &[#((#arg_strs, ::petros_schema::Ty::#arg_kinds, #arg_of_lits)),*];
             /// What `fill_auto` fills, and whether it is an id or a timestamp.
             pub const AUTO: &[(&str, bool)] = &[#((#auto_names, #auto_is_id)),*];
         }
@@ -410,7 +531,7 @@ pub fn query(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let parsed = parse(&f)?;
-    if parsed.ctx.iter().any(|(_, k)| *k != Ctx::Db) {
+    if parsed.ctx.iter().any(|(_, k, _)| *k != Ctx::Db) {
         return Err(syn::Error::new_spanned(
             &f.sig,
             "a query takes only `db: &mut Db` from the engine. `NewId` and `Now` are \
@@ -434,8 +555,8 @@ fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     let db = parsed
         .ctx
         .iter()
-        .find(|(_, k)| *k == Ctx::Db)
-        .map(|(n, _)| n.clone())
+        .find(|(_, k, _)| *k == Ctx::Db)
+        .map(|(n, _, _)| n.clone())
         .expect("checked in parse");
     let arg_names: Vec<_> = parsed.args.iter().map(|a| a.name.clone()).collect();
     let arg_tys: Vec<_> = parsed.args.iter().map(|a| a.ty.clone()).collect();
@@ -564,7 +685,10 @@ pub fn peer(item: TokenStream) -> TokenStream {
                 #(
                     #names::ARGS.iter().fold(
                         ::petros_schema::Verb::new(#names::VERB),
-                        |v, (name, ty)| v.arg(*name, *ty),
+                        |v, (name, ty, of)| match of {
+                            ::core::option::Option::Some(table) => v.id_arg(*name, *table),
+                            ::core::option::Option::None => v.arg(*name, *ty),
+                        },
                     ),
                 )*
             ])

@@ -21,7 +21,7 @@ fn db() -> petros::Connection {
 
 fn song(id: u8, title: &str, pos: i64) -> Song {
     Song {
-        id: vec![id; 16],
+        id: ::petros_schema::Id::from_bytes([id; 16]),
         title: title.into(),
         done: false,
         pos,
@@ -30,7 +30,7 @@ fn song(id: u8, title: &str, pos: i64) -> Song {
 
 fn heart(song: u8, pos: i64) -> Favorite {
     Favorite {
-        song_id: vec![song; 16],
+        song_id: ::petros_schema::Id::from_bytes([song; 16]),
         pos,
     }
 }
@@ -92,7 +92,9 @@ fn hearting_a_song_moves_a_view_of_songs() {
 
     // And back off again.
     store
-        .delete::<Favorite>(&Favorite::key_of(&vec![2u8; 16]))
+        .delete::<Favorite>(&Favorite::key_of(&::petros_schema::Id::from_bytes(
+            [2u8; 16],
+        )))
         .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(shape(&view.with()), vec![("Glue", false), ("Opal", false)]);
@@ -153,7 +155,9 @@ fn a_child_edited_in_place_stays_under_its_parent() {
     view.hydrate(&mut store);
 
     let mut moved = store
-        .get::<Favorite>(&Favorite::key_of(&vec![1u8; 16]))
+        .get::<Favorite>(&Favorite::key_of(&::petros_schema::Id::from_bytes(
+            [1u8; 16],
+        )))
         .unwrap();
     moved.pos = 9;
     store.put(&moved).unwrap();
@@ -185,7 +189,9 @@ fn a_child_that_changes_parent_leaves_the_old_one() {
     assert_eq!(shape(&view.with()), vec![("Glue", true), ("Opal", false)]);
 
     store
-        .delete::<Favorite>(&Favorite::key_of(&vec![1u8; 16]))
+        .delete::<Favorite>(&Favorite::key_of(&::petros_schema::Id::from_bytes(
+            [1u8; 16],
+        )))
         .unwrap();
     store.put(&heart(2, 1)).unwrap();
     settle(&mut view, &mut store);
@@ -246,17 +252,25 @@ fn a_maintained_tree_agrees_with_a_re_run_over_a_random_session() {
         // not there — and that is part of what is under test: a refused write
         // must not report a change, or the view drifts from the database.
         match next() % 6 {
-            0 => drop(store.delete::<Song>(&Song::key_of(&vec![id; 16]))),
-            1 => drop(store.delete::<Favorite>(&Favorite::key_of(&vec![id; 16]))),
+            0 => drop(
+                store.delete::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([id; 16]))),
+            ),
+            1 => drop(store.delete::<Favorite>(&Favorite::key_of(
+                &::petros_schema::Id::from_bytes([id; 16]),
+            ))),
             2 => drop(store.put(&heart(id, (next() % 20) as i64))),
             3 => {
-                if let Some(mut s) = store.get::<Song>(&Song::key_of(&vec![id; 16])) {
+                if let Some(mut s) =
+                    store.get::<Song>(&Song::key_of(&::petros_schema::Id::from_bytes([id; 16])))
+                {
                     s.pos = (next() % 20) as i64;
                     store.put(&s).unwrap();
                 }
             }
             4 => {
-                if let Some(mut f) = store.get::<Favorite>(&Favorite::key_of(&vec![id; 16])) {
+                if let Some(mut f) = store.get::<Favorite>(&Favorite::key_of(
+                    &::petros_schema::Id::from_bytes([id; 16]),
+                )) {
                     f.pos = (next() % 20) as i64;
                     store.put(&f).unwrap();
                 }
@@ -274,8 +288,8 @@ fn a_maintained_tree_agrees_with_a_re_run_over_a_random_session() {
 
 fn note(id: u8, song: u8, text: &str) -> Note {
     Note {
-        id: vec![id; 16],
-        song_id: vec![song; 16],
+        id: ::petros_schema::Id::from_bytes([id; 16]),
+        song_id: ::petros_schema::Id::from_bytes([song; 16]),
         text: text.into(),
         tag: None,
     }
@@ -325,8 +339,10 @@ fn a_child_edited_onto_another_parent_moves() {
         .collect();
     assert_eq!(counts, vec![1, 0]);
 
-    let mut moved = store.get::<Note>(&Note::key_of(&vec![7u8; 16])).unwrap();
-    moved.song_id = vec![2u8; 16];
+    let mut moved = store
+        .get::<Note>(&Note::key_of(&::petros_schema::Id::from_bytes([7u8; 16])))
+        .unwrap();
+    moved.song_id = ::petros_schema::Id::from_bytes([2u8; 16]);
     store.put(&moved).unwrap();
     settle(&mut view, &mut store);
 
@@ -442,7 +458,9 @@ fn a_null_filter_agrees_between_sql_and_rust() {
     assert_eq!(view.rows().len(), store.select(query()).len());
 
     // Giving a note a tag takes it out; taking the tag away puts it back.
-    let mut edited = store.get::<Note>(&Note::key_of(&vec![1u8; 16])).unwrap();
+    let mut edited = store
+        .get::<Note>(&Note::key_of(&::petros_schema::Id::from_bytes([1u8; 16])))
+        .unwrap();
     edited.tag = Some("demo".into());
     store.put(&edited).unwrap();
     let changes = store.take_changes();
@@ -496,7 +514,9 @@ fn a_child_in_the_same_batch_as_its_parent_is_not_doubled() {
     // The tell: taking the favourite off empties the heart, rather than
     // removing one of two copies and leaving it filled.
     store
-        .delete::<Favorite>(&Favorite::key_of(&vec![1u8; 16]))
+        .delete::<Favorite>(&Favorite::key_of(&::petros_schema::Id::from_bytes(
+            [1u8; 16],
+        )))
         .unwrap();
     settle(&mut view, &mut store);
     assert_eq!(shape(&view.with()), vec![("Glue", false)]);

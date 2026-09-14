@@ -201,6 +201,12 @@ first thing to run after touching `Cargo.lock`.
   warns. It put Diesel and SQLite in the wasm graph for weeks.
 - A build that compiles is not evidence anything works. `SystemTime::now()`
   panics on wasm and only surfaced when a mutation actually ran in a browser.
+- **An id argument must say what it identifies.** `Id<Playlist>`, not `Id` —
+  see "An id knows what it identifies" in `docs/decisions.md`. The tag comes
+  from the DDL's `REFERENCES`, and the type in a signature has to be the row
+  type as `tables!` generated it: an alias makes the macro guess a table that
+  does not exist, which is a compile error naming both rather than a silent
+  wrong declaration.
 - **A test can pass for the wrong reason, and three here did.** Each time the
   assertion was satisfied by a path other than the one under test. Falsify every
   new test by breaking the thing it claims to check; it costs a minute and has

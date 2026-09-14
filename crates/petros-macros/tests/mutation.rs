@@ -9,8 +9,34 @@ use petros_schema::Store;
 // its own store without one.
 #[allow(dead_code)]
 type Db = Recorder;
+/// A table for the ids in this file to name.
+///
+/// `tables!` generates one of these from `schema.sql`; this test supplies its
+/// own store, so it supplies its own. It has to be a real `Table` rather than a
+/// bare marker, because the macro checks an id's table against this `DEF` — it
+/// reads `Id<Song>` syntactically and will not take the name on trust.
 #[allow(dead_code)]
-type NewId = petros_schema::Id;
+pub struct Song;
+
+impl petros_schema::Table for Song {
+    const DEF: petros_schema::TableDef = petros_schema::TableDef {
+        name: "song",
+        columns: &["id"],
+        types: &[petros_schema::ColumnTy::Blob],
+        key: &["id"],
+    };
+    fn to_row(&self) -> Vec<petros_schema::Value> {
+        Vec::new()
+    }
+    fn from_row(_: &[petros_schema::Value]) -> Option<Self> {
+        None
+    }
+    fn key(&self) -> Vec<petros_schema::Value> {
+        Vec::new()
+    }
+}
+#[allow(dead_code)]
+type NewId = petros_schema::Id<Song>;
 #[allow(dead_code)]
 type Now = i64;
 #[allow(dead_code)]
@@ -63,7 +89,7 @@ pub fn add_song(
     db.put_row(
         "song",
         &[
-            petros_schema::Value::Blob(id),
+            petros_schema::Value::Blob(id.to_vec()),
             petros_schema::Value::Text(title),
             petros_schema::Value::Text(artist),
             petros_schema::Value::Int(added_ms),
@@ -98,8 +124,8 @@ fn the_declaration_is_recoverable() {
     assert_eq!(
         add_song::ARGS,
         &[
-            ("title", petros_schema::Ty::Text),
-            ("artist", petros_schema::Ty::Text)
+            ("title", petros_schema::Ty::Text, None),
+            ("artist", petros_schema::Ty::Text, None)
         ]
     );
     assert_eq!(add_song::AUTO, &[("id", true), ("added_ms", false)]);
@@ -109,7 +135,7 @@ fn the_declaration_is_recoverable() {
 #[test]
 fn applying_runs_the_body_against_the_store() {
     let mut m = add_song("Glue".to_string(), "Bicep".to_string());
-    petros_schema::cbor::set(&mut m, "id", Value::Bytes(vec![7; 16]));
+    petros_schema::cbor::set(&mut m, "id", Value::Bytes(vec![7u8; 16]));
     petros_schema::cbor::set(&mut m, "added_ms", Value::Integer(1234.into()));
 
     let mut db = Recorder::default();
@@ -118,7 +144,7 @@ fn applying_runs_the_body_against_the_store() {
     assert_eq!(db.writes.len(), 1);
     let (table, params) = &db.writes[0];
     assert_eq!(table, "song");
-    assert_eq!(params[0], petros_schema::Value::Blob(vec![7; 16]));
+    assert_eq!(params[0], petros_schema::Value::Blob(vec![7u8; 16]));
     assert_eq!(params[1], petros_schema::Value::Text("Glue".into()));
     assert_eq!(params[3], petros_schema::Value::Int(1234));
     assert_eq!(params[4], petros_schema::Value::Text("alice".into()));
@@ -129,7 +155,7 @@ fn applying_runs_the_body_against_the_store() {
 #[test]
 fn a_refusal_comes_back_from_the_body() {
     let mut m = add_song("   ".to_string(), "nobody".to_string());
-    petros_schema::cbor::set(&mut m, "id", Value::Bytes(vec![1; 16]));
+    petros_schema::cbor::set(&mut m, "id", Value::Bytes(vec![1u8; 16]));
     petros_schema::cbor::set(&mut m, "added_ms", Value::Integer(1.into()));
 
     let mut db = Recorder::default();
@@ -141,11 +167,11 @@ fn a_refusal_comes_back_from_the_body() {
 /// Note who is listening, and on which login: the whole context, not only
 /// the actor.
 #[petros_macros::mutation]
-pub fn listen(db: &mut Db, ctx: &Ctx, song: petros_schema::Id) -> Result<(), String> {
+pub fn listen(db: &mut Db, ctx: &Ctx, song: petros_schema::Id<Song>) -> Result<(), String> {
     db.put_row(
         "listen",
         &[
-            petros_schema::Value::Blob(song),
+            petros_schema::Value::Blob(song.to_vec()),
             petros_schema::Value::Text(ctx.user.id.clone()),
             petros_schema::Value::Text(ctx.session.id.clone()),
         ],
@@ -158,9 +184,14 @@ pub fn listen(db: &mut Db, ctx: &Ctx, song: petros_schema::Id) -> Result<(), Str
 /// is the user alone. Neither is an argument a caller passes.
 #[test]
 fn the_context_is_bound_and_is_not_an_argument() {
-    assert_eq!(listen::ARGS, &[("song", petros_schema::Ty::Id)]);
+    // An id argument carries the table it names, which is what makes
+    // `Id<Song>` and `Id<Playlist>` different at the boundary too.
+    assert_eq!(
+        listen::ARGS,
+        &[("song", petros_schema::Ty::Id, Some("song"))]
+    );
     assert_eq!(listen::AUTO, &[]);
-    let m = listen(vec![2; 16]);
+    let m = listen(::petros_schema::Id::from_bytes([2; 16]));
     assert_eq!(field(&m, "ctx"), None);
 
     let mut db = Recorder::default();
@@ -172,8 +203,8 @@ fn the_context_is_bound_and_is_not_an_argument() {
 
 /// Take a song back out of the playlist.
 #[petros_macros::mutation]
-pub fn unfavorite(db: &mut Db, id: petros_schema::Id) -> Result<(), String> {
-    db.delete_row("favorite", &[petros_schema::Value::Blob(id)])
+pub fn unfavorite(db: &mut Db, id: petros_schema::Id<Song>) -> Result<(), String> {
+    db.delete_row("favorite", &[petros_schema::Value::Blob(id.to_vec())])
         .unwrap();
     Ok(())
 }
@@ -185,13 +216,13 @@ petros_macros::peer!(add_song, listen, unfavorite);
 #[test]
 fn dispatch_routes_by_verb() {
     let mut m = add_song("Glue".into(), "Bicep".into());
-    fill_auto(&mut m, vec![3; 16], 99);
+    fill_auto(&mut m, vec![3u8; 16], 99);
     let mut db = Recorder::default();
     apply(&mut db, &m, &Ctx::from_user("alice")).expect("routed to add_song");
     assert_eq!(db.writes.len(), 1);
 
-    let mut m = unfavorite(vec![4; 16]);
-    fill_auto(&mut m, vec![0; 16], 0);
+    let mut m = unfavorite(::petros_schema::Id::from_bytes([4; 16]));
+    fill_auto(&mut m, vec![0u8; 16], 0);
     apply(&mut db, &m, &Ctx::from_user("alice")).expect("routed to unfavorite");
     // `unfavorite` deletes, and a delete is not a write this recorder keeps.
     assert_eq!(db.writes.len(), 1);
@@ -210,16 +241,16 @@ fn dispatch_routes_by_verb() {
 #[test]
 fn fill_auto_follows_the_signature() {
     let mut m = add_song("Glue".into(), "Bicep".into());
-    fill_auto(&mut m, vec![9; 16], 4242);
-    assert_eq!(field(&m, "id"), Some(&Value::Bytes(vec![9; 16])));
+    fill_auto(&mut m, vec![9u8; 16], 4242);
+    assert_eq!(field(&m, "id"), Some(&Value::Bytes(vec![9u8; 16])));
     assert_eq!(field(&m, "added_ms"), Some(&Value::Integer(4242.into())));
 
     // `unfavorite` takes neither, so neither is added.
-    let mut m = unfavorite(vec![1; 16]);
-    fill_auto(&mut m, vec![9; 16], 4242);
+    let mut m = unfavorite(::petros_schema::Id::from_bytes([1; 16]));
+    fill_auto(&mut m, vec![9u8; 16], 4242);
     assert_eq!(
         field(&m, "id"),
-        Some(&Value::Bytes(vec![1; 16])),
+        Some(&Value::Bytes(vec![1u8; 16])),
         "the argument, untouched"
     );
     assert_eq!(field(&m, "added_ms"), None);

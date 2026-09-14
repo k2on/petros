@@ -26,6 +26,7 @@
 #[cfg(feature = "author")]
 pub mod author;
 pub mod compat;
+pub mod id;
 pub mod query;
 pub mod row;
 pub mod seed;
@@ -64,11 +65,12 @@ pub mod prelude {
 /// The store a function is handed. See [`prelude`].
 pub type Db = prelude::DbMarker;
 
-/// A fresh id, chosen once at the originating client and frozen in the log.
+/// A fresh id for a row of `T`, chosen once at the originating client and
+/// frozen in the log.
 ///
 /// `apply` may not invent one: all it can reach is the store, and two replicas
 /// inventing separate ids for the same entry is divergence.
-pub type NewId = Id;
+pub type NewId<T> = Id<T>;
 
 /// The clock, frozen the same way and for the same reason.
 pub type Now = i64;
@@ -175,11 +177,43 @@ impl Ctx {
     }
 }
 
-/// Sixteen bytes: an id as the log stores it.
+pub use id::Id;
+
+/// What an [`Id`] identifies, recoverable from the id's own type.
 ///
-/// Not a uuid type, so this crate keeps no dependency on one. `petros::Id` is
-/// the same bytes with a `Display` and a Diesel impl.
-pub type Id = ::std::vec::Vec<u8>;
+/// `<Id<Todo> as Tagged>::Table` is `Todo`, and it still is when the id was
+/// written as an alias — which is the point: a macro reads the spelling, this
+/// resolves it.
+pub trait Tagged {
+    type Table;
+}
+
+impl<T> Tagged for Id<T> {
+    type Table = T;
+}
+
+/// Two table names, compared in const.
+///
+/// A proc macro is syntactic: it reads `Id<TodoRow>` and cannot tell whether
+/// `TodoRow` is a row type or an alias for one, so it guesses the table name
+/// from the spelling. This is how the guess is checked — the generated code
+/// asserts it against the row type's own `TableDef::name`, and a wrong guess
+/// is a compile error naming both rather than a declaration that quietly says
+/// the wrong table.
+pub const fn same_table(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// A value an authoring function can put into a payload.
 ///
@@ -218,9 +252,9 @@ impl IntoCbor for bool {
     }
 }
 #[cfg(feature = "cbor")]
-impl IntoCbor for Id {
+impl<T> IntoCbor for Id<T> {
     fn into_cbor(self) -> cbor::Value {
-        cbor::Value::Bytes(self)
+        cbor::Value::Bytes(self.to_vec())
     }
 }
 pub use query::{
@@ -282,6 +316,17 @@ impl Verb {
         self.args.push(Arg {
             name: name.into(),
             ty,
+            of: None,
+        });
+        self
+    }
+
+    /// An id argument, and the table it names.
+    pub fn id_arg(mut self, name: impl Into<String>, of: impl Into<String>) -> Self {
+        self.args.push(Arg {
+            name: name.into(),
+            ty: Ty::Id,
+            of: Some(of.into()),
         });
         self
     }
@@ -292,6 +337,25 @@ impl Verb {
 pub struct Arg {
     pub name: String,
     pub ty: Ty,
+    /// For [`Ty::Id`], the table it names — `playlist` in `Id(playlist)`.
+    /// `None` for every other type, and for an id declared before tables were
+    /// recorded.
+    ///
+    /// Orthogonal to `ty` rather than inside it, so `Ty` stays `Copy` and the
+    /// three types that are not ids carry nothing they cannot use.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub of: Option<String>,
+}
+
+impl Arg {
+    /// How this argument is spelled in a declaration: `name:Type`, and
+    /// `name:Id(table)` for an id that knows what it names.
+    pub fn declaration(&self) -> String {
+        match (&self.of, self.ty) {
+            (Some(table), Ty::Id) => format!("{}:Id({table})", self.name),
+            _ => format!("{}:{}", self.name, self.ty.name()),
+        }
+    }
 }
 
 /// The types an argument can have.
@@ -483,7 +547,13 @@ pub fn parse(text: &str) -> Result<AppSchema, String> {
             let (arg, ty) = part
                 .split_once(':')
                 .ok_or_else(|| format!("`{part}` is not `name:Type`"))?;
-            verb = verb.arg(arg, Ty::parse(ty)?);
+            // `Id(playlist)` says which table the id names. A bare `Id` is a
+            // declaration from before tables were recorded, and still reads.
+            verb = match ty.strip_prefix("Id(").and_then(|t| t.strip_suffix(')')) {
+                Some(table) if !table.is_empty() => verb.id_arg(arg, table),
+                Some(_) => return Err(format!("`{part}` names no table")),
+                None => verb.arg(arg, Ty::parse(ty)?),
+            };
         }
         verbs.push(verb);
     }
@@ -536,9 +606,23 @@ pub mod cbor {
     // means the same thing on every replica and refusing it is the domain's
     // decision to make, not the decoder's.
     #[doc(hidden)]
-    pub fn need_id(m: &Value, verb: &str, name: &str) -> Result<Vec<u8>, String> {
+    /// Sixteen bytes, untyped.
+    ///
+    /// For [`crate::mutations`], whose declarations name no table — an id there
+    /// is bytes, because there is nothing to tag it with. `#[mutation]`, which
+    /// reads `Id<Playlist>` from a real signature, uses [`need_id`].
+    #[doc(hidden)]
+    pub fn need_bytes(m: &Value, verb: &str, name: &str) -> Result<Vec<u8>, String> {
         field(m, name)
             .and_then(as_bytes)
+            .ok_or_else(|| format!("{verb} has no {name}"))
+    }
+
+    #[doc(hidden)]
+    pub fn need_id<T>(m: &Value, verb: &str, name: &str) -> Result<crate::Id<T>, String> {
+        field(m, name)
+            .and_then(as_bytes)
+            .and_then(|b| crate::Id::from_slice(&b))
             .ok_or_else(|| format!("{verb} has no {name}"))
     }
 
@@ -659,7 +743,7 @@ macro_rules! mutations {
     };
 
     // Required, because a missing one means the payload is malformed.
-    (@get Id, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::need_id($m, $verb, $name)? };
+    (@get Id, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::need_bytes($m, $verb, $name)? };
     (@get Array, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::need_array($m, $verb, $name)? };
     // Optional, because an absent one is a value every replica agrees on.
     (@get Text, $m:expr, $verb:expr, $name:expr) => { $crate::cbor::opt_text($m, $name) };
