@@ -348,6 +348,30 @@ pub struct Arg {
 }
 
 impl Arg {
+    /// Read one `name:Type` — or `name:Id(table)` — back.
+    ///
+    /// The inverse of [`declaration`](Self::declaration), and beside it: the
+    /// grammar was written out in two parsers once, and the one that was not
+    /// updated silently dropped every table tag it read.
+    pub fn parse(part: &str) -> Result<Arg, String> {
+        let (name, ty) = part
+            .split_once(':')
+            .ok_or_else(|| format!("`{part}` is not `name:Type`"))?;
+        match ty.strip_prefix("Id(").and_then(|t| t.strip_suffix(')')) {
+            Some("") => Err(format!("`{part}` names no table")),
+            Some(table) => Ok(Arg {
+                name: name.to_string(),
+                ty: Ty::Id,
+                of: Some(table.to_string()),
+            }),
+            None => Ok(Arg {
+                name: name.to_string(),
+                ty: Ty::parse(ty)?,
+                of: None,
+            }),
+        }
+    }
+
     /// How this argument is spelled in a declaration: `name:Type`, and
     /// `name:Id(table)` for an id that knows what it names.
     pub fn declaration(&self) -> String {
@@ -544,16 +568,7 @@ pub fn parse(text: &str) -> Result<AppSchema, String> {
         let name = parts.next().ok_or("a schema line has no verb")?;
         let mut verb = Verb::new(name);
         for part in parts {
-            let (arg, ty) = part
-                .split_once(':')
-                .ok_or_else(|| format!("`{part}` is not `name:Type`"))?;
-            // `Id(playlist)` says which table the id names. A bare `Id` is a
-            // declaration from before tables were recorded, and still reads.
-            verb = match ty.strip_prefix("Id(").and_then(|t| t.strip_suffix(')')) {
-                Some(table) if !table.is_empty() => verb.id_arg(arg, table),
-                Some(_) => return Err(format!("`{part}` names no table")),
-                None => verb.arg(arg, Ty::parse(ty)?),
-            };
+            verb.args.push(Arg::parse(part)?);
         }
         verbs.push(verb);
     }

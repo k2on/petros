@@ -564,6 +564,40 @@ fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
     // A query's rows cross as the record `row!` generated for them: `Song`
     // here, `foreign::Song` there. Recognised by shape rather than by a list,
     // because there is only one shape a query returns.
+    // An id crosses to a foreign caller as its canonical string, the same way a
+    // mutation argument does: sixteen bytes is not a thing JavaScript holds,
+    // and a boundary where a query wanted bytes and a mutation wanted text was
+    // a trap every call site had to remember.
+    let ffi_args: Vec<proc_macro2::TokenStream> = parsed
+        .args
+        .iter()
+        .map(|a| {
+            let n = &a.name;
+            let ty = &a.ty;
+            match schema_ty(ty) {
+                Ok(("Id", _)) => quote!(#n: ::std::string::String),
+                _ => quote!(#n: #ty),
+            }
+        })
+        .collect();
+    let ffi_binds: Vec<proc_macro2::TokenStream> = parsed
+        .args
+        .iter()
+        .map(|a| {
+            let n = &a.name;
+            let ty = &a.ty;
+            match schema_ty(ty) {
+                Ok(("Id", _)) => quote! {
+                    let #n: #ty = <#ty as ::core::str::FromStr>::from_str(&#n)
+                        .map_err(|_| crate::PeerError::Refused {
+                            reason: ::std::format!("{} is not an id", #n),
+                        })?;
+                },
+                _ => quote!(),
+            }
+        })
+        .collect();
+
     let ffi = ffi_return(&f.sig.output)?;
     let (ffi_ret, ffi_body) = match ffi {
         Rows(elem) => (
@@ -581,8 +615,9 @@ fn expand_query(f: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
             #(#docs)*
             pub fn #name(
                 &self,
-                #(#arg_names: #arg_tys),*
+                #(#ffi_args),*
             ) -> ::core::result::Result<#ffi_ret, crate::PeerError> {
+                #(#ffi_binds)*
                 let rows = self.read(|db| #name(db #(, #arg_names)*))?;
                 ::core::result::Result::Ok(#ffi_body)
             }

@@ -1042,6 +1042,13 @@ surface now says which rows an argument names rather than only that it is
 sixteen bytes, and `petros-codegen` turns each table into a branded TypeScript
 type, so the same swap is a type error on the phone.
 
+The recorded surface carries the table, and `check-log` holds an app to it:
+giving an untagged id a table is a refinement and passes, but pointing an id
+at a *different* table is a break. That one is worth catching precisely
+because nothing downstream would notice — the bytes are the same sixteen
+either way, and every entry already in the log would quietly start naming
+another table's rows.
+
 One wrinkle, and the fix for it is the interesting part. A proc macro is
 syntactic: it reads `Id<TodoRow>` and cannot tell whether `TodoRow` is a row
 type or an alias for one, so it guesses the table from the spelling. An alias

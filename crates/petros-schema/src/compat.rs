@@ -36,6 +36,20 @@ pub enum Break {
         was: Ty,
         now: Ty,
     },
+    /// An id argument that named one table and now names another. The bytes
+    /// are the same sixteen either way, which is exactly why this needs
+    /// catching: nothing downstream would notice, and every entry already in
+    /// the log would quietly start pointing at a different table's rows.
+    ///
+    /// Giving a table to an id that had none is not this — that is a
+    /// declaration saying more than it did, and the rows it named have not
+    /// moved.
+    ArgRetabled {
+        verb: String,
+        arg: String,
+        was: String,
+        now: String,
+    },
 }
 
 impl core::fmt::Display for Break {
@@ -52,6 +66,18 @@ impl core::fmt::Display for Break {
                 "`{verb}` no longer takes `{arg}`. Entries in the log carry \
                  that argument; dropping it changes what they mean. Leave it \
                  in the signature, even if nothing reads it."
+            ),
+            Break::ArgRetabled {
+                verb,
+                arg,
+                was,
+                now,
+            } => write!(
+                f,
+                "`{verb}.{arg}` identified a row in `{was}` and now identifies \
+                 one in `{now}`. The bytes are the same sixteen either way, so \
+                 nothing downstream would notice — and every entry already in \
+                 the log would start pointing at a different table."
             ),
             Break::ArgRetyped {
                 verb,
@@ -102,7 +128,15 @@ pub fn breaking_changes(was: &AppSchema, now: &AppSchema) -> Vec<Break> {
                     was: arg.ty,
                     now: found.ty,
                 }),
-                Some(_) => {}
+                Some(found) => match (&arg.of, &found.of) {
+                    (Some(was), Some(now)) if was != now => breaks.push(Break::ArgRetabled {
+                        verb: old.name.clone(),
+                        arg: arg.name.clone(),
+                        was: was.clone(),
+                        now: now.clone(),
+                    }),
+                    _ => {}
+                },
             }
         }
     }
@@ -122,9 +156,11 @@ pub fn to_text(schema: &AppSchema) -> String {
         out.push_str(&verb.name);
         for arg in &verb.args {
             out.push(' ');
-            out.push_str(&arg.name);
-            out.push(':');
-            out.push_str(arg.ty.name());
+            // `Arg::declaration` rather than the name and type separately, so
+            // an id's table reaches the recorded surface: this is the text
+            // `check-log` compares, and a tag it dropped would be a tag nothing
+            // held us to.
+            out.push_str(&arg.declaration());
         }
         out.push('\n');
     }
@@ -146,13 +182,8 @@ pub fn from_text(text: &str) -> Result<AppSchema, String> {
             .ok_or_else(|| format!("line {}: empty", n + 1))?;
         let mut verb = crate::Verb::new(name);
         for part in parts {
-            let (arg, ty) = part
-                .split_once(':')
-                .ok_or_else(|| format!("line {}: `{part}` is not `name:Type`", n + 1))?;
-            verb = verb.arg(
-                arg,
-                Ty::parse(ty).map_err(|e| format!("line {}: {e}", n + 1))?,
-            );
+            verb.args
+                .push(crate::Arg::parse(part).map_err(|e| format!("line {}: {e}", n + 1))?);
         }
         verbs.push(verb);
     }
@@ -275,5 +306,38 @@ mod tests {
             .arg("artist", Ty::Text)
             .arg("title", Ty::Text)]);
         assert!(breaking_changes(&was, &now).is_empty());
+    }
+
+    /// The same sixteen bytes, pointed at a different table. Nothing about the
+    /// wire changes, which is the entire reason this has to be caught here.
+    #[test]
+    fn retabling_an_id_is_a_break() {
+        let was = schema([Verb::new("AddTo").id_arg("target", "playlist")]);
+        let now = schema([Verb::new("AddTo").id_arg("target", "media")]);
+        let breaks = breaking_changes(&was, &now);
+        assert_eq!(breaks.len(), 1, "{breaks:?}");
+        let said = breaks[0].to_string();
+        assert!(
+            said.contains("playlist") && said.contains("media"),
+            "{said}"
+        );
+    }
+
+    /// Saying which table an id names, where it said nothing before, is a
+    /// declaration getting more precise — the rows it named have not moved.
+    #[test]
+    fn giving_an_untagged_id_a_table_is_not() {
+        let was = schema([Verb::new("AddTo").arg("target", Ty::Id)]);
+        let now = schema([Verb::new("AddTo").id_arg("target", "playlist")]);
+        assert!(breaking_changes(&was, &now).is_empty());
+    }
+
+    /// The table reaches the recorded text and survives a round trip, or
+    /// `check-log` would be comparing snapshots that had forgotten it.
+    #[test]
+    fn a_table_survives_the_text() {
+        let s = schema([Verb::new("AddTo").id_arg("target", "playlist")]);
+        assert_eq!(to_text(&s), "AddTo target:Id(playlist)\n");
+        assert_eq!(from_text(&to_text(&s)).unwrap(), s);
     }
 }
