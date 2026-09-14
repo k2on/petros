@@ -1109,10 +1109,21 @@ fn and(existing: Option<Node>, extra: Node) -> Node {
 /// re-deriving it here would be a second opinion about it. A view that needs
 /// the child order maintained across inserts pulls the relationship again;
 /// that is the next thing to sharpen if it matters.
+///
+/// An `Add` of a child already held replaces it rather than appending a
+/// second copy. A parent and its child added in one batch of changes reach a
+/// join by two paths — the parent's `hydrate` pulls the child out of the
+/// store, and the child's own `Add` pushes it — and both fire, so without this
+/// the child is counted twice. That is what a browser sees on its first sync,
+/// where every song and its favourite arrive together: a doubled row that a
+/// later remove only half-undoes.
 fn apply_child(node: &mut Tree, name: &'static str, change: &Delta) {
     let kids = node.children_mut(name);
     match change {
-        Delta::Add(tree) => kids.push(tree.clone()),
+        Delta::Add(tree) => match kids.iter().position(|held| held.row == tree.row) {
+            Some(at) => kids[at] = tree.clone(),
+            None => kids.push(tree.clone()),
+        },
         Delta::Remove(row) => {
             if let Some(at) = kids.iter().position(|held| held.row == *row) {
                 kids.remove(at);

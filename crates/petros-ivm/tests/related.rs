@@ -457,3 +457,48 @@ fn a_null_filter_agrees_between_sql_and_rust() {
     assert_eq!(view.len(), 2);
     assert_eq!(view.rows().len(), store.select(query()).len());
 }
+
+/// A parent and its child written in one batch reach a related view by two
+/// paths — the parent is hydrated out of a store that already holds the child,
+/// and the child's own add is pushed onto it — so the child must not be counted
+/// twice.
+///
+/// This is a client's first sync, where a song and the favourite hanging off it
+/// arrive together rather than one entry at a time. A doubled child is
+/// invisible until it is removed, which then takes only one copy off and leaves
+/// the parent still looking hearted — which is what a browser watching a phone
+/// showed.
+#[test]
+fn a_child_in_the_same_batch_as_its_parent_is_not_doubled() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+
+    // A view over an empty database, as a freshly opened client holds before it
+    // syncs.
+    let mut view = view();
+    view.hydrate(&mut store);
+    store.take_changes();
+
+    // Both land in one batch: the song, then the favourite hanging off it. The
+    // store already holds both by the time either change is pushed.
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&heart(1, 1)).unwrap();
+    settle(&mut view, &mut store);
+
+    assert_eq!(shape(&view.with()), vec![("Glue", true)]);
+    assert_eq!(
+        view.nodes()[0].children("favorite").len(),
+        1,
+        "one favourite child, not two"
+    );
+    assert_eq!(view.with::<Favorite>(), rerun(&mut store));
+
+    // The tell: taking the favourite off empties the heart, rather than
+    // removing one of two copies and leaving it filled.
+    store
+        .delete::<Favorite>(&Favorite::key_of(&vec![1u8; 16]))
+        .unwrap();
+    settle(&mut view, &mut store);
+    assert_eq!(shape(&view.with()), vec![("Glue", false)]);
+    assert_eq!(view.with::<Favorite>(), rerun(&mut store));
+}
