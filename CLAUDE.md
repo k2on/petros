@@ -113,6 +113,14 @@ and under which login (`ctx.session.id`); both are frozen with the entry and
 checked by the server against the login that pushed it. `Actor` is the short
 form, `ctx.user.id` as a `&str`.
 
+When an existing table's shape changes, bump `App::SCHEMA_VERSION` (it defaults
+to 0, off). On the next open Petros rebuilds the app's tables from the log — it
+drops them, recreates them at the new shape, and replays every entry through
+`apply` — because they are a function of the log, not a separate store to
+back-fill. A new table or index needs no bump (`CREATE … IF NOT EXISTS`). An
+*older client* meeting a newer server is a separate question; see
+`docs/decisions.md`.
+
 **There is no SQL in an app.** Reads and writes are the same shape over the
 generated row types, a write reports what it changed, and a relationship comes
 from the DDL's `REFERENCES` rather than from a join:

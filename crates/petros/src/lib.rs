@@ -54,6 +54,7 @@ mod auto;
 mod client;
 mod error;
 mod id;
+mod migrate;
 mod mutation;
 mod proto;
 pub mod schema;

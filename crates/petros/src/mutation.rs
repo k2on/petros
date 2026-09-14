@@ -147,4 +147,26 @@ pub trait App: 'static {
     fn migrate(conn: &mut Connection) -> Result<()> {
         crate::batch(conn, Self::SCHEMA)
     }
+
+    /// The version of the app's derived tables. Bump it whenever an existing
+    /// table's *shape* changes — a column added, removed, renamed or retyped —
+    /// or whenever a change to `apply` means the tables already on a device no
+    /// longer hold what today's code would have written.
+    ///
+    /// When a peer opens a database stamped with an older version, Petros
+    /// rebuilds the app's tables from the log: it drops them, recreates them at
+    /// the current shape with [`migrate`](App::migrate), and replays every
+    /// confirmed entry through the current `apply`. The tables are a pure
+    /// function of the log — `apply` is their only writer — so there is no
+    /// `ALTER` to write and no data to back-fill; the cost is a replay, bounded
+    /// by the log's length, paid once when the version moves.
+    ///
+    /// A *new* table or a *new* index needs no bump: `CREATE … IF NOT EXISTS`
+    /// in [`SCHEMA`](App::SCHEMA) adds it on the next open. Only a change to a
+    /// table that already exists does.
+    ///
+    /// `0` — the default — turns this off: the tables are taken to match
+    /// `SCHEMA` and are never rebuilt. Set it to `1` when you first need a
+    /// migration, and count up from there.
+    const SCHEMA_VERSION: u32 = 0;
 }

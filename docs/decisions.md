@@ -926,6 +926,73 @@ is 3, and the host now *reads* `petros_abi_version` and refuses a module
 built against another — which it had exported since version 1 and nobody had
 ever asked for.
 
+## A schema change is a rebuild, not an ALTER
+
+An app's tables are a pure function of the log: `apply` is their only writer,
+and every peer holds the whole log. So evolving the schema is not a
+data-preserving `ALTER` with a back-fill to get subtly wrong — it is a rebuild.
+`App::SCHEMA_VERSION` moves, and on the next open the engine drops the app's
+tables, recreates them at the new shape with `App::migrate`, and replays every
+confirmed entry through today's `apply`. The result is exactly what a fresh
+install would have materialised, because a fresh install does the same replay.
+The server does it directly; a client rewinds its cursor to zero and lets its
+ordinary catch-up do it, so the pending intents in the other file replay on top
+untouched. `crates/petros/src/migrate.rs`.
+
+This is only for the *app's* tables. Petros's own `petros_` tables — the log
+above all — are not derived from anything and cannot be rebuilt from
+themselves, so they carry real, ordered, data-preserving migrations in
+`store.rs` (the one so far added the `session` column). A new *table* or *index*
+needs no version bump at all: `CREATE … IF NOT EXISTS` in `SCHEMA` adds it on
+the next open. Only a change to a table that already exists — a column added,
+removed, renamed or retyped — does. `SCHEMA_VERSION` defaults to `0`, which
+turns the whole mechanism off: an app that never asks for a migration is never
+rebuilt.
+
+The cost is a replay, bounded by the log's length, paid once when the version
+moves. That is the same cost as a first sync, and it is where compaction would
+eventually help — a snapshot is a point the replay can start from instead of
+sequence 1.
+
+## An older client meeting a newer server
+
+The rebuild above is local: each device brings its own tables up to the version
+its own code was built for, from its own copy of the log. It says nothing about
+whether an *older* peer may safely talk to a *newer* server, which is a
+different axis and the sharper question. It has three answers depending on what
+changed, and the guiding rule is the one the whole engine rests on: an old peer
+must never *silently* diverge.
+
+**An additive change needs nothing.** A new field on a mutation, defaulted, is
+already the wire invariant (`tests/wire.rs`): an old client decodes a new
+entry with the field at its default and its own `apply` ignores it. A new table
+or index is `IF NOT EXISTS`. Old and new coexist, each seeing what it
+understands. This is the common case and it is free.
+
+**An apply-only change wants the phone to update its `apply`, not the app.**
+When the *logic* of a mutation changes but its shape does not — the kind of
+change `history.rs` demonstrates diverging — the danger is two peers replaying
+the same log through different `apply` and reaching different states. The phone
+is the easy case here, not the hard one, because its `apply` is a hot-swappable
+wasm module: the clean design is for the server to be the source of truth for
+that module and the phone to adopt the server's version on connect, so it
+converges without an app-store release. The desktop and the server link `apply`
+and move with their binaries. (Today harken bundles the module rather than
+fetching it; making the server hand it out is the step that closes this.)
+
+**A breaking change must be refused, not absorbed.** A *new mutation variant*
+is the case additive-only cannot cover: an old client's enum cannot deserialise
+an entry whose variant it has never heard of, so it cannot even read the log,
+let alone agree about it. Here the server must turn the old client away rather
+than let it stall or diverge. The mechanism is small and additive, and the
+pieces for it already exist: the client puts its app version in the `Hello`
+(a defaulted field, like `token` and `session` before it, so the wire fixture
+does not move), the server holds a minimum-supported version, and a client
+below it is answered with `Denied { reason }` — the same channel a bad token
+takes — which the client surfaces as "update required". That handshake is not
+built yet; it is the one piece of this a real multi-client deployment still
+needs, and it belongs with whatever first ships an incompatible change.
+
 ## What the engine does not do, on purpose or not yet
 
 Written down because "is anything left?" deserves a list rather than a shrug.

@@ -124,6 +124,16 @@ impl<A: App> Server<A> {
     pub fn open_with(mut conn: Connection, auth: impl Authenticate) -> Result<Self> {
         store::migrate(&mut conn)?;
         A::migrate(&mut conn)?;
+
+        // If the app's tables predate its current schema, rebuild them from the
+        // log: drop and recreate them empty, then replay every confirmed entry
+        // through today's `apply`. The server's state is a function of the log
+        // just as a client's is.
+        if crate::migrate::is_stale::<A>(&mut conn)? {
+            crate::migrate::reset_tables::<A>(&mut conn)?;
+            crate::migrate::replay_all::<A>(&mut conn)?;
+        }
+
         let head = store::head(&mut conn)?;
         let trusting = auth.trusts_everyone();
         Ok(Server {

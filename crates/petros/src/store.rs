@@ -56,6 +56,10 @@ const INTENTS_DDL: &str = "
 
 const CURSOR: &str = "cursor";
 
+/// The version of the app's derived tables the database was last built at.
+/// See [`crate::App::SCHEMA_VERSION`].
+const APP_VERSION: &str = "app_version";
+
 /// One row of the confirmed log.
 #[derive(Debug, Queryable, Selectable, Insertable)]
 #[diesel(table_name = petros_log, check_for_backend(Sqlite))]
@@ -165,6 +169,60 @@ pub(crate) fn set_cursor(conn: &mut Connection, seq: Seq) -> Result<()> {
         .do_update()
         .set(petros_meta::v.eq(excluded(petros_meta::v)))
         .execute(conn)?;
+    Ok(())
+}
+
+/// The app schema version this database was last built at, or 0 if never
+/// stamped — a fresh database, or one written before migrations existed.
+pub(crate) fn app_version(conn: &mut Connection) -> Result<u32> {
+    let v: Option<i64> = petros_meta::table
+        .select(petros_meta::v)
+        .filter(petros_meta::k.eq(APP_VERSION))
+        .first(conn)
+        .optional()?;
+    Ok(v.unwrap_or(0) as u32)
+}
+
+/// Stamp the database with the app schema version its tables now hold.
+pub(crate) fn set_app_version(conn: &mut Connection, version: u32) -> Result<()> {
+    diesel::insert_into(petros_meta::table)
+        .values((
+            petros_meta::k.eq(APP_VERSION),
+            petros_meta::v.eq(version as i64),
+        ))
+        .on_conflict(petros_meta::k)
+        .do_update()
+        .set(petros_meta::v.eq(excluded(petros_meta::v)))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Drop every table the app owns — everything that is not one of Petros's own
+/// `petros_` tables or SQLite's internal `sqlite_` ones — so [`crate::App::migrate`]
+/// can recreate them at the current shape. Foreign keys are switched off around
+/// the drops so the order they come back in does not matter; the pragma is a
+/// no-op inside a transaction, so this runs outside one.
+pub(crate) fn drop_app_tables(conn: &mut Connection) -> Result<()> {
+    #[derive(QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+    let tables: Vec<Row> = diesel::sql_query(
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'table' AND name NOT LIKE 'petros_%' AND name NOT LIKE 'sqlite_%'",
+    )
+    .load(conn)?;
+    conn.batch_execute("PRAGMA foreign_keys = OFF")?;
+    for t in &tables {
+        // The name comes from sqlite_master, not from user input; quote it
+        // anyway so an app table named oddly cannot break the statement.
+        conn.batch_execute(&format!(
+            "DROP TABLE IF EXISTS \"{}\"",
+            t.name.replace('"', "\"\"")
+        ))?;
+    }
+    conn.batch_execute("PRAGMA foreign_keys = ON")?;
     Ok(())
 }
 

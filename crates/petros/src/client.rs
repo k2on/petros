@@ -115,6 +115,15 @@ impl<A: App> Client<A> {
         store::migrate(&mut conn)?;
         A::migrate(&mut conn)?;
 
+        // If the app's tables predate its current schema, rebuild them: drop
+        // and recreate them empty, and rewind the cursor so the catch-up below
+        // replays the whole confirmed log into them. The pending intents in the
+        // other file are untouched and replay on top as always.
+        if crate::migrate::is_stale::<A>(&mut conn)? {
+            crate::migrate::reset_tables::<A>(&mut conn)?;
+            store::set_cursor(&mut conn, 0)?;
+        }
+
         // Intents live in their own file so they can be committed while the
         // optimistic transaction on this one stays open. See `INTENTS_DDL`.
         let mut intents = match store::main_file(&mut conn)? {
