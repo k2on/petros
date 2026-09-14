@@ -240,6 +240,25 @@ macro_rules! foreign_peer {
                 f(&mut inner.views)
             }
 
+            /// Read what this peer maintains, with the store it reads from —
+            /// for a view that has to be rebuilt rather than merely read.
+            #[doc(hidden)]
+            pub fn views_with_store<T>(
+                &self,
+                f: impl FnOnce(
+                    &mut $crate::backend::SqliteStore<'_>,
+                    &mut $views,
+                ) -> ::core::result::Result<T, PeerError>,
+            ) -> ::core::result::Result<T, PeerError> {
+                let mut guard = self.inner.lock().map_err(|_| PeerError::Engine {
+                    message: "the client lock was poisoned by an earlier panic".into(),
+                })?;
+                let PeerInner { client, views } = &mut *guard;
+                $crate::settle(client, views);
+                let mut store = client.store();
+                f(&mut store, views)
+            }
+
             /// Bring the views up to date. Called after anything that can move
             /// the database, so an app cannot forget one.
             fn settle(&self) {

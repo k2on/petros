@@ -209,8 +209,24 @@ fn tune(conn: &mut Connection) -> Result<()> {
 /// ```
 #[macro_export]
 macro_rules! app {
+    // The common case: a schema that has never had to change shape.
     ($app:ident {
         schema: $schema:expr,
+        apply: $apply:path,
+        fill_auto: $fill_auto:path $(,)?
+    }) => {
+        $crate::app!($app {
+            schema: $schema,
+            schema_version: 0,
+            apply: $apply,
+            fill_auto: $fill_auto,
+        });
+    };
+    // With a version, for an app whose tables have changed shape since a
+    // release. Bumping it rebuilds them from the log; see `App::SCHEMA_VERSION`.
+    ($app:ident {
+        schema: $schema:expr,
+        schema_version: $version:expr,
         apply: $apply:path,
         fill_auto: $fill_auto:path $(,)?
     }) => {
@@ -287,6 +303,7 @@ macro_rules! app {
         impl $crate::App for $app {
             type Mutation = Payload;
             const SCHEMA: &'static str = $schema;
+            const SCHEMA_VERSION: u32 = $version;
         }
     };
 }
