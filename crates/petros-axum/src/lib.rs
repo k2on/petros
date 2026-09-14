@@ -73,6 +73,55 @@ impl<A: App> Hub<A> {
         self.peers.lock().map(|p| p.len()).unwrap_or(0)
     }
 
+    /// A connection id for a peer that is not a socket.
+    ///
+    /// From the same counter the sockets draw from, so an in-process peer can
+    /// never collide with one that arrives later.
+    pub fn local(&self) -> ConnId {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Feed one message in from a peer that has no socket, and hand back what
+    /// the server addressed to it.
+    ///
+    /// Everything the server said to *other* peers is delivered to their
+    /// sockets on the way past, which is the part an application cannot do for
+    /// itself: `peers` is private and the outgoing queue is shared, so a writer
+    /// that only appended would leave the fan-out sitting there until some
+    /// other peer happened to speak. A library scanner adding a file at three
+    /// in the morning is exactly that case — nobody else is speaking.
+    ///
+    /// Pair it with [`Hub::local`] for the id. The peer on the other end is an
+    /// ordinary [`petros::Client`]: hand it `take_outgoing`, give it back what
+    /// this returns.
+    pub fn exchange(
+        &self,
+        from: ConnId,
+        msg: ClientMsg<A::Mutation>,
+    ) -> Vec<ServerMsg<A::Mutation>> {
+        let outgoing = {
+            let mut server = self.server();
+            if server.recv(from, msg).is_err() {
+                return Vec::new();
+            }
+            server.take_outgoing()
+        };
+        let mut mine = Vec::new();
+        let peers = self.peers.lock().ok();
+        for (conn, msg) in outgoing {
+            if conn == from {
+                mine.push(msg);
+                continue;
+            }
+            if let (Some(peers), Ok(frame)) = (peers.as_ref(), encode(&msg)) {
+                if let Some(peer) = peers.get(&conn) {
+                    let _ = peer.send(frame);
+                }
+            }
+        }
+        mine
+    }
+
     /// Feed one message in and deliver everything that falls out. Says
     /// whether the connection is still welcome: a denial is the last frame
     /// it gets, and the socket is closed behind it.

@@ -154,3 +154,85 @@ fn a_disconnected_peer_is_forgotten() {
     drop(link);
     assert_eq!(until(0, &watch), 0, "and forgot it when the socket closed");
 }
+
+/// A peer with no socket — a library scanner, a cron job — writing into the
+/// same log, and a peer with one seeing it.
+///
+/// This is the case `route` cannot serve: it delivers to `peers`, and an
+/// in-process writer is not in there. Without `exchange` the fan-out sits in
+/// the server's queue until some *other* peer happens to speak, which for a
+/// scanner adding a file at three in the morning is "never".
+#[test]
+fn an_in_process_peer_reaches_one_on_a_socket() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let hub = petros_axum::Hub::<TodoApp>::open(petros::open_memory().unwrap(), petros::Trusting)
+        .unwrap();
+    let inside = hub.clone();
+
+    let addr = runtime.block_on(async move {
+        let app = Router::new()
+            .route("/sync", get(petros_axum::sync::<TodoApp>))
+            .with_state(hub);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    });
+
+    // The one on the socket, connected and then left alone. It says nothing
+    // from here on, which is the whole point: nothing it does may be what
+    // delivers the scanner's work.
+    let mut watcher = Client::<TodoApp>::open(
+        petros::open_memory().unwrap(),
+        "watcher",
+        AutoCtx::seeded(1),
+    )
+    .unwrap();
+    let link = Link::<Payload>::connect(&format!("ws://{addr}/sync")).expect("it connects");
+    watcher.connected().unwrap();
+    pump(
+        &mut watcher,
+        &link,
+        Instant::now() + Duration::from_millis(300),
+    );
+
+    // The one without a socket: an ordinary client, pumped by hand into the
+    // hub rather than down a wire.
+    let mut scanner = Client::<TodoApp>::open(
+        petros::open_memory().unwrap(),
+        "scanner",
+        AutoCtx::seeded(2),
+    )
+    .unwrap();
+    let conn = inside.local();
+    scanner.connected().unwrap();
+    scanner.mutate(todo::add("a file it found".into())).unwrap();
+    for _ in 0..8 {
+        for msg in scanner.take_outgoing() {
+            for reply in inside.exchange(conn, msg) {
+                scanner.recv(reply).expect("the server answers it too");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // The socket peer is pumped but never *sends* anything of its own; if the
+    // fan-out had stayed in the queue there would be nothing to read.
+    pump(
+        &mut watcher,
+        &link,
+        Instant::now() + Duration::from_millis(600),
+    );
+    let seen = todo::list(&mut watcher.store()).unwrap();
+    assert_eq!(
+        seen.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        vec!["a file it found"],
+        "what the scanner wrote reached the socket without anyone asking"
+    );
+    // And it is confirmed, not just optimistic, on the scanner's own side.
+    assert_eq!(scanner.pending_len(), 0, "the server acked it back");
+}

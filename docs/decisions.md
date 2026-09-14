@@ -1070,6 +1070,30 @@ argument the verb does not declare, because a misspelling is the same failure
 and this is the last place that can still tell — after it, the payload is a
 map and a default is indistinguishable from an intent.
 
+## A peer without a socket
+
+`petros-axum`'s `Hub` delivered to sockets, because a socket was the only way
+anything reached the log. An application that writes to its own log from
+inside the server — a library scanner watching a directory, a job that imports
+something nightly — had no way in: the peer table is private, so it could
+append through `Hub::server()` and then watch the fan-out sit in the outgoing
+queue until some *other* peer happened to speak. For a scanner adding a file at
+three in the morning, that is "never".
+
+`Hub::exchange` is the missing half. It takes a message from a peer with no
+socket, hands back what the server addressed to *it*, and delivers everything
+else to the sockets it belongs to on the way past. The peer on the other end is
+an ordinary `Client` — it gets acks, it gets the rebase, its pending queue
+drains — so a server-side writer is a peer like any other rather than a second
+way to get into the log. `Hub::local` gives it a connection id from the same
+counter the sockets draw from, so it cannot collide with one that arrives
+later.
+
+What this deliberately is not: a way to append without being anybody. The entry
+still carries an actor and a session and is still held to them, so a writer
+inside the server signs in like everything else — `SessionStore::issue` for a
+system account, and the same checks apply.
+
 ## What the engine does not do, on purpose or not yet
 
 Written down because "is anything left?" deserves a list rather than a shrug.
