@@ -25,6 +25,7 @@
 
 #[cfg(feature = "author")]
 pub mod author;
+pub mod compat;
 pub mod query;
 pub mod row;
 pub mod seed;

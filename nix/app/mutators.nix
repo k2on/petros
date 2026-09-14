@@ -18,6 +18,21 @@
             default = null;
             description = "Where `nix run .#mutators` writes the generated TypeScript, relative to the root.";
           };
+          log = lib.mkOption {
+            type = lib.types.str;
+            default = "mutations.txt";
+            description = ''
+              The recorded surface of this app's mutations, relative to the
+              root. `nix flake check` compares every build against it and
+              refuses a change the log cannot survive — a verb removed or
+              renamed, an argument dropped or retyped. Adding is always
+              allowed. `nix run .#log-snapshot` rewrites it, which is how a
+              change gets made deliberately rather than by accident.
+
+              On by default, and there is no good reason to turn it off: the
+              log is permanent whether or not anyone is watching it.
+            '';
+          };
         };
       });
     };
@@ -50,6 +65,16 @@
             ${lib.optionalString (cfg.ts != null) ''
               petros-codegen target/wasm32-unknown-unknown/${cfg.profile}/${cfg.crate}.wasm ${cfg.ts}
             ''}
+          '';
+        };
+        # Record what this build declares. The deliberate act — a diff in a
+        # review that shows exactly what the log's surface gained.
+        log-snapshot.program = script "log-snapshot" {
+          runtimeInputs = [ self'.packages.petrosCodegen ];
+          text = ''
+            ${self'.apps.mutators.program}
+            log-compat target/wasm32-unknown-unknown/${cfg.profile}/${cfg.crate}.wasm \
+              ${cfg.log} --write
           '';
         };
         mutators-watch.program = script "mutators-watch" {

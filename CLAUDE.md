@@ -31,7 +31,10 @@ story: no CRDTs, no vector clocks, no merge functions.
 - The log is permanent. Never rename or remove a mutation variant, never change
   a field's type; add fields with `#[serde(default)]`. `tests/wire.rs` pins this
   against a checked-in byte fixture — if it fails, the change would have broken
-  every existing installation.
+  every existing installation. An *app's* mutations are held to the same rule by
+  a machine rather than by memory: `petros_schema::compat` compares the built
+  module against a recorded surface, every app's flake runs it as `check-log`,
+  and `nix run .#log-snapshot` is how that surface moves on purpose.
 - **Petros owns every transaction boundary.** Never call Diesel's
   `Connection::transaction` on a client's connection: the optimistic savepoint
   outlives any single call, so boundaries are raw SQL through `batch_execute`.
@@ -64,7 +67,9 @@ crates/petros-ivm/           incremental views: source, filter, join, take, and
 crates/petros-wasm-guest/    `export!` — an app's wasm crate is one line
 crates/petros-wasm-host/     wasmi, for a peer that replaces `apply` at runtime.
                              Knows nothing about any domain
-crates/petros-codegen/       reads a module's schema section, writes TypeScript
+crates/petros-codegen/       reads a module's schema section, writes TypeScript;
+                             `log-compat` holds an app's mutations to what the
+                             log already carries
 crates/petros-axum/          one handler; the app keeps its routes
 crates/petros-auth/          who a peer is: OpenID Connect on the server, the
                              sessions it issues, and how each client gets one

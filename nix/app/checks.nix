@@ -3,7 +3,7 @@
 # run at all — and the same three as `nix run`, against whatever `target/` is
 # lying around.
 {
-  perSystem = { config, pkgs, toolchain, rustPlatform, sources, script, self', ... }:
+  perSystem = { config, pkgs, lib, toolchain, rustPlatform, sources, script, self', ... }:
     let
       # The domain's wasm module is staged first where there is one:
       # `foreign_peer!` does `include_bytes!` of it, so compiling with
@@ -40,6 +40,19 @@
           command = ''
             cargo nextest run --workspace --all-features --offline
             cargo test --workspace --all-features --doc --offline
+          '';
+        };
+      } // lib.optionalAttrs (config.petros.mutators != null) {
+        # The log is permanent, so the mutations an app declares are a promise
+        # to bytes already written. This holds every build to the recorded
+        # surface: a verb or an argument may be added, never removed, renamed
+        # or retyped. `nix run .#log-snapshot` is how it moves on purpose.
+        check-log = check "log" {
+          tools = [ self'.packages.petrosCodegen ];
+          command = ''
+            log-compat \
+              target/wasm32-unknown-unknown/${config.petros.mutators.profile}/${config.petros.mutators.crate}.wasm \
+              ${config.petros.mutators.log}
           '';
         };
       };
