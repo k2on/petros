@@ -281,7 +281,7 @@ macro_rules! app {
             kind: &str,
             args: ::serde_json::Value,
         ) -> ::core::result::Result<Payload, ::std::string::String> {
-            $crate::petros_schema::author::from_value(kind, args).map(Payload)
+            $crate::petros_schema::author::from_value(&schema(), kind, args).map(Payload)
         }
 
         /// Author a mutation by name, through the same encoder every peer
@@ -293,7 +293,7 @@ macro_rules! app {
             kind: &str,
             args_json: &str,
         ) -> ::core::result::Result<Payload, ::std::string::String> {
-            $crate::petros_schema::author::from_json(kind, args_json).map(Payload)
+            $crate::petros_schema::author::from_json(&schema(), kind, args_json).map(Payload)
         }
 
         /// The app: Petros's tables plus this one's.

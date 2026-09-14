@@ -64,6 +64,20 @@ fn encode(p: &todo::Payload) -> Vec<u8> {
     out
 }
 
+/// A payload for a verb no app declares.
+///
+/// `from_value` refuses this now — an undeclared verb is caught while
+/// authoring, which is where it should be — so reaching `apply` with one means
+/// building the map by hand. Worth doing: the point is that *both* builds
+/// refuse it and give the same reason, which is a property of `apply` and not
+/// of the authoring helper that usually stops it getting this far.
+fn undeclared(kind: &str) -> todo::Payload {
+    todo::Payload(petros_schema::cbor::Value::Map(vec![(
+        petros_schema::cbor::Value::Text("t".into()),
+        petros_schema::cbor::Value::Text(kind.into()),
+    )]))
+}
+
 /// A session of mutations, run both ways from the same authored payloads.
 ///
 /// The payloads are filled once and handed to both, so that `apply` is compared
@@ -76,7 +90,13 @@ fn both_ways(script: &[(&str, serde_json::Value)]) -> (Vec<Row>, Vec<Row>) {
     let payloads: Vec<todo::Payload> = script
         .iter()
         .map(|(kind, args)| {
-            let mut p = todo::from_value(kind, args.clone()).expect("author");
+            let mut p = match todo::from_value(kind, args.clone()) {
+                Ok(p) => p,
+                // Only an undeclared verb may skip authoring; a declared one
+                // that fails to author is a bug in the script.
+                Err(e) if e.starts_with("no verb named") => undeclared(kind),
+                Err(e) => panic!("author {kind}: {e}"),
+            };
             <todo::Payload as petros::Mutation>::fill_auto(&mut p, &mut auto);
             p
         })
@@ -146,7 +166,11 @@ fn refusals_match_too() {
         ("Add", serde_json::json!({ "text": "" })),
         ("Frobnicate", serde_json::json!({})),
     ] {
-        let mut p = todo::from_value(kind, args).expect("author");
+        let mut p = match todo::from_value(kind, args) {
+            Ok(p) => p,
+            Err(e) if e.starts_with("no verb named") => undeclared(kind),
+            Err(e) => panic!("author {kind}: {e}"),
+        };
         <todo::Payload as petros::Mutation>::fill_auto(&mut p, &mut auto);
 
         let mut a = database();
