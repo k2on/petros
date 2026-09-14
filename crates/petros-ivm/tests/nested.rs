@@ -421,3 +421,80 @@ fn a_nested_view_decodes_to_a_nested_type() {
     let songs: Vec<With<Song, With<Note, Author>>> = view.decode();
     assert_eq!(songs[0].related[0].related.len(), 3);
 }
+
+/// A child added out of order lands where the child pipeline's `ORDER BY` says,
+/// not at the end.
+///
+/// The children of a node arrive from a pull already ordered; a child that
+/// turns up later as a change has to be placed, not appended, or the
+/// maintained tree disagrees with a re-run about the order of a relationship it
+/// was explicitly asked to sort.
+#[test]
+fn a_child_added_later_lands_in_the_relationship_order() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(1, "Glue", 1)).unwrap();
+    store.put(&note(5, 1, "fifth")).unwrap();
+    store.put(&note(9, 1, "ninth")).unwrap();
+    store.take_changes();
+
+    let mut view = view();
+    view.hydrate(&mut store);
+    assert_eq!(note_ids(&view), vec![5, 9], "hydrated in Note::id order");
+
+    // A note that sorts *before* both of them, arriving as a change.
+    store.put(&note(2, 1, "second")).unwrap();
+    settle(&mut view, &mut store);
+    assert_eq!(
+        note_ids(&view),
+        vec![2, 5, 9],
+        "the new note sorted in rather than being appended"
+    );
+
+    // And one in the middle, for a position that is neither end.
+    store.put(&note(7, 1, "seventh")).unwrap();
+    settle(&mut view, &mut store);
+    assert_eq!(note_ids(&view), vec![2, 5, 7, 9]);
+}
+
+/// An edit that changes what a relationship sorts on moves the child, rather
+/// than leaving it where it was with new contents.
+#[test]
+fn a_child_edited_across_the_relationship_order_moves() {
+    let mut conn = db();
+    let mut store = SqliteStore::new(&mut conn);
+    store.put(&song(1, "Glue", 1)).unwrap();
+    for id in [2u8, 5, 9] {
+        store.put(&note(id, 1, "n")).unwrap();
+    }
+    store.take_changes();
+
+    let mut view = view();
+    view.hydrate(&mut store);
+    assert_eq!(note_ids(&view), vec![2, 5, 9]);
+
+    // The notes are ordered by id, so an edit cannot move one here without
+    // changing its key — instead move the *middle* note onto a new id by
+    // deleting and re-adding, which is what a key change is in SQL anyway.
+    // What this checks is the ordered insert on the way back in.
+    store.delete::<Note>(&Note::key_of(&vec![5u8; 16])).unwrap();
+    settle(&mut view, &mut store);
+    assert_eq!(note_ids(&view), vec![2, 9]);
+
+    store.put(&note(7, 1, "moved")).unwrap();
+    settle(&mut view, &mut store);
+    assert_eq!(
+        note_ids(&view),
+        vec![2, 7, 9],
+        "back in between, not at the end"
+    );
+}
+
+/// The ids of the notes under the first song, in the order the view holds them.
+fn note_ids(view: &View<Song>) -> Vec<u8> {
+    view.nodes()[0]
+        .children("note")
+        .iter()
+        .map(|n| n.row[0].as_blob().unwrap()[0])
+        .collect()
+}

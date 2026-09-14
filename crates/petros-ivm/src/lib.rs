@@ -41,6 +41,7 @@
 //! at it directly rather than needing a second wire into the graph.
 
 use petros_schema::{Change, Dir, Node, Op, Plan, Relation, Store, Table, TableDef, Value, With};
+use std::sync::Arc;
 
 /// The tree a pipeline carries, and how to decode one.
 ///
@@ -80,6 +81,10 @@ pub enum Delta {
         parent: Row,
         /// Which relationship of the parent moved.
         name: &'static str,
+        /// The order that relationship's pipeline was asked for, so a child
+        /// arriving as a change can be placed where a pull would have put it
+        /// rather than appended. Empty when the relationship asked for none.
+        order: Arc<[(usize, Dir)]>,
         change: Box<Delta>,
     },
 }
@@ -319,6 +324,10 @@ pub struct Join<I, C> {
     /// The parent's own plan, for finding the parent a changed child points at.
     parent: Plan,
     from_column: String,
+    /// The child pipeline's `ORDER BY`, as column positions. A pulled child
+    /// arrives in this order because the source put it in the statement; a
+    /// pushed one has to be placed in it by hand.
+    child_order: Arc<[(usize, Dir)]>,
 }
 
 impl<I: Operator, C: Operator> Join<I, C> {
@@ -328,6 +337,7 @@ impl<I: Operator, C: Operator> Join<I, C> {
         name: &'static str,
         rel: Relation<P, K>,
         child: C,
+        child_order: Arc<[(usize, Dir)]>,
     ) -> Self {
         Join {
             from: position(P::DEF.columns, rel.from),
@@ -337,6 +347,7 @@ impl<I: Operator, C: Operator> Join<I, C> {
             name,
             parent,
             from_column: rel.from.to_string(),
+            child_order,
         }
     }
 
@@ -397,6 +408,7 @@ impl<I: Operator, C: Operator> Join<I, C> {
         Delta::Child {
             parent,
             name: self.name,
+            order: self.child_order.clone(),
             change: Box::new(change),
         }
     }
@@ -705,6 +717,7 @@ impl<I: Operator> Operator for Take<I> {
                     Delta::Child {
                         parent,
                         name,
+                        order,
                         change,
                     } => {
                         let key = self.key_of(&parent);
@@ -713,10 +726,11 @@ impl<I: Operator> Operator for Take<I> {
                         else {
                             continue;
                         };
-                        apply_child(held, name, &change);
+                        apply_child(held, name, &order, &change);
                         out.push(Delta::Child {
                             parent,
                             name,
+                            order,
                             change,
                         });
                     }
@@ -799,12 +813,16 @@ impl Pipeline {
     ) -> Self {
         let parent = self.plan.clone();
         let within = (rel.to, position(C::DEF.columns, rel.to));
+        // Captured before `finish` takes the pipeline: it is what places a
+        // child that arrives as a change rather than as part of a pull.
+        let child_order: Arc<[(usize, Dir)]> = child.order.clone().into();
         self.top = Box::new(Join::new(
             self.top,
             parent,
             C::DEF.name,
             rel,
             child.finish(Some(within)),
+            child_order,
         ));
         self
     }
@@ -946,10 +964,11 @@ impl<P: Table + 'static> View<P> {
                 Delta::Child {
                     parent,
                     name,
+                    order,
                     change,
                 } => {
                     if let Some(at) = self.nodes.iter().position(|held| held.row == parent) {
-                        apply_child(&mut self.nodes[at], name, &change);
+                        apply_child(&mut self.nodes[at], name, &order, &change);
                         patches.push(Patch::Update {
                             at,
                             node: self.nodes[at].clone(),
@@ -1104,11 +1123,12 @@ fn and(existing: Option<Node>, extra: Node) -> Node {
 /// Recursive: a `Child` inside a `Child` walks down another level, which is how
 /// a note edited under a song under an album reaches the note.
 ///
-/// The children arrive from the child pipeline already in its order, and a new
-/// one is appended rather than sorted in — the pipeline decides the order, and
-/// re-deriving it here would be a second opinion about it. A view that needs
-/// the child order maintained across inserts pulls the relationship again;
-/// that is the next thing to sharpen if it matters.
+/// The children arrive from the child pipeline already in its order, because
+/// the source put that `ORDER BY` in the statement. One that turns up later as
+/// a change is *placed* in the same order rather than appended — `order` is the
+/// pipeline's own, carried down by the join that emitted this, so this is the
+/// pipeline's opinion applied again rather than a second one. A relationship
+/// that asked for no order keeps the arrival order it always had.
 ///
 /// An `Add` of a child already held replaces it rather than appending a
 /// second copy. A parent and its child added in one batch of changes reach a
@@ -1117,33 +1137,52 @@ fn and(existing: Option<Node>, extra: Node) -> Node {
 /// the child is counted twice. That is what a browser sees on its first sync,
 /// where every song and its favourite arrive together: a doubled row that a
 /// later remove only half-undoes.
-fn apply_child(node: &mut Tree, name: &'static str, change: &Delta) {
+fn apply_child(node: &mut Tree, name: &'static str, order: &[(usize, Dir)], change: &Delta) {
     let kids = node.children_mut(name);
     match change {
-        Delta::Add(tree) => match kids.iter().position(|held| held.row == tree.row) {
-            Some(at) => kids[at] = tree.clone(),
-            None => kids.push(tree.clone()),
-        },
+        Delta::Add(tree) => {
+            // Replacing in place rather than moving: an add of a child already
+            // held is the hydrate/push overlap above, not a reordering.
+            match kids.iter().position(|held| held.row == tree.row) {
+                Some(at) => kids[at] = tree.clone(),
+                None => insert_ordered(kids, tree.clone(), order),
+            }
+        }
         Delta::Remove(row) => {
             if let Some(at) = kids.iter().position(|held| held.row == *row) {
                 kids.remove(at);
             }
         }
         Delta::Edit { old, new } => {
+            // Out and back in: an edit can change the column the relationship
+            // sorts on, and replacing in place would leave it where it was.
             if let Some(at) = kids.iter().position(|held| held.row == *old) {
-                kids[at] = new.clone();
+                kids.remove(at);
+                insert_ordered(kids, new.clone(), order);
             }
         }
         Delta::Child {
             parent,
             name: inner,
+            order: inner_order,
             change,
         } => {
             if let Some(kid) = kids.iter_mut().find(|held| held.row == *parent) {
-                apply_child(kid, inner, change);
+                apply_child(kid, inner, inner_order, change);
             }
         }
     }
+}
+
+/// Put `tree` where the relationship's order says it goes. Appended when the
+/// relationship asked for no order, which is the only honest place for it.
+fn insert_ordered(kids: &mut Vec<Tree>, tree: Tree, order: &[(usize, Dir)]) {
+    if order.is_empty() {
+        kids.push(tree);
+        return;
+    }
+    let at = kids.partition_point(|held| compare(&held.row, &tree.row, order).is_lt());
+    kids.insert(at, tree);
 }
 
 /// The plan's order, as column positions. Resolved once, so comparing two rows

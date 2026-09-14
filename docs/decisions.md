@@ -926,6 +926,26 @@ is 3, and the host now *reads* `petros_abi_version` and refuses a module
 built against another — which it had exported since version 1 and nobody had
 ever asked for.
 
+## A child that arrives late is placed, not appended
+
+The children of a node come out of a pull already in the child pipeline's
+order, because the source puts that `ORDER BY` in the statement. A child that
+turns up afterwards as a *change* used to be appended, so a relationship that
+had asked to be sorted stopped being sorted the moment anything was added to
+it — `[5, 9]` plus a 2 read back as `[5, 9, 2]`, and only a re-hydrate put it
+right. The note said a view that needed this could pull the relationship again.
+
+It does not have to. The order is already known: the join that emits a `Child`
+change owns the child pipeline, so it carries that pipeline's order down with
+the change, and the insert is a `partition_point` against it. That is the same
+opinion applied twice rather than a second opinion — the alternative, deriving
+an order at the point of insertion, is what the note was right to refuse. A
+relationship that asked for no order still keeps arrival order, which is the
+only honest thing to do with it.
+
+An edit gets the same treatment, out and back in rather than replaced in place,
+because an edit can change the very column the relationship sorts on.
+
 ## A schema change is a rebuild, not an ALTER
 
 An app's tables are a pure function of the log: `apply` is their only writer,
