@@ -56,7 +56,13 @@
           '';
         };
       };
-      packages = { inherit (config.checks) check-fmt check-clippy check-tests; };
+      # Exported by name as well as being checks, because CI gc-roots them
+      # that way — a check whose output the collector took is a check that runs
+      # again from nothing.
+      packages = { inherit (config.checks) check-fmt check-clippy check-tests; }
+        // lib.optionalAttrs (config.petros.mutators != null) {
+        inherit (config.checks) check-log;
+      };
 
       apps = {
         fmt.program = script "fmt" { text = "cargo fmt --all"; };
