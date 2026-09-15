@@ -26,6 +26,10 @@
 /// attached installs it at startup; one with Metro replaces it whenever a
 /// mutation changes, which is the loop the whole design exists for.
 ///
+/// **Install it before opening a peer**, with the free `install_mutators` this
+/// generates — `Peer::open` replays the log, and replaying is `apply`. See that
+/// function for what getting it the other way round costs.
+///
 /// `views:` is optional and names a type implementing [`crate::Views`]. The
 /// peer then keeps them beside the client, under the same lock, and brings them
 /// up to date after every mutation and every message from the server. Under the
@@ -54,6 +58,36 @@ macro_rules! foreign_peer {
         /// Baked in rather than found at runtime: a peer with no Metro attached
         /// wants exactly this and nothing else.
         pub const BUNDLED: &[u8] = $module;
+
+        /// Install a mutator module with no peer in hand, and **before** one is
+        /// opened. Returns the generation, which moves on every swap.
+        ///
+        /// This is not a convenience. Opening a peer *replays*: `Client::open`
+        /// finishes whatever confirmed entries the log is ahead on, and
+        /// replaying a confirmed entry is calling `apply` — which, here, is the
+        /// module. A peer that installs after opening therefore cannot open at
+        /// all once anything has landed in its log unapplied, and it cannot the
+        /// next time either, because the failure is in `open` and the install
+        /// comes after `open`. The database is sound and the module is in the
+        /// bundle and the app is finished.
+        ///
+        /// The interpreter is the process's rather than the peer's, so this
+        /// needs no receiver and there was never a reason for it to have one.
+        /// `Peer::load_mutators` is the same call with a peer already open, for
+        /// a hot swap.
+        #[uniffi::export]
+        pub fn install_mutators(wasm: ::std::vec::Vec<u8>)
+            -> ::core::result::Result<u64, PeerError>
+        {
+            ::petros_wasm_host::load(&wasm).map_err(|message| PeerError::Engine { message })
+        }
+
+        /// Install the module this build shipped with. What a peer with no
+        /// bundler attached wants, said once.
+        #[uniffi::export]
+        pub fn install_bundled_mutators() -> ::core::result::Result<u64, PeerError> {
+            install_mutators(BUNDLED.to_vec())
+        }
 
         /// One mutation, as the bytes the log stores.
         ///
@@ -116,7 +150,8 @@ macro_rules! foreign_peer {
                     ))?;
                 let module = slot.as_ref().ok_or_else(|| {
                     $crate::MutationError::rejected(
-                        "no mutator module is loaded; the app must install one before mutating",
+                        "no mutator module is loaded; install one before opening a \
+                         peer or authoring a mutation",
                     )
                 })?;
                 match module.apply(tx.conn(), &bytes, ctx) {
@@ -360,6 +395,10 @@ macro_rules! foreign_peer {
 
             /// Install a module, replacing whatever was running. Returns the
             /// generation, which moves on every successful swap.
+            ///
+            /// For a hot swap, with a peer already open. The *first* install
+            /// is [`install_mutators`], which needs no peer — and must not
+            /// wait for one, because opening a peer replays.
             pub fn load_mutators(&self, wasm: ::std::vec::Vec<u8>)
                 -> ::core::result::Result<u64, PeerError>
             {

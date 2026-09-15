@@ -974,6 +974,32 @@ moves. That is the same cost as a first sync, and it is where compaction would
 eventually help — a snapshot is a point the replay can start from instead of
 sequence 1.
 
+## Opening a peer replays, so a module has to be installed before it
+
+`Client::open` is not passive. It finishes whatever confirmed entries the log
+is ahead on, replays the pending intents on top, and — if `SCHEMA_VERSION`
+moved — replays the whole log into rebuilt tables. All three are calls to
+`apply`.
+
+For every peer that links `apply` that is unremarkable: the symbol was there
+before `main` ran. For the one peer whose `apply` arrives as a wasm module it
+is a trap with a very bad shape, because the natural order to write is *open
+the database, then install the module* — and it works, right up until the
+first time the socket delivers an entry before the install has happened. That
+entry is stored and not applied. Every launch after that meets it inside
+`open`, fails there, and never reaches the line that would have installed
+anything. The database is sound, the module is in the bundle, and the peer can
+never be opened again. What it says is "could not open the database: no mutator
+module is loaded", which reads like a missing file.
+
+So `foreign_peer!` generates `install_mutators` as a *free* function rather
+than a method: the interpreter is the process's and never was the peer's, so
+there was no reason to need one open first. `Peer::load_mutators` stays, for
+the hot swap it was always for. `crates/petros/tests/mutators.rs` walks the
+whole sequence — no module, a batch, a reopen that fails, and the same reopen
+succeeding once the module went in first — because the bug is in the *order*
+and nothing about either half on its own looks wrong.
+
 ## An older client meeting a newer server
 
 The rebuild above is local: each device brings its own tables up to the version
