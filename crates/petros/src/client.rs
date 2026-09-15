@@ -279,6 +279,12 @@ impl<A: App> Client<A> {
     /// dedupes pushes on entry id.
     pub fn connected(&mut self) -> Result<()> {
         self.linked = true;
+        // `Hello` is the first frame on a connection, always. Anything still
+        // queued belongs to a connection that is gone — and re-sending it
+        // here would put a `Push` in front of the `Hello`, which a server is
+        // right to read as a push from nobody and turn away. Nothing is lost:
+        // the pending entries are re-offered below, from the store.
+        self.out.clear();
         self.emit(ClientMsg::Hello {
             since: self.cursor,
             token: self.token.clone(),
