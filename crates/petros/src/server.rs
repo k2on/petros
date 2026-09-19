@@ -205,9 +205,10 @@ impl<A: App> Server<A> {
                     },
                 );
                 // A `Hello` is where a connection becomes somebody, so it is
-                // also where it enters a room — and a second one on the same
-                // socket is a peer changing rooms, which means leaving the
-                // first.
+                // also where it enters a room. A second one on the same
+                // socket as somebody else is a peer changing rooms, which
+                // means leaving the first; as the same somebody it is the
+                // next batch of the log, and the room hears nothing.
                 self.enter(from)?;
             }
             ClientMsg::Push { entries } => {
@@ -284,6 +285,18 @@ impl<A: App> Server<A> {
 
     fn arrive_in(&mut self, rooms: &mut dyn Rooms, peer: Peer) -> Result<()> {
         if let Some(was) = self.roster.remove(peer.conn) {
+            // The same peer, on the same connection: the log asking for its
+            // next batch, which it does with another `Hello`. Nothing has
+            // happened to the room and the machine is not told otherwise —
+            // it used to be told a departure and an arrival, and an app that
+            // forgets a device on `part` (rightly: a picker full of every
+            // tab ever opened is worse) then had that device vanish from its
+            // own list on the second batch of its first sync, with no
+            // reconnect for it to introduce itself again on.
+            if was == peer {
+                self.roster.insert(was);
+                return Ok(());
+            }
             self.depart_in(rooms, was)?;
         }
         // After the departure above, so that a peer which was the last one in

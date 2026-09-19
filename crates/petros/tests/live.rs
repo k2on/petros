@@ -352,3 +352,34 @@ fn a_standing_peer_is_in_the_room() {
     );
     assert_eq!(told[0].1.here, ["phone", "media_player.kitchen"]);
 }
+
+/// The log asks for its next batch with a second `Hello` on the same
+/// connection. That is not a device leaving and arriving: the machine is not
+/// told, and the room is not told anyone went. It was, once — and an app that
+/// forgets a device on `part` had it vanish from its own picker on the second
+/// batch of its first sync, with no reconnect to introduce itself again on.
+#[test]
+fn a_second_hello_for_the_next_batch_is_not_a_departure() {
+    let (mut s, seen) = watched(petros::open_memory().unwrap());
+    s.recv(1, hello("alice/phone")).unwrap();
+    s.recv(2, hello("alice/laptop")).unwrap();
+    heard(&mut s);
+    calls(&seen);
+
+    s.recv(1, hello("alice/phone")).unwrap();
+    assert!(calls(&seen).is_empty(), "nothing happened to the room");
+    assert!(heard(&mut s).is_empty(), "…so nobody was told anything");
+    s.recv(1, say("gigue")).unwrap();
+    let told = heard(&mut s);
+    assert_eq!(
+        told.last().unwrap().1.here,
+        ["phone", "laptop"],
+        "still there"
+    );
+    calls(&seen);
+
+    // Signing in as somebody else on the same socket is what a second `Hello`
+    // used to be read as, and still is.
+    s.recv(1, hello("alice/tablet")).unwrap();
+    assert_eq!(calls(&seen), ["part phone", "join tablet"]);
+}

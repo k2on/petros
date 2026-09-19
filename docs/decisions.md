@@ -1185,6 +1185,19 @@ making on a Tuesday and pushing on a Friday. "Pause" is not, and a queue of
 week-old live frames delivered on reconnect is a lie about the present rather
 than a message that was delayed.
 
+**A second `Hello` on a connection is the log paging, not a device moving.**
+A client with more than one batch to catch up on asks for the next with
+another `Hello`, on the same socket, as the same login. That used to go
+through the room as a departure and an arrival, and an app that forgets a
+device on `part` — rightly, since a picker full of every tab ever opened is
+worse — had the device vanish from its own list on the second batch of its
+first sync, with no reconnect for it to introduce itself again on; its
+connection count had not moved. harken's browser showed it as a device picker
+with nothing in it, under a status line saying connected, on a server whose
+every rule was right. `Server::arrive_in` now leaves a peer that is already
+exactly this peer where it is, and the machine hears nothing. A `Hello` as somebody else
+on the same socket is still a change of rooms.
+
 ## A quiet socket is a socket something else will close
 
 Neither of harken's two sockets sent a keepalive, and neither did any of its
