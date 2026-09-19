@@ -115,9 +115,12 @@ web: web-build
 # Build the module the conformance test runs, and the TypeScript types that
 # come out of it. The `.ts` has no consumer in this repository — an app is what
 # consumes it — but generating it here is what keeps petros-codegen honest.
+#
+# `--bin` is not decoration: this crate has two binaries, the generator and
+# `log-compat`, and `cargo run -p` refuses to guess between them.
 mutators:
     cargo build -p todo --no-default-features \
         --target wasm32-unknown-unknown --profile mutators
-    cargo run -q -p petros-codegen -- \
+    cargo run -q -p petros-codegen --bin petros-codegen -- \
         target/wasm32-unknown-unknown/mutators/todo.wasm \
         examples/todo/mutators.gen.ts
