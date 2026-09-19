@@ -1,4 +1,4 @@
-//! The three tables Petros owns, and the primitives that touch them.
+//! The four tables Petros owns, and the primitives that touch them.
 //!
 //! Everything here is deliberately dumb: no policy, no state machine. The
 //! interesting decisions live in [`crate::client`] and [`crate::server`].
@@ -10,7 +10,7 @@ use diesel::upsert::excluded;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::schema::{petros_log, petros_meta, petros_pending};
+use crate::schema::{petros_live, petros_log, petros_meta, petros_pending};
 use crate::{proto, ActorId, Connection, Entry, Id, Result, Seq};
 
 /// The DDL behind [`crate::schema`]. Idempotent: it runs on every open.
@@ -30,6 +30,10 @@ const DDL: &str = "
     CREATE TABLE IF NOT EXISTS petros_meta (
         k TEXT PRIMARY KEY NOT NULL,
         v BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS petros_live (
+        room  TEXT PRIMARY KEY NOT NULL,
+        state BLOB NOT NULL
     );
 ";
 
@@ -169,6 +173,40 @@ pub(crate) fn set_cursor(conn: &mut Connection, seq: Seq) -> Result<()> {
         .do_update()
         .set(petros_meta::v.eq(excluded(petros_meta::v)))
         .execute(conn)?;
+    Ok(())
+}
+
+/// One room's kept realtime state, if it has one.
+///
+/// Deliberately not a log. There is one row per room and the newest write is
+/// the only one anybody will ever read, because what it holds is *now* — see
+/// [`crate::live`] for why that is the correct lifetime rather than a
+/// shortcoming.
+pub(crate) fn live(conn: &mut Connection, room: &str) -> Result<Option<Vec<u8>>> {
+    Ok(petros_live::table
+        .select(petros_live::state)
+        .filter(petros_live::room.eq(room))
+        .first(conn)
+        .optional()?)
+}
+
+pub(crate) fn set_live(conn: &mut Connection, room: &str, state: &[u8]) -> Result<()> {
+    diesel::insert_into(petros_live::table)
+        .values((
+            petros_live::room.eq(room),
+            petros_live::state.eq(state.to_vec()),
+        ))
+        .on_conflict(petros_live::room)
+        .do_update()
+        .set(petros_live::state.eq(excluded(petros_live::state)))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Forget a room. A room whose state is worth nothing should not leave a row
+/// behind claiming otherwise.
+pub(crate) fn drop_live(conn: &mut Connection, room: &str) -> Result<()> {
+    diesel::delete(petros_live::table.filter(petros_live::room.eq(room))).execute(conn)?;
     Ok(())
 }
 

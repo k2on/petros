@@ -26,7 +26,7 @@ fn pushed(c: &mut Client<Todo>) -> Vec<Entry<TodoMutation>> {
         .into_iter()
         .flat_map(|m| match m {
             ClientMsg::Push { entries } => entries,
-            ClientMsg::Hello { .. } => Vec::new(),
+            ClientMsg::Hello { .. } | ClientMsg::Say { .. } => Vec::new(),
         })
         .collect()
 }

@@ -17,6 +17,18 @@ use crate::{decode, encode, App, ClientMsg, ConnId, Error, Result, Server, Serve
 /// enough to feel live, large enough not to spin.
 const TICK: Duration = Duration::from_millis(20);
 
+/// How many of those ticks pass between pings on a quiet connection.
+///
+/// Twenty seconds. A WebSocket carrying the log says nothing at all while
+/// nobody is mutating, and something in the middle — a proxy, a NAT table —
+/// eventually takes silence for death; nginx's default is sixty seconds. See
+/// `petros-axum`, which has the same two constants for the same reason and is
+/// the transport a real deployment uses.
+const PING_EVERY: u32 = 1_000;
+
+/// How many pings may go unanswered before the connection is treated as gone.
+const MISSED: u32 = 3;
+
 impl From<tungstenite::Error> for Error {
     fn from(e: tungstenite::Error) -> Self {
         Error::Transport(e.to_string())
@@ -148,18 +160,40 @@ fn serve_one<In, Out, S, F>(
     F: FnMut(In),
 {
     socket.get_mut().set_tick(TICK);
+    // Ticks since the last ping, and pings since the peer last said anything.
+    // A counter rather than a clock: the question is "has it spoken since?",
+    // which needs no clock and which a clock that jumps would answer wrongly.
+    let (mut since_ping, mut quiet) = (0u32, 0u32);
     while alive.load(Ordering::SeqCst) {
         match socket.read() {
-            Ok(Message::Binary(bytes)) => match decode::<In>(&bytes) {
-                Ok(msg) => inbound(msg),
-                Err(_) => break,
-            },
+            Ok(Message::Binary(bytes)) => {
+                quiet = 0;
+                match decode::<In>(&bytes) {
+                    Ok(msg) => inbound(msg),
+                    Err(_) => break,
+                }
+            }
             Ok(Message::Close(_)) => break,
-            Ok(_) => {}
+            // A pong, or anything else: evidence the peer is there, which is
+            // all a pong ever carries.
+            Ok(_) => quiet = 0,
             // A read timeout is how we get a turn to write; anything else has
             // actually broken the connection.
             Err(tungstenite::Error::Io(e)) if would_block(&e) => {}
             Err(_) => break,
+        }
+        since_ping += 1;
+        if since_ping >= PING_EVERY {
+            since_ping = 0;
+            quiet += 1;
+            if quiet > MISSED {
+                // Open as far as this machine is concerned, and nobody on the
+                // other end. Nothing else will ever say so.
+                break;
+            }
+            if socket.send(Message::Ping(Vec::new())).is_err() {
+                break;
+            }
         }
         loop {
             match outgoing.try_recv() {

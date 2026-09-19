@@ -1120,6 +1120,95 @@ still carries an actor and a session and is still held to them, so a writer
 inside the server signs in like everything else — `SessionStore::issue` for a
 system account, and the same checks apply.
 
+## What is true now is not what is true for ever, so it is not in the log
+
+An app that plays music has to answer "which speaker is making the sound, and
+how far into the track". That is not a mutation and putting it in the log
+would be a category error, twice over: an afternoon of listening is thousands
+of pauses, seeks and skips, and every peer would replay every one of them
+forever — to arrive at a position that was true yesterday. **"What is playing
+right now" is precisely the state that should be lost when a server
+restarts.**
+
+The obvious answer is a second socket for it, and harken had one at `/listen`.
+It is the wrong answer, and what it costs is not obvious until you have two:
+
+- two things to authenticate, with two ideas of what a stale token means;
+- two things to reconnect, so a phone waking up has two of them racing;
+- two things to keep alive through a proxy;
+- and two answers to "am I online", which disagree at the worst moment.
+
+So there is one socket and a second *channel* on it. `ClientMsg::Say` and
+`ServerMsg::Heard` carry opaque bytes; `petros::live` is the shape around
+them.
+
+**Three lifetimes, named.** The log is permanent and totally ordered. A live
+room is one current value, held in memory, overwritten rather than appended.
+A frame is now. Everything about the design follows from putting each fact in
+the tier where it belongs, and the second tier is the one that did not exist
+before.
+
+**Rooms are the engine's, state is the app's.** A room is one account — every
+connection the server authenticated as the same user — because the engine
+already knows that and an app deriving it again would be a second roster to
+get out of step with the sockets. What is *in* a room is the app's `Live`
+machine, and the engine never looks inside a frame. So the log's
+compatibility rules, which are absolute, do not bind a protocol nothing ever
+replays: an app may change its realtime shape as often as it ships its
+clients.
+
+**A socket going is not a device going.** This is the rule that the whole
+thing exists to make expressible. harken's session used to be torn down when
+the last socket closed, so closing a laptop lid handed the music to whatever
+asked next — and the fix is not a longer timeout but a place for state to
+live that is not a connection. `Live::part` says a socket closed; what that
+means for the room is the app's to decide, and "nothing at all" is a
+legitimate answer.
+
+**One row, not a log.** A room that empties is written to `petros_live` and
+dropped from memory, and read back when it next opens. One row per room, last
+write wins, never replayed, never synced to a peer. Writing it is asked for
+(`Post::keep`) rather than automatic, because the difference matters: a
+position report arrives every second and is worth nothing once it is a second
+old, while "the sound is on the kitchen speaker, at this point in this queue"
+is worth a disk write. Dropping the room from memory is what bounds a server
+with a great many accounts on it.
+
+**A live frame must not touch the optimistic view.** `Client::recv` begins by
+rolling the pending savepoint back, which is right for everything the log
+does and catastrophic here: the output reports about once a second, so every
+maintained view in the app would re-hydrate on a timer — the exact opposite
+of what maintaining one is for. `Heard` is taken before that line and returns.
+
+**And it is dropped rather than queued while unlinked.** A mutation is worth
+making on a Tuesday and pushing on a Friday. "Pause" is not, and a queue of
+week-old live frames delivered on reconnect is a lie about the present rather
+than a message that was delayed.
+
+## A quiet socket is a socket something else will close
+
+Neither of harken's two sockets sent a keepalive, and neither did any of its
+three clients, and the symptom was "the WebSockets disconnect pretty often"
+— which reads as a bug in the engine and is a bug in nobody's code at all.
+
+A proxy closes a connection it has seen nothing on: nginx gives a proxied
+WebSocket sixty seconds by default, and a NAT table or a tailnet is no more
+patient. Sync is quiet whenever nobody is mutating, which is nearly always.
+
+The fix belongs in the transport, which is where the rule already says
+networking lives — the engine is sans-io and has no clock to hang a timer on.
+`petros-axum` pings every twenty seconds and gives up after three unanswered;
+`transport/ws.rs` does the same thing counted in its own ticks.
+
+**The server pings and no client has to.** A browser cannot send a ping from
+JavaScript — the API does not expose one — but it *answers* one, and that
+answer is traffic in the other direction. So a single ping from the server
+keeps both halves of the path alive, and the three clients need nothing.
+
+**A counter, not a clock.** The question is "has this peer spoken since the
+last ping", which needs no clock, and which a clock that jumps — a phone
+waking up, a container being resumed — would answer wrongly.
+
 ## What the engine does not do, on purpose or not yet
 
 Written down because "is anything left?" deserves a list rather than a shrug.

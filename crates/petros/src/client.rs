@@ -94,6 +94,17 @@ pub struct Client<A: App> {
     /// which are durable. That is what [`connected`](Self::connected) does on
     /// the way back, and it is why being unlinked for a week costs no memory.
     linked: bool,
+    /// Frames the realtime channel has delivered and nobody has taken yet.
+    ///
+    /// Never durable and never re-offered: a live frame is about *now*, so one
+    /// that has been sitting in a queue across a reconnect is a lie about the
+    /// present rather than a message that was delayed. See [`crate::live`].
+    heard: Vec<Vec<u8>>,
+    /// Bumped by every [`connected`](Self::connected). A caller with something
+    /// to say on the realtime channel at the start of a connection — which
+    /// device it is, what it can play — watches this rather than keeping its
+    /// own notion of whether the socket is the same one.
+    epoch: u64,
     rejections: Vec<Rejection>,
     /// `fn() -> A` rather than `A`: the marker should not drag the app's
     /// auto traits into ours.
@@ -153,6 +164,8 @@ impl<A: App> Client<A> {
             rebuilt: false,
             out: Vec::new(),
             linked: true,
+            heard: Vec::new(),
+            epoch: 0,
             rejections: Vec::new(),
             _app: PhantomData,
         };
@@ -274,11 +287,49 @@ impl<A: App> Client<A> {
         }
     }
 
+    /// Say something on the realtime channel: not a mutation, not in the log,
+    /// and gone if nothing is carrying it.
+    ///
+    /// Dropped rather than queued while unlinked, which is the difference
+    /// between this and [`mutate`](Self::mutate): a mutation is worth making
+    /// on a Tuesday and pushing on a Friday, and "pause" is not. See
+    /// [`crate::live`] for the rest of what follows from that.
+    pub fn say<S: serde::Serialize>(&mut self, say: &S) -> Result<()> {
+        if !self.linked {
+            return Ok(());
+        }
+        let say = crate::encode(say)?;
+        self.emit(ClientMsg::Say { say });
+        Ok(())
+    }
+
+    /// Take what the realtime channel has delivered since you last asked.
+    ///
+    /// A frame this build cannot decode is dropped, not raised: it is a
+    /// sentence a newer server invented, and the honest answer to one of
+    /// those is to carry on — the same socket is carrying the log.
+    pub fn heard<H: serde::de::DeserializeOwned>(&mut self) -> Vec<H> {
+        std::mem::take(&mut self.heard)
+            .iter()
+            .filter_map(|bytes| crate::decode(bytes).ok())
+            .collect()
+    }
+
+    /// How many connections this client has had. See [`epoch`](Self::epoch).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// Announce a fresh connection: ask for everything since our cursor and
     /// re-offer everything still pending. Both are safe to repeat — the server
     /// dedupes pushes on entry id.
     pub fn connected(&mut self) -> Result<()> {
         self.linked = true;
+        self.epoch += 1;
+        // News about a moment that has passed. The room will describe itself
+        // again on this connection, and what is in here describes the last
+        // one.
+        self.heard.clear();
         // `Hello` is the first frame on a connection, always. Anything still
         // queued belongs to a connection that is gone — and re-sending it
         // here would put a `Push` in front of the `Hello`, which a server is
@@ -312,6 +363,7 @@ impl<A: App> Client<A> {
     pub fn disconnected(&mut self) {
         self.linked = false;
         self.out.clear();
+        self.heard.clear();
     }
 
     /// Whether a transport says it is carrying this client's frames.
@@ -324,6 +376,15 @@ impl<A: App> Client<A> {
 
     /// Handle one message from the server.
     pub fn recv(&mut self, msg: ServerMsg<A::Mutation>) -> Result<()> {
+        // Before anything else, because a live frame must not touch the view.
+        // The output reports its position about once a second, and a second's
+        // news that rolled the optimistic savepoint back would make every
+        // maintained view re-hydrate on a timer — which is the opposite of
+        // what maintaining one is for.
+        if let ServerMsg::Heard { hear } = msg {
+            self.heard.push(hear);
+            return Ok(());
+        }
         // Undo our optimistic view before touching anything durable: the
         // bookkeeping below has to be committed, and it cannot be committed
         // underneath a savepoint we still intend to roll back.
@@ -373,6 +434,7 @@ impl<A: App> Client<A> {
             ServerMsg::Denied { reason } => {
                 self.denied = Some(reason);
             }
+            ServerMsg::Heard { .. } => unreachable!("taken above"),
         }
         self.advance()?;
         // ...and replay whatever is still ours on top of the new confirmed

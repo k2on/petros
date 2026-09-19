@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 
 use diesel::connection::SimpleConnection;
 
+use crate::live::{Erased, Live, Peer, Posted, Room, Rooms, Roster};
 use crate::{
     store, ActorId, App, ClientMsg, Connection, Entry, Error, Mutation, MutationError, Result, Seq,
     ServerMsg, Transaction,
@@ -94,6 +95,15 @@ pub struct Server<A: App> {
     /// nobody and means it.
     trusting: bool,
     head: Seq,
+    /// The realtime half, if the app has one. Behind a `dyn` so that the
+    /// server stays generic over the app's *mutation* alone: a protocol
+    /// nothing ever replays has no business in the types the log is written
+    /// with. See [`crate::live`].
+    rooms: Option<Box<dyn Rooms>>,
+    /// Who is in which room. Beside `conns` rather than derived from it,
+    /// because a peer the server [`stand`](Server::stand)s in for has no
+    /// connection of its own.
+    roster: Roster,
     out: Vec<(ConnId, ServerMsg<A::Mutation>)>,
     /// `fn() -> A` rather than `A`: the marker should not drag the app's
     /// auto traits into ours.
@@ -142,9 +152,21 @@ impl<A: App> Server<A> {
             auth: Box::new(auth),
             trusting,
             head,
+            rooms: None,
+            roster: Roster::default(),
             out: Vec::new(),
             _app: PhantomData,
         })
+    }
+
+    /// Give this server a realtime channel: state that is true *now*, carried
+    /// on the same socket as the log and written to none of it.
+    ///
+    /// Without one, a [`ClientMsg::Say`] is a frame from a peer whose server
+    /// has nothing to say it to, and is dropped. See [`crate::live`].
+    pub fn with_live(mut self, live: impl Live) -> Self {
+        self.rooms = Some(Box::new(Erased(live)));
+        self
     }
 
     /// The authoritative materialised state. Read-only by convention: the log
@@ -182,6 +204,11 @@ impl<A: App> Server<A> {
                         who,
                     },
                 );
+                // A `Hello` is where a connection becomes somebody, so it is
+                // also where it enters a room — and a second one on the same
+                // socket is a peer changing rooms, which means leaving the
+                // first.
+                self.enter(from)?;
             }
             ClientMsg::Push { entries } => {
                 if !self.conns.contains_key(&from) {
@@ -201,8 +228,131 @@ impl<A: App> Server<A> {
                 }
                 self.append_all(from, entries)?;
             }
+            // Not the log, so none of the log's machinery: no sequence
+            // number, no dedupe, no durable record, and nothing to fan out.
+            ClientMsg::Say { say } => return self.heard(from, &say),
         }
         self.fanout()
+    }
+
+    /// Put a peer in a room without a connection of its own.
+    ///
+    /// A speaker in the house, a bridge, a test — anything the server itself
+    /// stands in for. `conn` is the id its [`ServerMsg::Heard`] frames will be
+    /// addressed to; take it from wherever the transport hands ids out, so it
+    /// cannot collide with a socket that arrives later.
+    pub fn stand(&mut self, conn: ConnId, who: Identity) -> Result<()> {
+        self.arrive(Peer::of(conn, &who))
+    }
+
+    /// Take one out again. The same thing a dropped socket does, said by the
+    /// thing that was standing in for it.
+    pub fn unstand(&mut self, conn: ConnId) {
+        self.disconnect(conn);
+    }
+
+    /// A connection has entered whatever room its `Hello` put it in.
+    fn enter(&mut self, conn: ConnId) -> Result<()> {
+        let peer = match self.conns.get(&conn).and_then(|c| c.who.as_ref()) {
+            Some(who) => Peer::of(conn, who),
+            // A server that authenticates nobody has one room, because it has
+            // one anybody.
+            None => Peer::anon(conn),
+        };
+        self.arrive(peer)
+    }
+
+    /// Run one call into the app's machine, with the box lent out and put
+    /// back. Nothing below re-enters the server, so lending it is safe and it
+    /// is what keeps `rooms` a plain field rather than a second lock.
+    fn with_rooms<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut dyn Rooms) -> Result<T>,
+        idle: T,
+    ) -> Result<T> {
+        let Some(mut rooms) = self.rooms.take() else {
+            return Ok(idle);
+        };
+        let out = f(self, &mut *rooms);
+        self.rooms = Some(rooms);
+        out
+    }
+
+    fn arrive(&mut self, peer: Peer) -> Result<()> {
+        self.with_rooms(move |me, rooms| me.arrive_in(rooms, peer), ())
+    }
+
+    fn arrive_in(&mut self, rooms: &mut dyn Rooms, peer: Peer) -> Result<()> {
+        if let Some(was) = self.roster.remove(peer.conn) {
+            self.depart_in(rooms, was)?;
+        }
+        // After the departure above, so that a peer which was the last one in
+        // its old room has already had that room written down — and before
+        // the join, so the machine wakes with yesterday's state rather than
+        // being told about a device first.
+        if self.roster.first_sight(&peer.room) {
+            if let Some(state) = store::live(&mut self.conn, &peer.room)? {
+                rooms.wake(&peer.room, &state);
+            }
+        }
+        self.roster.insert(peer.clone());
+        let peers = self.roster.room(&peer.room);
+        let posted = rooms.join(&peer, &peers);
+        self.posted(&peer.room, posted, rooms)
+    }
+
+    fn depart_in(&mut self, rooms: &mut dyn Rooms, peer: Peer) -> Result<()> {
+        self.roster.remove(peer.conn);
+        let peers = self.roster.room(&peer.room);
+        let posted = rooms.part(&peer, &peers);
+        self.posted(&peer.room, posted, rooms)?;
+        if !self.roster.occupied(&peer.room) {
+            // An empty room is written down and dropped rather than kept in
+            // memory for ever — which is what bounds a server with a great
+            // many accounts on it, and what makes the row on disk the one
+            // answer about a room nobody is in.
+            self.keep(&peer.room, rooms)?;
+            rooms.close(&peer.room);
+            self.roster.forget(&peer.room);
+        }
+        Ok(())
+    }
+
+    fn heard(&mut self, conn: ConnId, say: &[u8]) -> Result<()> {
+        let Some(peer) = self.roster.get(conn).cloned() else {
+            // A frame from a peer that never said `Hello`, or from one on a
+            // server with no realtime half. Nothing to answer.
+            return Ok(());
+        };
+        self.with_rooms(
+            move |me, rooms| {
+                let peers = me.roster.room(&peer.room);
+                let posted = rooms.say(&peer, say, &peers);
+                me.posted(&peer.room, posted, rooms)
+            },
+            (),
+        )
+    }
+
+    /// Deliver what a room's machine produced, and write the room down if it
+    /// asked to be.
+    fn posted(&mut self, room: &Room, posted: Posted, rooms: &mut dyn Rooms) -> Result<()> {
+        for (conn, hear) in posted.out {
+            self.out.push((conn, ServerMsg::Heard { hear }));
+        }
+        if posted.keep {
+            self.keep(room, rooms)?;
+        }
+        Ok(())
+    }
+
+    /// One row, last write wins. A machine with nothing worth keeping about a
+    /// room has the row deleted rather than left there claiming otherwise.
+    fn keep(&mut self, room: &Room, rooms: &mut dyn Rooms) -> Result<()> {
+        match rooms.snapshot(room) {
+            Some(state) => store::set_live(&mut self.conn, room, &state),
+            None => store::drop_live(&mut self.conn, room),
+        }
     }
 
     /// Turn a connection away. Whatever it says next is from nobody too.
@@ -241,8 +391,20 @@ impl<A: App> Server<A> {
 
     /// Forget a connection. Its cursor is not state worth keeping — the client
     /// tells us where it is when it comes back.
+    ///
+    /// It also leaves whatever room it was in, which is a *socket* going and
+    /// not necessarily a device going: an app whose machine conflates the two
+    /// is an app that loses the music when a phone sleeps.
+    ///
+    /// A snapshot that will not write is swallowed here and nowhere else,
+    /// because there is no caller left to tell: the connection this is about
+    /// has already gone. The room's state is in memory either way, and the
+    /// next thing that asks to be kept writes it again.
     pub fn disconnect(&mut self, from: ConnId) {
         self.conns.remove(&from);
+        if let Some(peer) = self.roster.get(from).cloned() {
+            let _ = self.with_rooms(move |me, rooms| me.depart_in(rooms, peer), ());
+        }
     }
 
     /// Drain messages the server wants to send.

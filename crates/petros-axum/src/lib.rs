@@ -26,15 +26,41 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use petros::{
-    decode, encode, App, Authenticate, ClientMsg, ConnId, Connection, Result, Server, ServerMsg,
+    decode, encode, App, Authenticate, ClientMsg, ConnId, Connection, Identity, Result, Server,
+    ServerMsg,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+
+/// How often the server pings a quiet connection.
+///
+/// A WebSocket that says nothing is a WebSocket something between the two
+/// ends will eventually close: nginx gives an idle proxied connection 60
+/// seconds by default, and a NAT table or a tailnet is no more patient. Sync
+/// is quiet whenever nobody is mutating, which is nearly always, so without
+/// this every client spends its life reconnecting — and *looks* to the person
+/// using it like a server that keeps dropping.
+///
+/// A browser cannot send a ping from JavaScript, but it answers one, and that
+/// answer is traffic in the other direction. So one ping from here keeps both
+/// halves of the path alive, which is why the keepalive is the server's and
+/// no client has to have one.
+const PING: Duration = Duration::from_secs(20);
+
+/// How many pings may go unanswered before the connection is treated as gone.
+///
+/// The point is not tidiness: a socket that is dead at the network level and
+/// open as far as the operating system is concerned is exactly the state in
+/// which a server goes on believing a device is listening. Three is about a
+/// minute, which is longer than any pause a live connection takes and shorter
+/// than anyone will wait.
+const MISSED: u64 = 3;
 
 /// The server, plus who is currently connected to it.
 ///
@@ -44,6 +70,11 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 pub struct Hub<A: App> {
     server: Mutex<Server<A>>,
     peers: Mutex<HashMap<ConnId, UnboundedSender<Vec<u8>>>>,
+    /// Peers the server stands in for: a speaker in the house, a bridge to
+    /// something that will never hold a replica. They are in a room and not
+    /// in the log, so what reaches them is the realtime payload alone and
+    /// never an encoded [`ServerMsg`]. See [`Hub::stand`].
+    standing: Mutex<HashMap<ConnId, UnboundedSender<Vec<u8>>>>,
     next: AtomicU64,
 }
 
@@ -54,6 +85,22 @@ impl<A: App> Hub<A> {
         Ok(Arc::new(Hub {
             server: Mutex::new(Server::open_with(conn, auth)?),
             peers: Mutex::new(HashMap::new()),
+            standing: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(1),
+        }))
+    }
+
+    /// As [`open`](Hub::open), with the app's realtime machine attached. See
+    /// [`petros::live`].
+    pub fn open_live(
+        conn: Connection,
+        auth: impl Authenticate,
+        live: impl petros::Live,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(Hub {
+            server: Mutex::new(Server::open_with(conn, auth)?.with_live(live)),
+            peers: Mutex::new(HashMap::new()),
+            standing: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
         }))
     }
@@ -79,6 +126,46 @@ impl<A: App> Hub<A> {
     /// never collide with one that arrives later.
     pub fn local(&self) -> ConnId {
         self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Put a peer in a room without giving it a socket or a replica.
+    ///
+    /// For something that is a *device* and not a client: a speaker the
+    /// server drives over somebody else's API, a bridge, a test. It receives
+    /// only what the realtime channel addresses to it — the app's own `Hear`
+    /// payload, undecorated, because there is no log here for it to be part
+    /// of. Say things back with [`Hub::say`], and take it out with
+    /// [`Hub::unstand`].
+    pub fn stand(&self, who: Identity, hears: UnboundedSender<Vec<u8>>) -> Result<ConnId> {
+        let conn = self.local();
+        if let Ok(mut standing) = self.standing.lock() {
+            standing.insert(conn, hears);
+        }
+        let outgoing = {
+            let mut server = self.server();
+            server.stand(conn, who)?;
+            server.take_outgoing()
+        };
+        self.deliver(conn, outgoing);
+        Ok(conn)
+    }
+
+    /// Take a standing peer out again — the same thing a dropped socket does.
+    pub fn unstand(&self, conn: ConnId) {
+        let outgoing = {
+            let mut server = self.server();
+            server.unstand(conn);
+            server.take_outgoing()
+        };
+        self.deliver(conn, outgoing);
+        if let Ok(mut standing) = self.standing.lock() {
+            standing.remove(&conn);
+        }
+    }
+
+    /// Say something on the realtime channel as a standing peer.
+    pub fn say(&self, conn: ConnId, say: Vec<u8>) {
+        self.route(conn, ClientMsg::Say { say });
     }
 
     /// Feed one message in from a peer that has no socket, and hand back what
@@ -107,10 +194,34 @@ impl<A: App> Hub<A> {
             server.take_outgoing()
         };
         let mut mine = Vec::new();
-        let peers = self.peers.lock().ok();
+        let mut others = Vec::new();
         for (conn, msg) in outgoing {
             if conn == from {
                 mine.push(msg);
+            } else {
+                others.push((conn, msg));
+            }
+        }
+        self.deliver(from, others);
+        mine
+    }
+
+    /// Send each message to whatever is carrying that connection, and say
+    /// whether `from` is still welcome.
+    fn deliver(&self, from: ConnId, outgoing: Vec<(ConnId, ServerMsg<A::Mutation>)>) -> bool {
+        let peers = self.peers.lock().ok();
+        let standing = self.standing.lock().ok();
+        let mut keep = true;
+        for (conn, msg) in outgoing {
+            if conn == from && matches!(msg, ServerMsg::Denied { .. }) {
+                keep = false;
+            }
+            if let Some(sink) = standing.as_ref().and_then(|s| s.get(&conn)) {
+                // The one frame that means anything to a peer with no
+                // replica. Everything else about the log is not its business.
+                if let ServerMsg::Heard { hear } = msg {
+                    let _ = sink.send(hear);
+                }
                 continue;
             }
             if let (Some(peers), Ok(frame)) = (peers.as_ref(), encode(&msg)) {
@@ -119,7 +230,7 @@ impl<A: App> Hub<A> {
                 }
             }
         }
-        mine
+        keep
     }
 
     /// Feed one message in and deliver everything that falls out. Says
@@ -137,19 +248,7 @@ impl<A: App> Hub<A> {
             }
             server.take_outgoing()
         };
-        let Ok(peers) = self.peers.lock() else {
-            return false;
-        };
-        let mut keep = true;
-        for (conn, msg) in outgoing {
-            if conn == from && matches!(msg, ServerMsg::Denied { .. }) {
-                keep = false;
-            }
-            if let (Some(peer), Ok(frame)) = (peers.get(&conn), encode(&msg)) {
-                let _ = peer.send(frame);
-            }
-        }
-        keep
+        self.deliver(from, outgoing)
     }
 }
 
@@ -177,21 +276,58 @@ where
         peers.insert(conn, tx);
     }
 
+    // How many pings have gone out since this peer last said anything at all.
+    // The reader resets it on every frame, a pong included; the writer counts
+    // up and gives up at `MISSED`. A counter rather than a clock because
+    // neither end's clock is needed to answer "has it spoken since?", and a
+    // clock that jumps would answer it wrongly.
+    let quiet = Arc::new(AtomicU64::new(0));
+
     // One task writes, this one reads. The server may address a peer at any
     // time — that is the whole point of fan-out — so the write side cannot be
     // driven by this connection's own reads. Closing the channel ends the
     // task once everything queued — a denial, say — has been written.
-    let writer = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            if sink.send(Message::Binary(frame.into())).await.is_err() {
-                break;
+    let writer = tokio::spawn({
+        let quiet = quiet.clone();
+        async move {
+            let mut beat = tokio::time::interval(PING);
+            // The first tick is immediate, and a ping before the client has
+            // had time to say `Hello` is a ping at the wrong moment.
+            beat.tick().await;
+            beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    frame = rx.recv() => {
+                        let Some(frame) = frame else { break };
+                        if sink.send(Message::Binary(frame.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = beat.tick() => {
+                        if quiet.fetch_add(1, Ordering::Relaxed) >= MISSED {
+                            // Nothing has come back for about a minute. The
+                            // socket is open and the peer is not there, which
+                            // is the state a server has to be able to leave
+                            // on its own — nothing else will tell it.
+                            break;
+                        }
+                        if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
             }
+            let _ = sink.close().await;
         }
-        let _ = sink.close().await;
     });
 
     while let Some(Ok(message)) = stream.next().await {
-        // Text, ping and close carry nothing for us; the protocol is binary.
+        // Anything at all is evidence the peer is there, which is what a pong
+        // is for: it carries nothing and is the only thing a quiet connection
+        // ever sends.
+        quiet.store(0, Ordering::Relaxed);
+        // Text, ping, pong and close carry nothing else for us; the protocol
+        // is binary.
         let Message::Binary(bytes) = message else {
             continue;
         };
@@ -209,6 +345,19 @@ where
     if let Ok(mut peers) = hub.peers.lock() {
         peers.remove(&conn);
     }
-    hub.server().disconnect(conn);
+    // Everything the disconnect produced — a room saying this device has gone
+    // — is addressed to the *other* peers, so it has to go out before this
+    // task ends: it sits in the outbox and nothing else will collect it,
+    // because nobody else is speaking. Under one lock, so no other connection
+    // can take it in between and deliver it on a socket that is about to be
+    // in the same position.
+    let outgoing = {
+        let mut server = hub.server();
+        server.disconnect(conn);
+        server.take_outgoing()
+    };
+    hub.deliver(conn, outgoing);
+    // The writer is waiting on a channel this connection's sender has just
+    // been dropped from, so it ends on its own.
     let _ = writer.await;
 }

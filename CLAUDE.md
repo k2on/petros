@@ -44,7 +44,14 @@ story: no CRDTs, no vector clocks, no merge functions.
   one authenticator that asks nothing, for a simulation or a test.
 - `petros::client` and `petros::server` are sans-io: no sockets, no async, no
   runtime. That is what makes the deterministic simulation tests possible. The
-  transport module is the only place networking lives.
+  transport module is the only place networking lives — and therefore the only
+  place a keepalive can live, since the engine has no clock to hang one on.
+- **The realtime channel is not the log and never becomes it.** `petros::live`
+  carries what is true *now* — who is playing, how far in — on the same socket,
+  in a room per account, held in the server's memory. Nothing replays a live
+  frame, so none of the log's compatibility rules bind one; and nothing about
+  the view is touched by one, which is deliberate and load-bearing (a report a
+  second would otherwise re-hydrate every maintained view on a timer).
 
 ## Layout
 
@@ -52,7 +59,9 @@ story: no CRDTs, no vector clocks, no merge functions.
 crates/petros/               the engine
   client.rs                  the savepoint rebase — the least obvious code here
   server.rs                  assigns sequence numbers, dedupes, fans out
-  store.rs, schema.rs        the three petros_ tables, as Diesel models
+  store.rs, schema.rs        the four petros_ tables, as Diesel models
+  live.rs                    the *other* channel on the same socket: rooms,
+                             and what is true in one right now. Never the log
   backend.rs                 SqliteStore — compiles a query to one statement,
                              and reports what every write changed
   transport/{ws,web}.rs      thin, replaceable; ws = native, web = browser

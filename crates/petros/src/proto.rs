@@ -1,4 +1,5 @@
-//! Wire types. Six messages; resume and initial sync are the same path.
+//! Wire types. Six for the log, two for the realtime channel beside it;
+//! resume and initial sync are the same path.
 //!
 //! Payloads are CBOR. See `docs/decisions.md` for the compatibility rules that
 //! keep a log written today readable by a client built in five years.
@@ -109,6 +110,14 @@ pub enum ClientMsg<M> {
     },
     /// Entries authored here, `seq` unset, `id` set.
     Push { entries: Vec<Entry<M>> },
+    /// One frame on the realtime channel: CBOR of the app's own `Say`.
+    ///
+    /// Opaque here on purpose. Nothing ever replays a live frame, so the
+    /// compatibility rules that bind every field above — never rename, never
+    /// retype, add with `serde(default)` — do not bind what is inside this
+    /// one, and an app is free to change its realtime protocol as often as it
+    /// ships its clients. See [`crate::live`].
+    Say { say: Vec<u8> },
 }
 
 /// Server to client.
@@ -130,6 +139,8 @@ pub enum ServerMsg<M> {
     /// reconnect. A verdict about the connection, not about any entry — the
     /// pending mutations are kept and re-offered next time.
     Denied { reason: String },
+    /// One frame on the realtime channel: CBOR of the app's own `Hear`.
+    Heard { hear: Vec<u8> },
 }
 
 /// Encode a value as CBOR.
