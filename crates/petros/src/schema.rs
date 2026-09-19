@@ -1,4 +1,4 @@
-//! Petros's own three tables.
+//! Petros's own four tables.
 //!
 //! Diesel's `table!` describes a schema, it does not create one: the DDL lives
 //! in [`crate::store::migrate`] and this is its mirror. Keep the two in step —
@@ -36,4 +36,16 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(petros_log, petros_pending, petros_meta);
+diesel::table! {
+    /// One room's realtime state, as the app last asked to have it kept.
+    ///
+    /// Not a log: one row per room, last write wins, never replayed and never
+    /// synced to a peer. It exists so that restarting a server does not lose
+    /// what was playing. See [`crate::live`].
+    petros_live (room) {
+        room -> Text,
+        state -> Binary,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(petros_log, petros_pending, petros_meta, petros_live);

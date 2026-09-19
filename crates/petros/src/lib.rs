@@ -54,6 +54,9 @@ mod auto;
 mod client;
 mod error;
 mod id;
+/// The realtime channel: state that is true now, beside the log that is
+/// true for ever.
+pub mod live;
 mod migrate;
 mod mutation;
 mod proto;
@@ -117,6 +120,7 @@ pub fn settle<A: App, V: Views>(client: &mut Client<A>, views: &mut V) {
         Changes::Rebuilt => views.hydrate(&mut client.store()),
     }
 }
+pub use live::{Live, Peer, Post, Room};
 /// What `apply` sees of the entry beyond its arguments: the user and the
 /// session, as the log recorded them.
 pub use petros_schema::{Ctx, Session, User};

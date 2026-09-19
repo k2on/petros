@@ -67,6 +67,7 @@ fn sent(s: &mut Server<Todo>, to: u64) -> Vec<String> {
             ServerMsg::Ack { seqs, .. } => Some(format!("ack {seqs:?}")),
             ServerMsg::Reject { reason, .. } => Some(format!("reject: {reason}")),
             ServerMsg::Denied { reason } => Some(format!("denied: {reason}")),
+            ServerMsg::Heard { .. } => None,
         })
         .collect()
 }
